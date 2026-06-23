@@ -18,12 +18,6 @@
   --color-brand-900: #1e3a8a;
 }
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
 body {
   font-family: 'Geist Variable', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
