@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/agentic/mcp-proxy/internal/auth"
-	"github.com/agentic/mcp-proxy/internal/mcp"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/proxy"
 	"github.com/agentic/mcp-proxy/internal/store"
@@ -17,14 +16,22 @@ import (
 
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
-	store      *store.Store
-	proxy      *proxy.Manager
-	auth       *auth.AuthService
+	store         *store.Store
+	proxy         *proxy.Manager
+	auth          *auth.AuthService
+	sseManager    *sseSessionManager
+	streamManager *streamSessionManager
 }
 
 // New creates a new API Handlers instance.
 func New(s *store.Store, p *proxy.Manager, a *auth.AuthService) *Handlers {
-	return &Handlers{store: s, proxy: p, auth: a}
+	return &Handlers{
+		store:         s,
+		proxy:         p,
+		auth:          a,
+		sseManager:    newSSESessionManager(),
+		streamManager: newStreamSessionManager(),
+	}
 }
 
 // SetupRoutes registers all API routes on the given mux.
@@ -35,9 +42,27 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// OAuth callback (no auth — browser redirect)
 	mux.HandleFunc("GET /api/oauth/callback", h.handleOAuthCallback)
 
-	// MCP proxy endpoint (API key auth)
-	mux.Handle("POST /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxy)))
-	mux.Handle("GET /api/mcp/sse", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSE)))
+	// --- MCP client endpoints (API key auth) ---
+	// Global (all servers)
+	mux.Handle("POST /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyGlobal)))
+	mux.Handle("GET /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyGlobal)))
+	mux.Handle("DELETE /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyGlobal)))
+	mux.Handle("GET /api/sse", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSEConnectGlobal)))
+	mux.Handle("POST /api/messages", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSEMessageGlobal)))
+
+	// Per-server
+	mux.Handle("POST /api/servers/{id}/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyServer)))
+	mux.Handle("GET /api/servers/{id}/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyServer)))
+	mux.Handle("DELETE /api/servers/{id}/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyServer)))
+	mux.Handle("GET /api/servers/{id}/sse", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSEConnectServer)))
+	mux.Handle("POST /api/servers/{id}/messages", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSEMessageServer)))
+
+	// Per-compound
+	mux.Handle("POST /api/compounds/{id}/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyCompound)))
+	mux.Handle("GET /api/compounds/{id}/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyCompound)))
+	mux.Handle("DELETE /api/compounds/{id}/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyCompound)))
+	mux.Handle("GET /api/compounds/{id}/sse", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSEConnectCompound)))
+	mux.Handle("POST /api/compounds/{id}/messages", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSEMessageCompound)))
 
 	// Admin routes (JWT auth)
 	adminMux := http.NewServeMux()
@@ -101,75 +126,42 @@ func (h *Handlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- MCP Proxy ---
+// --- MCP Proxy (Streamable HTTP) ---
 
-func (h *Handlers) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
-	var req mcp.JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid JSON-RPC request")
-		return
-	}
-
-	// Extract compound_id from API key context (if any)
-	var compoundID string
+// extractScopeFromAPIKey builds a Scope from the API key's compound_id (if any).
+func extractScopeFromAPIKey(r *http.Request) proxy.Scope {
 	if apiKey, ok := auth.APIKeyFromContext(r.Context()).(*models.APIKey); ok && apiKey != nil {
 		if apiKey.CompoundID != nil {
-			compoundID = *apiKey.CompoundID
+			return proxy.Scope{CompoundID: *apiKey.CompoundID}
 		}
 	}
-
-	result, err := h.proxy.HandleJSONRPC(r.Context(), req, compoundID)
-	if err != nil {
-		resp := mcp.JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error: &mcp.RPCError{
-				Code:    -32603,
-				Message: err.Error(),
-			},
-		}
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-
-	resp := mcp.JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result:  result,
-	}
-	writeJSON(w, http.StatusOK, resp)
+	return proxy.Scope{}
 }
 
-func (h *Handlers) handleSSE(w http.ResponseWriter, r *http.Request) {
-	// Basic SSE support for MCP streaming
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+// handleMCPProxyGlobal handles POST/GET/DELETE /api/mcp (global scope — all servers).
+func (h *Handlers) handleMCPProxyGlobal(w http.ResponseWriter, r *http.Request) {
+	scope := extractScopeFromAPIKey(r)
+	h.handleStreamableHTTP(w, r, scope)
+}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "Streaming not supported")
+// handleMCPProxyServer handles POST/GET/DELETE /api/servers/{id}/mcp (single server scope).
+func (h *Handlers) handleMCPProxyServer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := h.store.GetServer(id); err != nil {
+		writeError(w, http.StatusNotFound, "Server not found")
 		return
 	}
+	h.handleStreamableHTTP(w, r, proxy.Scope{ServerID: id})
+}
 
-	// Send endpoint event
-	fmt.Fprintf(w, "event: endpoint\ndata: /api/mcp\n\n")
-	flusher.Flush()
-
-	// Keep connection alive
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fmt.Fprintf(w, ": ping\n\n")
-			flusher.Flush()
-		}
+// handleMCPProxyCompound handles POST/GET/DELETE /api/compounds/{id}/mcp (compound scope).
+func (h *Handlers) handleMCPProxyCompound(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := h.store.GetCompound(id); err != nil {
+		writeError(w, http.StatusNotFound, "Compound not found")
+		return
 	}
+	h.handleStreamableHTTP(w, r, proxy.Scope{CompoundID: id})
 }
 
 // --- Servers CRUD ---

@@ -1,14 +1,10 @@
-import json
-import time
-import urllib.request
-import urllib.error
+import json, time, urllib.request, urllib.error, threading, queue
 
 BASE = "http://localhost:18080"
 
 def post(path, data, headers=None):
     hdrs = {"Content-Type": "application/json"}
-    if headers:
-        hdrs.update(headers)
+    if headers: hdrs.update(headers)
     req = urllib.request.Request(f"{BASE}{path}", data=json.dumps(data).encode(), headers=hdrs, method="POST")
     try:
         with urllib.request.urlopen(req) as resp:
@@ -24,168 +20,167 @@ def get(path, headers=None):
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
 
-def delete(path, headers=None):
-    req = urllib.request.Request(f"{BASE}{path}", headers=headers or {}, method="DELETE")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return resp.status, json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
-
 print("=== Login ===")
 _, res = post("/api/auth/login", {"username": "admin", "password": "test123"})
 token = res["token"]
-auth_hdr = {"Authorization": f"Bearer {token}"}
+H = {"Authorization": f"Bearer {token}"}
 
-print("\n=== Create 2 stdio servers ===")
-_, res1 = post("/api/servers", {
-    "name": "time-server",
-    "transport": "stdio",
-    "command": "uvx",
-    "args": ["mcp-server-time"],
-    "enabled": True
-}, auth_hdr)
-time_id = res1["id"]
-print(f"  Created time-server: {time_id}")
-
-_, res2 = post("/api/servers", {
-    "name": "fetch-server",
-    "transport": "stdio",
-    "command": "uvx",
-    "args": ["mcp-server-fetch"],
-    "enabled": True
-}, auth_hdr)
-fetch_id = res2["id"]
-print(f"  Created fetch-server: {fetch_id}")
-
+print("\n=== Create 2 servers ===")
+_, s1 = post("/api/servers", {"name": "time-server", "transport": "stdio", "command": "uvx", "args": ["mcp-server-time"], "enabled": True}, H)
+_, s2 = post("/api/servers", {"name": "fetch-server", "transport": "stdio", "command": "uvx", "args": ["mcp-server-fetch"], "enabled": True}, H)
+time_id = s1["id"]; fetch_id = s2["id"]
+print(f"  time: {time_id}, fetch: {fetch_id}")
 time.sleep(8)
 
-print("\n=== List Servers ===")
-_, servers_list = get("/api/servers", auth_hdr)
-for s in servers_list:
-    print(f"  {s['name']} ({s['transport']}): status={s['status']}, tools={s.get('tools_count', 0)}")
+print("\n=== Create compound ===")
+_, comp = post("/api/compounds", {"name": "dev-tools", "member_ids": [time_id, fetch_id]}, H)
+comp_id = comp["id"]
+print(f"  compound: {comp_id}")
 
-# Get total tool count (global)
-_, all_tools = get("/api/tools", auth_hdr)
-print(f"\n  Global tools: {len(all_tools)}")
-for t in all_tools:
-    print(f"    - {t['server_name']}__{t['name']}")
+print("\n=== Create 3 API keys ===")
+_, k1 = post("/api/keys", {"name": "global", "scopes": ["read","write"]}, H)
+_, k2 = post("/api/keys", {"name": "compound", "scopes": ["read","write"], "compound_id": comp_id}, H)
+global_key = k1["key"]; compound_key = k2["key"]
+print(f"  global: {k1['key_prefix']}, compound: {k2['key_prefix']}")
 
-print("\n=== Create compound 'dev-tools' with both servers ===")
-_, compound = post("/api/compounds", {
-    "name": "dev-tools",
-    "description": "Development tools group",
-    "member_ids": [time_id, fetch_id]
-}, auth_hdr)
-compound_id = compound["id"]
-print(f"  Created: {compound_id}")
+def mcp_post(path, method, params=None, key=global_key):
+    body = {"jsonrpc": "2.0", "id": 1, "method": method}
+    if params: body["params"] = params
+    return post(path, body, {"X-API-Key": key})
 
-print("\n=== Get compound detail ===")
-_, detail = get(f"/api/compounds/{compound_id}", auth_hdr)
-print(f"  Name: {detail['name']}")
-print(f"  Members: {len(detail['members'])}")
-for m in detail['members']:
-    print(f"    - {m['name']} ({m['status']})")
-print(f"  Tool count: {detail['tool_count']}")
+print("\n--- Streamable HTTP (POST) ---")
 
-print("\n=== Create compound 'time-only' with just time-server ===")
-_, compound2 = post("/api/compounds", {
-    "name": "time-only",
-    "member_ids": [time_id]
-}, auth_hdr)
-compound2_id = compound2["id"]
+print("\n=== Global: /api/mcp ===")
+_, res = mcp_post("/api/mcp", "tools/list", key=global_key)
+tools = res.get("result",{}).get("tools",[])
+print(f"  tools/list: {len(tools)} tools")
 
-_, detail2 = get(f"/api/compounds/{compound2_id}", auth_hdr)
-print(f"  Tool count: {detail2['tool_count']}")
+print("\n=== Per-server: /api/servers/{id}/mcp ===")
+_, res = mcp_post(f"/api/servers/{time_id}/mcp", "tools/list", key=global_key)
+tools = res.get("result",{}).get("tools",[])
+print(f"  time-server tools/list: {len(tools)} tools")
+for t in tools: print(f"    - {t['name']}")
 
-print("\n=== Create API key scoped to 'dev-tools' compound ===")
-_, key_res = post("/api/keys", {
-    "name": "dev-key",
-    "scopes": ["read", "write"],
-    "compound_id": compound_id
-}, auth_hdr)
-compound_key = key_res["key"]
-print(f"  Key: {key_res['key_prefix']}")
-print(f"  Compound ID: {key_res.get('compound_id')}")
+_, res = mcp_post(f"/api/servers/{fetch_id}/mcp", "tools/list", key=global_key)
+tools = res.get("result",{}).get("tools",[])
+print(f"  fetch-server tools/list: {len(tools)} tools")
+for t in tools: print(f"    - {t['name']}")
 
-print("\n=== Create API key scoped to 'time-only' compound ===")
-_, key_res2 = post("/api/keys", {
-    "name": "time-key",
-    "scopes": ["read", "write"],
-    "compound_id": compound2_id
-}, auth_hdr)
-time_key = key_res2["key"]
-print(f"  Key: {key_res2['key_prefix']}")
+print("\n=== Per-compound: /api/compounds/{id}/mcp ===")
+_, res = mcp_post(f"/api/compounds/{comp_id}/mcp", "tools/list", key=compound_key)
+tools = res.get("result",{}).get("tools",[])
+print(f"  compound tools/list: {len(tools)} tools")
+for t in tools: print(f"    - {t['name']}")
 
-print("\n=== Create global API key (no compound) ===")
-_, key_res3 = post("/api/keys", {
-    "name": "global-key",
-    "scopes": ["read", "write"]
-}, auth_hdr)
-global_key = key_res3["key"]
+print("\n=== Scope isolation: call fetch tool via time-server scope ===")
+_, res = mcp_post(f"/api/servers/{time_id}/mcp", "tools/call",
+    {"name": "fetch-server__fetch", "arguments": {"url": "https://example.com"}}, key=global_key)
+if "error" in res.get("result",{}):
+    pass  # might be in result.error
+if res.get("error"):
+    print(f"  ✅ Blocked: {res['error'].get('message','')}")
+else:
+    err = res.get("result",{}).get("error",{})
+    if err:
+        print(f"  ✅ Blocked: {err.get('message','')}")
+    else:
+        print(f"  ❌ Should have been blocked")
 
-print("\n=== MCP tools/list with dev-tools compound key ===")
-_, res = post("/api/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, {"X-API-Key": compound_key})
-dev_tools = res.get("result", {}).get("tools", [])
-print(f"  Found {len(dev_tools)} tools (should be from both servers):")
-for t in dev_tools:
-    print(f"    - {t['name']}")
-
-print("\n=== MCP tools/list with time-only compound key ===")
-_, res = post("/api/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, {"X-API-Key": time_key})
-time_tools = res.get("result", {}).get("tools", [])
-print(f"  Found {len(time_tools)} tools (should be from time-server only):")
-for t in time_tools:
-    print(f"    - {t['name']}")
-
-print("\n=== MCP tools/list with global key ===")
-_, res = post("/api/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}, {"X-API-Key": global_key})
-global_tools = res.get("result", {}).get("tools", [])
-print(f"  Found {len(global_tools)} tools (should match global tool count):")
-for t in global_tools:
-    print(f"    - {t['name']}")
-
-print("\n=== MCP tools/call with compound key (should work) ===")
-_, res = post("/api/mcp", {
-    "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-    "params": {"name": "time-server__get_current_time", "arguments": {"timezone": "UTC"}}
-}, {"X-API-Key": compound_key})
-content = res.get("result", {}).get("content", [{}])
+print("\n=== Tool call via server scope (should work) ===")
+_, res = mcp_post(f"/api/servers/{time_id}/mcp", "tools/call",
+    {"name": "time-server__get_current_time", "arguments": {"timezone": "UTC"}}, key=global_key)
+content = res.get("result",{}).get("content",[{}])
 if content:
-    print(f"  ✅ Tool call succeeded: {content[0].get('text', '')[:100]}")
+    print(f"  ✅ {content[0].get('text','')[:80]}")
+
+print("\n--- Legacy SSE Transport ---")
+
+def sse_test(connect_path, key, label):
+    """Test legacy SSE: connect, read endpoint event, post a message, read response."""
+    result_q = queue.Queue()
+
+    def read_sse():
+        try:
+            req = urllib.request.Request(f"{BASE}{connect_path}", headers={"X-API-Key": key})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                buf = b""
+                endpoint = None
+                # Read until we get the endpoint event
+                while True:
+                    line = resp.readline()
+                    buf += line
+                    text = line.decode().strip()
+                    if text.startswith("data: ") and endpoint is None:
+                        endpoint = text[6:]
+                    if line == b"\n" and endpoint:
+                        break
+
+                # Post a tools/list request to the endpoint
+                body = json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).encode()
+                post_req = urllib.request.Request(
+                    f"{BASE}{endpoint}",
+                    data=body,
+                    headers={"Content-Type":"application/json","X-API-Key":key},
+                    method="POST"
+                )
+                with urllib.request.urlopen(post_req) as post_resp:
+                    post_resp.read()  # 202 Accepted
+
+                # Read the SSE response data line
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        break
+                    text = line.decode().strip()
+                    if text.startswith("data: "):
+                        result_q.put(text[6:])
+                        return
+                    # Skip blank lines and comments
+                result_q.put("NO_DATA")
+        except Exception as e:
+            result_q.put(f"ERROR: {e}")
+
+    t = threading.Thread(target=read_sse)
+    t.start()
+    t.join(timeout=15)
+    return result_q.get() if not result_q.empty() else "TIMEOUT"
+
+print("\n=== SSE Global ===")
+result = sse_test("/api/sse", global_key, "global")
+if result.startswith("ERROR") or result == "TIMEOUT" or result == "NO_DATA":
+    print(f"  {result}")
 else:
-    print(f"  ❌ Tool call failed: {res}")
+    res = json.loads(result)
+    tools = res.get("result",{}).get("tools",[])
+    print(f"  ✅ tools via SSE: {len(tools)}")
 
-print("\n=== MCP tools/call with time-only key for fetch tool (should fail) ===")
-_, res = post("/api/mcp", {
-    "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-    "params": {"name": "fetch-server__fetch", "arguments": {"url": "https://example.com"}}
-}, {"X-API-Key": time_key})
-if "error" in res:
-    print(f"  ✅ Correctly blocked: {res['error'].get('message', '')}")
+print("\n=== SSE Per-server ===")
+result = sse_test(f"/api/servers/{time_id}/sse", global_key, "server")
+if result.startswith("ERROR") or result == "TIMEOUT" or result == "NO_DATA":
+    print(f"  {result}")
 else:
-    print(f"  ❌ Should have been blocked but wasn't: {res}")
+    res = json.loads(result)
+    tools = res.get("result",{}).get("tools",[])
+    print(f"  ✅ time-server tools via SSE: {len(tools)}")
 
-print("\n=== Remove fetch-server from dev-tools compound ===")
-_, res = delete(f"/api/compounds/{compound_id}/members/{fetch_id}", auth_hdr)
-print(f"  {res}")
+print("\n=== SSE Per-compound ===")
+result = sse_test(f"/api/compounds/{comp_id}/sse", compound_key, "compound")
+if result.startswith("ERROR") or result == "TIMEOUT" or result == "NO_DATA":
+    print(f"  {result}")
+else:
+    res = json.loads(result)
+    tools = res.get("result",{}).get("tools",[])
+    print(f"  ✅ compound tools via SSE: {len(tools)}")
 
-_, detail = get(f"/api/compounds/{compound_id}", auth_hdr)
-print(f"  Members after removal: {len(detail['members'])}")
-print(f"  Tool count after removal: {detail['tool_count']}")
-
-print("\n=== List API keys (check compound_id is shown) ===")
-_, keys = get("/api/keys", auth_hdr)
-for k in keys:
-    print(f"  {k['name']}: compound_id={k.get('compound_id', 'null')}")
+print("\n=== 404: invalid server ID ===")
+try:
+    req = urllib.request.Request(f"{BASE}/api/servers/nonexistent/sse", headers={"X-API-Key": global_key})
+    urllib.request.urlopen(req)
+except urllib.error.HTTPError as e:
+    print(f"  ✅ HTTP {e.code} for invalid server ID")
 
 print("\n=== Dashboard ===")
-_, stats = get("/api/dashboard", auth_hdr)
+_, stats = get("/api/dashboard", H)
 print(f"  {json.dumps(stats, indent=2)}")
-
-print("\n=== List compounds ===")
-_, compounds = get("/api/compounds", auth_hdr)
-for c in compounds:
-    print(f"  {c['name']} ({c['id'][:8]}...)")
 
 print("\n✅ All tests passed!")

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Layers, ArrowLeft, Server, CheckCircle2, XCircle, X } from 'lucide-react';
+import { Plus, Trash2, Layers, ArrowLeft, Server, CheckCircle2, XCircle, X, Link as LinkIcon } from 'lucide-react';
 import { compounds as compoundsApi, servers as serversApi } from '../api/client';
 
 export default function CompoundServers() {
@@ -123,6 +123,25 @@ export default function CompoundServers() {
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Connection URLs */}
+        <div className="bg-slate-900 rounded-xl border border-slate-800 p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <LinkIcon className="w-4 h-4 text-brand-400" />
+            <h3 className="font-semibold text-white">Connection URLs</h3>
+          </div>
+          <p className="text-xs text-slate-500 mb-3">Use these endpoints with an API key to connect MCP clients to this compound.</p>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono px-1.5 py-0.5 bg-brand-950/50 text-brand-400 rounded">POST</span>
+              <code className="text-xs text-slate-300 font-mono break-all">/api/compounds/{selectedId}/mcp</code>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-mono px-1.5 py-0.5 bg-emerald-950/50 text-emerald-400 rounded">SSE</span>
+              <code className="text-xs text-slate-300 font-mono break-all">/api/compounds/{selectedId}/sse</code>
+            </div>
           </div>
         </div>
 
