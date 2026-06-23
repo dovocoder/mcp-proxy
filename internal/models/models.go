@@ -49,10 +49,11 @@ type User struct {
 
 // CompoundServer represents a named group of MCP servers.
 type CompoundServer struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description,omitempty"`
+	DictionaryMode bool      `json:"dictionary_mode"` // when true, expose a single dictionary tool instead of all member tools
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // CompoundServerWithMembers includes the member server IDs.
@@ -111,15 +112,17 @@ type CreateAPIKeyRequest struct {
 
 // CreateCompoundRequest is the payload for creating a compound server.
 type CreateCompoundRequest struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	MemberIDs   []string `json:"member_ids,omitempty"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description,omitempty"`
+	MemberIDs      []string `json:"member_ids,omitempty"`
+	DictionaryMode bool     `json:"dictionary_mode,omitempty"`
 }
 
 // UpdateCompoundRequest is the payload for updating a compound server.
 type UpdateCompoundRequest struct {
-	Name        *string  `json:"name,omitempty"`
-	Description *string  `json:"description,omitempty"`
+	Name           *string  `json:"name,omitempty"`
+	Description    *string  `json:"description,omitempty"`
+	DictionaryMode *bool    `json:"dictionary_mode,omitempty"`
 }
 
 // LoginRequest is the payload for admin login.

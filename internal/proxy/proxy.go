@@ -380,6 +380,27 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 	if scope.ServerID != "" {
 		allTools = m.ListToolsForServer(scope.ServerID)
 	} else if scope.CompoundID != "" {
+		// Check if compound has dictionary mode enabled
+		compound, err := m.store.GetCompound(scope.CompoundID)
+		if err == nil && compound != nil && compound.DictionaryMode {
+			// Dictionary mode: return the dictionary tool + memory tools (always available)
+			tools := []mcp.Tool{{
+				Name:        "dictionary",
+				Description: dictionaryDescription,
+				InputSchema: dictionarySchema,
+			}}
+			for _, mt := range m.memory.Tools() {
+				tools = append(tools, mcp.Tool{
+					Name:        memory.NamespacedName(mt.Name),
+					Description: fmt.Sprintf("[memory] %s", mt.Description),
+				})
+				if len(mt.InputSchema) > 0 {
+					tools[len(tools)-1].InputSchema = mt.InputSchema
+				}
+			}
+			result := mcp.ToolListResult{Tools: tools}
+			return json.Marshal(result)
+		}
 		allTools = m.ListToolsForCompound(scope.CompoundID)
 	} else {
 		allTools = m.listToolsFiltered(nil) // not ListTools() — that would double-add memory tools
@@ -430,6 +451,14 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 	// Check if this is a built-in memory tool
 	if baseName, ok := memory.ParseNamespaced(params.Name); ok {
 		return m.memory.HandleToolCall(baseName, params.Arguments)
+	}
+
+	// Check if this is a dictionary tool call (compound dictionary mode)
+	if params.Name == "dictionary" && scope.CompoundID != "" {
+		compound, err := m.store.GetCompound(scope.CompoundID)
+		if err == nil && compound != nil && compound.DictionaryMode {
+			return m.handleDictionaryCall(ctx, params.Arguments, scope)
+		}
 	}
 
 	// Parse namespaced tool name: "serverName__toolName"
@@ -764,4 +793,213 @@ func (m *Manager) StopAll() {
 		client.Disconnect()
 		delete(m.clients, id)
 	}
+}
+
+// --- Compound Dictionary Mode ---
+
+const dictionaryDescription = `Dictionary tool for compound servers. Instead of receiving all tools upfront, use this tool to discover, inspect, and call tools from member servers lazily.
+
+Actions (pass as "action" parameter):
+
+— list: List all available tools with names and descriptions (no schemas). Returns a lightweight catalog.
+  No additional parameters needed.
+
+— describe: Get the full input schema for a specific tool.
+  Required: tool (the tool name from list).
+
+— call: Execute a specific tool.
+  Required: tool (the tool name), arguments (JSON object of tool parameters).
+
+— search: Search tool names and descriptions by keyword.
+  Required: query (search term).
+
+Tool names are in "serverName__toolName" format. Use list or search to discover them, describe to inspect schemas, and call to execute.`
+
+var dictionarySchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"action": {
+			"type": "string",
+			"enum": ["list", "describe", "call", "search"],
+			"description": "The dictionary operation to perform"
+		},
+		"tool": {
+			"type": "string",
+			"description": "Tool name (for actions: describe, call). Use list/search to discover."
+		},
+		"arguments": {
+			"type": "object",
+			"description": "Tool arguments as a JSON object (for action: call)",
+			"additionalProperties": true
+		},
+		"query": {
+			"type": "string",
+			"description": "Search query (for action: search)"
+		}
+	},
+	"required": ["action"]
+}`)
+
+// handleDictionaryCall processes a dictionary tool call for a compound server.
+func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		Action    string          `json:"action"`
+		Tool      string          `json:"tool,omitempty"`
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+		Query     string          `json:"query,omitempty"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, fmt.Errorf("invalid dictionary arguments: %w", err)
+	}
+
+	allTools := m.ListToolsForCompound(scope.CompoundID)
+
+	switch params.Action {
+	case "list":
+		// Return lightweight catalog: name + description only
+		var catalog []map[string]string
+		for _, t := range allTools {
+			name := fmt.Sprintf("%s__%s", t.ServerName, t.Name)
+			catalog = append(catalog, map[string]string{
+				"name":        name,
+				"server":      t.ServerName,
+				"description": t.Description,
+			})
+		}
+		// Include memory tools in the catalog
+		for _, mt := range m.memory.Tools() {
+			catalog = append(catalog, map[string]string{
+				"name":        memory.NamespacedName(mt.Name),
+				"server":      "memory",
+				"description": mt.Description,
+			})
+		}
+		return wrapMCPContent(map[string]interface{}{
+			"tools": catalog,
+			"count": len(catalog),
+		})
+
+	case "describe":
+		if params.Tool == "" {
+			return nil, fmt.Errorf("tool parameter is required for describe action")
+		}
+		// Check memory tools first
+		if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
+			for _, mt := range m.memory.Tools() {
+				if mt.Name == baseName {
+					return wrapMCPContent(map[string]interface{}{
+						"name":         params.Tool,
+						"server":      "memory",
+						"description": mt.Description,
+						"inputSchema": mt.InputSchema,
+					})
+				}
+			}
+		}
+		// Find among member server tools
+		for _, t := range allTools {
+			name := fmt.Sprintf("%s__%s", t.ServerName, t.Name)
+			if name == params.Tool {
+				return wrapMCPContent(map[string]interface{}{
+					"name":         name,
+					"server":      t.ServerName,
+					"description": t.Description,
+					"inputSchema": t.InputSchema,
+				})
+			}
+		}
+		return nil, fmt.Errorf("tool not found: %s", params.Tool)
+
+	case "call":
+		if params.Tool == "" {
+			return nil, fmt.Errorf("tool parameter is required for call action")
+		}
+		// Check if it's a memory tool — route to memory handler directly
+		if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
+			return m.memory.HandleToolCall(baseName, params.Arguments)
+		}
+		// Route to the backend server — reuse the normal tool call path
+		serverName, toolName, err := parseNamespacedTool(params.Tool)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tool name format: %s (expected serverName__toolName)", params.Tool)
+		}
+		srv, err := m.store.GetServerByName(serverName)
+		if err != nil {
+			return nil, fmt.Errorf("server not found: %s", serverName)
+		}
+		// Verify server is a compound member
+		memberIDs, err := m.store.GetCompoundMemberIDs(scope.CompoundID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to verify compound membership: %w", err)
+		}
+		allowed := false
+		for _, mid := range memberIDs {
+			if mid == srv.ID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, fmt.Errorf("tool '%s' is not available in this compound", params.Tool)
+		}
+		m.mu.RLock()
+		client, ok := m.clients[srv.ID]
+		m.mu.RUnlock()
+		if !ok {
+			return nil, fmt.Errorf("server not connected: %s", serverName)
+		}
+		return client.CallTool(toolName, params.Arguments)
+
+	case "search":
+		if params.Query == "" {
+			return nil, fmt.Errorf("query parameter is required for search action")
+		}
+		query := strings.ToLower(params.Query)
+		var results []map[string]string
+		for _, t := range allTools {
+			name := fmt.Sprintf("%s__%s", t.ServerName, t.Name)
+			if strings.Contains(strings.ToLower(name), query) ||
+				strings.Contains(strings.ToLower(t.Description), query) ||
+				strings.Contains(strings.ToLower(t.ServerName), query) {
+				results = append(results, map[string]string{
+					"name":        name,
+					"server":      t.ServerName,
+					"description": t.Description,
+				})
+			}
+		}
+		// Search memory tools too
+		for _, mt := range m.memory.Tools() {
+			name := memory.NamespacedName(mt.Name)
+			if strings.Contains(strings.ToLower(name), query) ||
+				strings.Contains(strings.ToLower(mt.Description), query) {
+				results = append(results, map[string]string{
+					"name":        name,
+					"server":      "memory",
+					"description": mt.Description,
+				})
+			}
+		}
+		return wrapMCPContent(map[string]interface{}{
+			"results": results,
+			"count":   len(results),
+			"query":   params.Query,
+		})
+
+	default:
+		return nil, fmt.Errorf("unknown dictionary action: %s (valid: list, describe, call, search)", params.Action)
+	}
+}
+
+// wrapMCPContent wraps a result in MCP content format.
+func wrapMCPContent(result interface{}) (json.RawMessage, error) {
+	textBytes, _ := json.Marshal(result)
+	return json.Marshal(map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": string(textBytes),
+			},
+		},
+	})
 }

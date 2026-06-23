@@ -136,6 +136,12 @@ func migrate(db *sql.DB) error {
 		// Column already exists
 	}
 
+	// Migration: add dictionary_mode column to compound_servers
+	_, err = db.Exec(`ALTER TABLE compound_servers ADD COLUMN dictionary_mode INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		// Column already exists
+	}
+
 	return nil
 }
 
@@ -458,8 +464,12 @@ func scanAPIKeyImpl(s rowScanner) (*models.APIKey, error) {
 
 // CreateCompound inserts a new compound server and optionally adds members.
 func (s *Store) CreateCompound(c *models.CompoundServer, memberIDs []string) error {
-	_, err := s.db.Exec(`INSERT INTO compound_servers (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
-		c.ID, c.Name, c.Description, c.CreatedAt)
+	dictMode := 0
+	if c.DictionaryMode {
+		dictMode = 1
+	}
+	_, err := s.db.Exec(`INSERT INTO compound_servers (id, name, description, dictionary_mode, created_at) VALUES (?, ?, ?, ?, ?)`,
+		c.ID, c.Name, c.Description, dictMode, c.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -473,19 +483,21 @@ func (s *Store) CreateCompound(c *models.CompoundServer, memberIDs []string) err
 
 // GetCompound retrieves a compound server by ID (without members).
 func (s *Store) GetCompound(id string) (*models.CompoundServer, error) {
-	row := s.db.QueryRow(`SELECT id, name, description, created_at FROM compound_servers WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, name, description, dictionary_mode, created_at FROM compound_servers WHERE id = ?`, id)
 	var c models.CompoundServer
+	var dictMode int
 	var createdAt string
-	if err := row.Scan(&c.ID, &c.Name, &c.Description, &createdAt); err != nil {
+	if err := row.Scan(&c.ID, &c.Name, &c.Description, &dictMode, &createdAt); err != nil {
 		return nil, err
 	}
+	c.DictionaryMode = dictMode == 1
 	c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 	return &c, nil
 }
 
 // ListCompounds returns all compound servers.
 func (s *Store) ListCompounds() ([]*models.CompoundServer, error) {
-	rows, err := s.db.Query(`SELECT id, name, description, created_at FROM compound_servers ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT id, name, description, dictionary_mode, created_at FROM compound_servers ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -494,10 +506,12 @@ func (s *Store) ListCompounds() ([]*models.CompoundServer, error) {
 	var compounds []*models.CompoundServer
 	for rows.Next() {
 		var c models.CompoundServer
+		var dictMode int
 		var createdAt string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Description, &createdAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Description, &dictMode, &createdAt); err != nil {
 			return nil, err
 		}
+		c.DictionaryMode = dictMode == 1
 		c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 		compounds = append(compounds, &c)
 	}
@@ -535,15 +549,24 @@ func (s *Store) RemoveCompoundMember(compoundID, serverID string) error {
 	return err
 }
 
-// UpdateCompound updates a compound server's name and description.
-func (s *Store) UpdateCompound(id string, name, description *string) error {
-	if name != nil {
-		if _, err := s.db.Exec(`UPDATE compound_servers SET name = ? WHERE id = ?`, *name, id); err != nil {
+// UpdateCompound updates a compound server's name, description, and dictionary_mode.
+func (s *Store) UpdateCompound(id string, req *models.UpdateCompoundRequest) error {
+	if req.Name != nil {
+		if _, err := s.db.Exec(`UPDATE compound_servers SET name = ? WHERE id = ?`, *req.Name, id); err != nil {
 			return err
 		}
 	}
-	if description != nil {
-		if _, err := s.db.Exec(`UPDATE compound_servers SET description = ? WHERE id = ?`, *description, id); err != nil {
+	if req.Description != nil {
+		if _, err := s.db.Exec(`UPDATE compound_servers SET description = ? WHERE id = ?`, *req.Description, id); err != nil {
+			return err
+		}
+	}
+	if req.DictionaryMode != nil {
+		dictMode := 0
+		if *req.DictionaryMode {
+			dictMode = 1
+		}
+		if _, err := s.db.Exec(`UPDATE compound_servers SET dictionary_mode = ? WHERE id = ?`, dictMode, id); err != nil {
 			return err
 		}
 	}

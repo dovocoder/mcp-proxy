@@ -147,6 +147,7 @@ export interface CompoundServer {
   id: string;
   name: string;
   description?: string;
+  dictionary_mode: boolean;
   created_at: string;
 }
 
@@ -158,9 +159,9 @@ export interface CompoundServerWithMembers extends CompoundServer {
 export const compounds = {
   list: () => request<CompoundServer[]>('/compounds'),
   get: (id: string) => request<CompoundServerWithMembers>(`/compounds/${id}`),
-  create: (data: { name: string; description?: string; member_ids?: string[] }) =>
+  create: (data: { name: string; description?: string; member_ids?: string[]; dictionary_mode?: boolean }) =>
     request<CompoundServer>('/compounds', { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: { name?: string; description?: string }) =>
+  update: (id: string, data: { name?: string; description?: string; dictionary_mode?: boolean }) =>
     request<CompoundServer>(`/compounds/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: string) =>
     request<{ status: string }>(`/compounds/${id}`, { method: 'DELETE' }),

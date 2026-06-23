@@ -21,6 +21,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
 import {
   Select,
   SelectTrigger,
@@ -90,6 +91,15 @@ export default function CompoundServers() {
       compoundsApi.removeMember(compoundId, serverId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['compound', selectedId] });
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ compoundId, data }: { compoundId: string; data: { dictionary_mode?: boolean } }) =>
+      compoundsApi.update(compoundId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['compound', selectedId] });
+      queryClient.invalidateQueries({ queryKey: ['compounds'] });
     },
   });
 
@@ -236,6 +246,30 @@ export default function CompoundServers() {
                 {copiedUrl === sseUrl ? <Check /> : <Copy />}
               </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Dictionary mode */}
+        <Card>
+          <CardHeader className="border-b">
+            <CardTitle>Dictionary Mode</CardTitle>
+            <CardDescription>
+              When enabled, the compound exposes a single "dictionary" tool instead of listing all
+              member tools upfront. Clients discover and call tools lazily via the dictionary.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <div className="text-sm text-muted-foreground">
+              {detail.dictionary_mode
+                ? 'Dictionary mode is ON — clients see 1 tool instead of ' + detail.tool_count + '.'
+                : 'Dictionary mode is OFF — all ' + detail.tool_count + ' tools are listed directly.'}
+            </div>
+            <Switch
+              checked={detail.dictionary_mode}
+              onCheckedChange={(checked) =>
+                updateMutation.mutate({ compoundId: selectedId, data: { dictionary_mode: checked } })
+              }
+            />
           </CardContent>
         </Card>
 

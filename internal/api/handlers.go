@@ -453,10 +453,11 @@ func (h *Handlers) handleCreateCompound(w http.ResponseWriter, r *http.Request) 
 	}
 
 	compound := &models.CompoundServer{
-		ID:        uuid.NewString(),
-		Name:      req.Name,
-		Description: req.Description,
-		CreatedAt: time.Now(),
+		ID:             uuid.NewString(),
+		Name:           req.Name,
+		Description:    req.Description,
+		DictionaryMode: req.DictionaryMode,
+		CreatedAt:      time.Now(),
 	}
 
 	if err := h.store.CreateCompound(compound, req.MemberIDs); err != nil {
@@ -507,7 +508,7 @@ func (h *Handlers) handleUpdateCompound(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := h.store.UpdateCompound(id, req.Name, req.Description); err != nil {
+	if err := h.store.UpdateCompound(id, &req); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update compound: %v", err))
 		return
 	}
