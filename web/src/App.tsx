@@ -8,6 +8,7 @@ import ServerDetail from './pages/ServerDetail';
 import CompoundServersPage from './pages/CompoundServers';
 import APIKeysPage from './pages/APIKeys';
 import ToolsPage from './pages/Tools';
+import MemoriesPage from './pages/Memories';
 import { isAuthenticated, dashboard as dashboardApi } from './api/client';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="compounds/:id" element={<CompoundServersPage />} />
         <Route path="keys" element={<APIKeysPage />} />
         <Route path="tools" element={<ToolsPage />} />
+        <Route path="memories" element={<MemoriesPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

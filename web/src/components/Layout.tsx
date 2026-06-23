@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useNavigate, Outlet } from 'react-router-dom';
-import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu } from 'lucide-react';
+import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, Brain } from 'lucide-react';
 import { clearToken } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger, SheetClose } from '@/components/ui/sheet';
@@ -13,6 +13,7 @@ interface LayoutProps {
     total_tools: number;
     total_api_keys: number;
     total_compounds: number;
+    total_memories: number;
   };
 }
 
@@ -22,6 +23,7 @@ const navItems = [
   { to: '/compounds', label: 'Compounds', icon: Layers, end: false },
   { to: '/keys', label: 'API Keys', icon: KeyRound, end: false },
   { to: '/tools', label: 'Tools', icon: Wrench, end: false },
+  { to: '/memories', label: 'Memories', icon: Brain, end: false },
 ];
 
 export default function Layout({ stats }: LayoutProps) {
@@ -89,6 +91,10 @@ export default function Layout({ stats }: LayoutProps) {
             <div className="flex justify-between text-xs">
               <span className="text-muted-foreground">Compounds</span>
               <span className="text-sidebar-foreground font-medium">{stats.total_compounds}</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-muted-foreground">Memories</span>
+              <span className="text-sidebar-foreground font-medium">{stats.total_memories}</span>
             </div>
           </div>
         )}

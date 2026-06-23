@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Server as ServerIcon, KeyRound, Wrench, CheckCircle2, XCircle, Activity, Layers } from 'lucide-react';
+import { Server as ServerIcon, KeyRound, Wrench, CheckCircle2, XCircle, Activity, Layers, Brain } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { dashboard, servers as serversApi } from '../api/client';
 import { Card, CardContent } from '@/components/ui/card';
@@ -16,6 +16,7 @@ export default function Dashboard() {
     { label: 'Tools', value: stats?.total_tools ?? 0, icon: Wrench },
     { label: 'API Keys', value: stats?.total_api_keys ?? 0, icon: KeyRound },
     { label: 'Compounds', value: stats?.total_compounds ?? 0, icon: Layers },
+    { label: 'Memories', value: stats?.total_memories ?? 0, icon: Brain },
   ];
 
   return (
@@ -26,7 +27,7 @@ export default function Dashboard() {
       </div>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
         {cards.map((card) => (
           <Card key={card.label}>
             <CardContent className="flex flex-col gap-2">

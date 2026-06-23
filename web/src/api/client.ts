@@ -178,8 +178,44 @@ export interface DashboardStats {
   total_tools: number;
   total_api_keys: number;
   total_compounds: number;
+  total_memories: number;
 }
 
 export const dashboard = {
   stats: () => request<DashboardStats>('/dashboard'),
+};
+
+// --- Memories ---
+
+export interface Memory {
+  id: string;
+  palace: string;
+  room: string;
+  content: string;
+  tags: string[];
+  importance: number;
+  access_count: number;
+  created_at: string;
+  updated_at: string;
+  last_accessed?: string;
+}
+
+export interface Palace {
+  palace: string;
+  count: number;
+}
+
+export const memories = {
+  list: (palace?: string) =>
+    request<Memory[]>(`/memories${palace ? `?palace=${encodeURIComponent(palace)}` : ''}`),
+  get: (id: string) => request<Memory>(`/memories/${id}`),
+  create: (data: { palace?: string; room?: string; content: string; tags?: string[]; importance?: number }) =>
+    request<Memory>('/memories', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<{ palace: string; room: string; content: string; tags: string[]; importance: number }>) =>
+    request<Memory>(`/memories/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/memories/${id}`, { method: 'DELETE' }),
+  palaces: () => request<Palace[]>('/memories/palaces'),
+  search: (query: string) =>
+    request<Memory[]>(`/memories/search?q=${encodeURIComponent(query)}`),
 };

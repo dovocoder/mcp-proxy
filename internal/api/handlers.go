@@ -102,6 +102,15 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("POST /api/compounds/{id}/members/{serverId}", h.handleAddCompoundMember)
 	adminMux.HandleFunc("DELETE /api/compounds/{id}/members/{serverId}", h.handleRemoveCompoundMember)
 
+	// Memory routes
+	adminMux.HandleFunc("GET /api/memories", h.handleListMemories)
+	adminMux.HandleFunc("POST /api/memories", h.handleCreateMemory)
+	adminMux.HandleFunc("GET /api/memories/{id}", h.handleGetMemory)
+	adminMux.HandleFunc("PUT /api/memories/{id}", h.handleUpdateMemory)
+	adminMux.HandleFunc("DELETE /api/memories/{id}", h.handleDeleteMemory)
+	adminMux.HandleFunc("GET /api/memories/palaces", h.handleListPalaces)
+	adminMux.HandleFunc("GET /api/memories/search", h.handleSearchMemories)
+
 	mux.Handle("/api/", h.auth.JWTMiddleware(adminMux))
 }
 
@@ -384,6 +393,7 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	servers, _ := h.store.ListServers()
 	keys, _ := h.store.ListAPIKeys()
 	compounds, _ := h.store.ListCompounds()
+	memCount, _ := h.store.CountMemories()
 	tools := h.proxy.ListTools()
 
 	connected := 0
@@ -400,6 +410,7 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TotalTools:       len(tools),
 		TotalAPIKeys:     len(keys),
 		TotalCompounds:   len(compounds),
+		TotalMemories:    memCount,
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -654,4 +665,120 @@ func SplitPath(path string) []string {
 		return nil
 	}
 	return strings.Split(path, "/")
+}
+
+// --- Memories ---
+
+func (h *Handlers) handleListMemories(w http.ResponseWriter, r *http.Request) {
+	palace := r.URL.Query().Get("palace")
+	memories, err := h.store.ListMemories(palace)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list memories")
+		return
+	}
+	if memories == nil {
+		memories = []*models.Memory{}
+	}
+	writeJSON(w, http.StatusOK, memories)
+}
+
+func (h *Handlers) handleCreateMemory(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateMemoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Content == "" {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	if req.Palace == "" {
+		req.Palace = "general"
+	}
+	importance := 50
+	if req.Importance != nil {
+		importance = *req.Importance
+	}
+	if req.Tags == nil {
+		req.Tags = []string{}
+	}
+	now := time.Now()
+	mem := &models.Memory{
+		ID:         "mem_" + uuid.NewString(),
+		Palace:     req.Palace,
+		Room:       req.Room,
+		Content:    req.Content,
+		Tags:       req.Tags,
+		Importance: importance,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := h.store.CreateMemory(mem); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to create memory")
+		return
+	}
+	writeJSON(w, http.StatusCreated, mem)
+}
+
+func (h *Handlers) handleGetMemory(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mem, err := h.store.GetMemory(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Memory not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, mem)
+}
+
+func (h *Handlers) handleUpdateMemory(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req models.UpdateMemoryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if err := h.store.UpdateMemory(id, &req); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to update memory")
+		return
+	}
+	mem, _ := h.store.GetMemory(id)
+	writeJSON(w, http.StatusOK, mem)
+}
+
+func (h *Handlers) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteMemory(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to delete memory")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handlers) handleListPalaces(w http.ResponseWriter, r *http.Request) {
+	palaces, err := h.store.ListPalaces()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list palaces")
+		return
+	}
+	if palaces == nil {
+		palaces = []map[string]interface{}{}
+	}
+	writeJSON(w, http.StatusOK, palaces)
+}
+
+func (h *Handlers) handleSearchMemories(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		writeError(w, http.StatusBadRequest, "Query parameter 'q' is required")
+		return
+	}
+	memories, err := h.store.SearchMemories(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Search failed")
+		return
+	}
+	if memories == nil {
+		memories = []*models.Memory{}
+	}
+	writeJSON(w, http.StatusOK, memories)
 }

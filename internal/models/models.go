@@ -151,4 +151,40 @@ type DashboardStats struct {
 	TotalTools       int `json:"total_tools"`
 	TotalAPIKeys     int `json:"total_api_keys"`
 	TotalCompounds   int `json:"total_compounds"`
+	TotalMemories    int `json:"total_memories"`
+}
+
+// Memory represents a stored memory in the built-in memory server.
+// Inspired by MemPalace (spatial organization via palaces/rooms),
+// Hindsight (importance scoring, access tracking), and Chronical
+// memory (time-based chronicle with created/updated timestamps).
+type Memory struct {
+	ID          string     `json:"id"`
+	Palace      string     `json:"palace"`            // top-level category (MemPalace)
+	Room        string     `json:"room"`             // sub-category within a palace
+	Content     string     `json:"content"`          // the memory text
+	Tags        []string   `json:"tags"`             // searchable tags
+	Importance  int        `json:"importance"`        // 0-100, hindsight-style scoring
+	AccessCount int        `json:"access_count"`      // times recalled (hindsight)
+	CreatedAt   time.Time  `json:"created_at"`        // chronicle start
+	UpdatedAt   time.Time  `json:"updated_at"`        // last modified
+	LastAccessed *time.Time `json:"last_accessed,omitempty"` // last recalled (hindsight)
+}
+
+// CreateMemoryRequest is the payload for creating a memory.
+type CreateMemoryRequest struct {
+	Palace     string   `json:"palace"`
+	Room       string   `json:"room,omitempty"`
+	Content    string   `json:"content"`
+	Tags       []string `json:"tags,omitempty"`
+	Importance *int     `json:"importance,omitempty"`
+}
+
+// UpdateMemoryRequest is the payload for updating a memory.
+type UpdateMemoryRequest struct {
+	Palace     *string  `json:"palace,omitempty"`
+	Room       *string  `json:"room,omitempty"`
+	Content    *string  `json:"content,omitempty"`
+	Tags       *[]string `json:"tags,omitempty"`
+	Importance *int     `json:"importance,omitempty"`
 }

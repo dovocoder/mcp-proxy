@@ -103,6 +103,21 @@ func migrate(db *sql.DB) error {
 		server_id TEXT NOT NULL,
 		PRIMARY KEY (compound_id, server_id)
 	);
+
+	CREATE TABLE IF NOT EXISTS memories (
+		id TEXT PRIMARY KEY,
+		palace TEXT NOT NULL DEFAULT 'general',
+		room TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL,
+		tags TEXT NOT NULL DEFAULT '[]',
+		importance INTEGER NOT NULL DEFAULT 50,
+		access_count INTEGER NOT NULL DEFAULT 0,
+		last_accessed DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_memories_palace ON memories(palace);
+	CREATE INDEX IF NOT EXISTS idx_memories_content ON memories(content);
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -555,4 +570,157 @@ func (s *Store) DeleteCompound(id string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// --- Memories ---
+
+// CreateMemory inserts a new memory.
+func (s *Store) CreateMemory(mem *models.Memory) error {
+	tagsJSON, _ := json.Marshal(mem.Tags)
+	_, err := s.db.Exec(`
+		INSERT INTO memories (id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		mem.ID, mem.Palace, mem.Room, mem.Content, string(tagsJSON),
+		mem.Importance, mem.AccessCount, mem.LastAccessed,
+		mem.CreatedAt, mem.UpdatedAt,
+	)
+	return err
+}
+
+// GetMemory retrieves a memory by ID.
+func (s *Store) GetMemory(id string) (*models.Memory, error) {
+	row := s.db.QueryRow(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE id = ?`, id)
+	return scanMemory(row)
+}
+
+// ListMemories retrieves memories, optionally filtered by palace.
+func (s *Store) ListMemories(palace string) ([]*models.Memory, error) {
+	var rows *sql.Rows
+	var err error
+	if palace != "" {
+		rows, err = s.db.Query(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE palace = ? ORDER BY importance DESC, updated_at DESC`, palace)
+	} else {
+		rows, err = s.db.Query(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories ORDER BY importance DESC, updated_at DESC`)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// SearchMemories performs a full-text search on memory content and tags.
+func (s *Store) SearchMemories(query string) ([]*models.Memory, error) {
+	likeQuery := "%" + query + "%"
+	rows, err := s.db.Query(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE content LIKE ? OR tags LIKE ? ORDER BY importance DESC, updated_at DESC`, likeQuery, likeQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// ListPalaces returns distinct palace names with memory counts.
+func (s *Store) ListPalaces() ([]map[string]interface{}, error) {
+	rows, err := s.db.Query(`SELECT palace, COUNT(*) as cnt FROM memories GROUP BY palace ORDER BY palace`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []map[string]interface{}
+	for rows.Next() {
+		var palace string
+		var cnt int
+		if err := rows.Scan(&palace, &cnt); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]interface{}{"palace": palace, "count": cnt})
+	}
+	return result, nil
+}
+
+// UpdateMemory updates a memory's fields.
+func (s *Store) UpdateMemory(id string, req *models.UpdateMemoryRequest) error {
+	mem, err := s.GetMemory(id)
+	if err != nil {
+		return err
+	}
+	if req.Palace != nil {
+		mem.Palace = *req.Palace
+	}
+	if req.Room != nil {
+		mem.Room = *req.Room
+	}
+	if req.Content != nil {
+		mem.Content = *req.Content
+	}
+	if req.Tags != nil {
+		mem.Tags = *req.Tags
+	}
+	if req.Importance != nil {
+		mem.Importance = *req.Importance
+	}
+	tagsJSON, _ := json.Marshal(mem.Tags)
+	_, err = s.db.Exec(`UPDATE memories SET palace = ?, room = ?, content = ?, tags = ?, importance = ?, updated_at = ? WHERE id = ?`,
+		mem.Palace, mem.Room, mem.Content, string(tagsJSON), mem.Importance, time.Now(), id)
+	return err
+}
+
+// TouchMemory increments access count and updates last_accessed (hindsight-style).
+func (s *Store) TouchMemory(id string) error {
+	_, err := s.db.Exec(`UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?`, time.Now(), id)
+	return err
+}
+
+// DeleteMemory removes a memory.
+func (s *Store) DeleteMemory(id string) error {
+	_, err := s.db.Exec(`DELETE FROM memories WHERE id = ?`, id)
+	return err
+}
+
+// CountMemories returns the total number of stored memories.
+func (s *Store) CountMemories() (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&count)
+	return count, err
+}
+
+func scanMemory(row *sql.Row) (*models.Memory, error) {
+	var mem models.Memory
+	var tagsJSON string
+	var lastAccessed sql.NullTime
+	err := row.Scan(&mem.ID, &mem.Palace, &mem.Room, &mem.Content, &tagsJSON, &mem.Importance, &mem.AccessCount, &lastAccessed, &mem.CreatedAt, &mem.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(tagsJSON), &mem.Tags)
+	if mem.Tags == nil {
+		mem.Tags = []string{}
+	}
+	if lastAccessed.Valid {
+		mem.LastAccessed = &lastAccessed.Time
+	}
+	return &mem, nil
+}
+
+func scanMemories(rows *sql.Rows) ([]*models.Memory, error) {
+	var result []*models.Memory
+	for rows.Next() {
+		var mem models.Memory
+		var tagsJSON string
+		var lastAccessed sql.NullTime
+		if err := rows.Scan(&mem.ID, &mem.Palace, &mem.Room, &mem.Content, &tagsJSON, &mem.Importance, &mem.AccessCount, &lastAccessed, &mem.CreatedAt, &mem.UpdatedAt); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(tagsJSON), &mem.Tags)
+		if mem.Tags == nil {
+			mem.Tags = []string{}
+		}
+		if lastAccessed.Valid {
+			mem.LastAccessed = &lastAccessed.Time
+		}
+		result = append(result, &mem)
+	}
+	return result, nil
 }

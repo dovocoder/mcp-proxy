@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/agentic/mcp-proxy/internal/mcp"
+	"github.com/agentic/mcp-proxy/internal/memory"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/store"
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ import (
 // Manager manages all backend MCP server connections.
 type Manager struct {
 	store       *store.Store
+	memory      *memory.Server
 	mu          sync.RWMutex
 	clients     map[string]*mcp.Client         // serverID -> client
 	errors      map[string]string              // serverID -> last error message
@@ -30,6 +32,7 @@ type Manager struct {
 func New(s *store.Store) *Manager {
 	return &Manager{
 		store:       s,
+		memory:      memory.New(s),
 		clients:     make(map[string]*mcp.Client),
 		errors:      make(map[string]string),
 		authStates:  make(map[string]*mcp.AuthState),
@@ -274,9 +277,24 @@ type Scope struct {
 	CompoundID string
 }
 
-// ListTools returns all tools from all connected servers.
+// ListTools returns all tools from all connected servers plus built-in memory tools.
 func (m *Manager) ListTools() []models.Tool {
-	return m.listToolsFiltered(nil)
+	tools := m.listToolsFiltered(nil)
+	// Add memory tools as virtual "memory" server tools
+	for _, mt := range m.memory.Tools() {
+		tools = append(tools, models.Tool{
+			ServerID:    "builtin-memory",
+			ServerName:  "memory",
+			Name:        mt.Name,
+			Description: mt.Description,
+		})
+	}
+	return tools
+}
+
+// Memory returns the built-in memory server instance.
+func (m *Manager) Memory() *memory.Server {
+	return m.memory
 }
 
 // ListToolsForServer returns tools from a single server.
@@ -364,7 +382,7 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 	} else if scope.CompoundID != "" {
 		allTools = m.ListToolsForCompound(scope.CompoundID)
 	} else {
-		allTools = m.ListTools()
+		allTools = m.listToolsFiltered(nil) // not ListTools() — that would double-add memory tools
 	}
 	var mcpTools []mcp.Tool
 	for _, t := range allTools {
@@ -380,6 +398,19 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 		}
 		mcpTools = append(mcpTools, tool)
 	}
+
+	// Add built-in memory tools (always available, not scoped)
+	for _, mt := range m.memory.Tools() {
+		tool := mcp.Tool{
+			Name:        memory.NamespacedName(mt.Name),
+			Description: fmt.Sprintf("[memory] %s", mt.Description),
+		}
+		if len(mt.InputSchema) > 0 {
+			tool.InputSchema = mt.InputSchema
+		}
+		mcpTools = append(mcpTools, tool)
+	}
+
 	if mcpTools == nil {
 		mcpTools = []mcp.Tool{}
 	}
@@ -394,6 +425,11 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, fmt.Errorf("invalid tools/call params: %w", err)
+	}
+
+	// Check if this is a built-in memory tool
+	if baseName, ok := memory.ParseNamespaced(params.Name); ok {
+		return m.memory.HandleToolCall(baseName, params.Arguments)
 	}
 
 	// Parse namespaced tool name: "serverName__toolName"
