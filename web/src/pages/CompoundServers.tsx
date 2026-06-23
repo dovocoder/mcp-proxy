@@ -102,7 +102,7 @@ export default function CompoundServers() {
     const sseUrl = `/api/compounds/${selectedId}/sse`;
 
     return (
-      <div className="space-y-6 pb-20 lg:pb-0">
+      <div className="space-y-6">
         {/* Header */}
         <div className="flex items-start gap-3 sm:gap-4">
           <Link to="/compounds" className="shrink-0">
@@ -267,7 +267,7 @@ export default function CompoundServers() {
 
   // --- List view ---
   return (
-    <div className="space-y-6 pb-20 lg:pb-0">
+    <div className="space-y-6">
       {/* Header */}
       <div className="flex items-start sm:items-center justify-between gap-4">
         <div className="min-w-0">

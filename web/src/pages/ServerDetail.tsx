@@ -185,7 +185,7 @@ export default function ServerDetail() {
         : 'Not authenticated';
 
   return (
-    <div className="space-y-6 pb-20 lg:pb-0">
+    <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center gap-3 sm:gap-4">
         <Button variant="ghost" size="icon" render={<Link to="/servers" />} className="shrink-0">

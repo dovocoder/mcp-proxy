@@ -170,7 +170,7 @@ export default function Layout({ stats }: LayoutProps) {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto">
-        <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto pb-20 lg:pb-8">
+        <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto pb-16 lg:pb-8">
           <Outlet />
         </div>
       </main>
