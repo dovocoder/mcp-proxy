@@ -16,18 +16,20 @@ import (
 
 // Manager manages all backend MCP server connections.
 type Manager struct {
-	store   *store.Store
-	mu      sync.RWMutex
-	clients map[string]*mcp.Client // serverID -> client
-	errors  map[string]string     // serverID -> last error message
+	store      *store.Store
+	mu         sync.RWMutex
+	clients    map[string]*mcp.Client // serverID -> client
+	errors     map[string]string     // serverID -> last error message
+	authStates map[string]*mcp.AuthState // serverID -> pending OAuth flow
 }
 
 // New creates a new proxy Manager.
 func New(s *store.Store) *Manager {
 	return &Manager{
-		store:   s,
-		clients: make(map[string]*mcp.Client),
-		errors:  make(map[string]string),
+		store:      s,
+		clients:    make(map[string]*mcp.Client),
+		errors:     make(map[string]string),
+		authStates: make(map[string]*mcp.AuthState),
 	}
 }
 
@@ -49,6 +51,31 @@ func (m *Manager) StartAll() {
 
 // connectServer establishes a connection to a backend server.
 func (m *Manager) connectServer(srv *models.Server) {
+	// For HTTP transports, check if we have stored OAuth tokens
+	authToken := srv.AuthToken
+
+	if srv.Transport == "http" || srv.Transport == "streamable-http" {
+		tokens, cid, csec, err := m.store.GetOAuthTokens(srv.ID)
+		if err == nil && tokens != nil {
+			// Check if token needs refresh
+			if tokens.IsExpired() && tokens.HasRefreshToken() {
+				// Need metadata for refresh endpoint
+				meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
+				if meta != nil && meta.TokenEndpoint != "" {
+					refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
+					if err == nil {
+						tokens = refreshed
+						_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
+						log.Printf("Refreshed OAuth token for server %s", srv.Name)
+					} else {
+						log.Printf("Failed to refresh OAuth token for %s: %v", srv.Name, err)
+					}
+				}
+			}
+			authToken = tokens.AccessToken
+			}
+	}
+
 	cfg := mcp.ClientConfig{
 		Transport:      srv.Transport,
 		Command:        srv.Command,
@@ -56,7 +83,7 @@ func (m *Manager) connectServer(srv *models.Server) {
 		Env:            srv.Env,
 		URL:            srv.URL,
 		Headers:        srv.Headers,
-		AuthToken:      srv.AuthToken,
+		AuthToken:      authToken,
 		Timeout:        srv.Timeout,
 		ConnectTimeout: srv.ConnectTimeout,
 	}
@@ -351,6 +378,146 @@ func parseNamespacedTool(namespaced string) (string, string, error) {
 		}
 	}
 	return "", "", fmt.Errorf("invalid tool name format, expected 'serverName__toolName'")
+}
+
+// InitiateAuth starts the OAuth flow for a server. Returns the authorization URL
+// the user should open in their browser.
+func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string, error) {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil {
+		return "", fmt.Errorf("server not found: %w", err)
+	}
+
+	if srv.Transport != "http" && srv.Transport != "streamable-http" {
+		return "", fmt.Errorf("OAuth only supported for http/streamable-http transports")
+	}
+
+	// Discover OAuth metadata
+	metadata, err := mcp.DiscoverOAuthMetadata(srv.URL)
+	if err != nil {
+		return "", fmt.Errorf("failed to discover OAuth metadata: %w", err)
+	}
+
+	redirectURI := fmt.Sprintf("%s/api/oauth/callback", callbackBaseURL)
+	var clientID, clientSecret string
+
+	// Try dynamic client registration if endpoint exists
+	if metadata.RegistrationEndpoint != "" {
+		reg, err := mcp.RegisterClient(metadata.RegistrationEndpoint, []string{redirectURI})
+		if err == nil {
+			clientID = reg.ClientID
+			clientSecret = reg.ClientSecret
+			log.Printf("Dynamically registered OAuth client for server %s: %s", srv.Name, clientID)
+		} else {
+			log.Printf("Dynamic registration failed for %s: %v", srv.Name, err)
+		}
+	}
+
+	// If no client ID from registration, check if the server config has an auth_token
+	// that could be a pre-configured client ID (stored in auth_token field)
+	if clientID == "" && srv.AuthToken != "" {
+		// Use the configured auth_token as a static client ID
+		clientID = srv.AuthToken
+		log.Printf("Using configured client ID for server %s", srv.Name)
+	}
+
+	if clientID == "" {
+		return "", fmt.Errorf("no client ID available — dynamic registration not supported by the authorization server. Configure a client_id in the server's Auth Token field, or register an OAuth app in your identity provider (e.g., Microsoft Entra ID) and enter the client ID")
+	}
+
+	// Generate PKCE
+	pkce, err := mcp.GeneratePKCE()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate PKCE: %w", err)
+	}
+
+	// Generate state
+	state, err := mcp.GenerateState()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate state: %w", err)
+	}
+
+	// Build authorization URL
+	scopes := metadata.ScopesSupported
+	authURL, err := mcp.BuildAuthURL(metadata, clientID, redirectURI, pkce, scopes, state)
+	if err != nil {
+		return "", fmt.Errorf("failed to build auth URL: %w", err)
+	}
+
+	// Store auth state
+	authState := &mcp.AuthState{
+		ServerID:              serverID,
+		AuthURL:               authURL,
+		PKCE:                  pkce,
+		RedirectURI:           redirectURI,
+		ClientID:              clientID,
+		ClientSecret:          clientSecret,
+		TokenEndpoint:         metadata.TokenEndpoint,
+		AuthorizationEndpoint: metadata.AuthorizationEndpoint,
+		Metadata:              metadata,
+		CreatedAt:             time.Now(),
+	}
+
+	m.mu.Lock()
+	m.authStates[state] = authState
+	m.mu.Unlock()
+
+	return authURL, nil
+}
+
+// HandleAuthCallback processes the OAuth callback, exchanges the code for tokens,
+// stores them, and reconnects the server.
+func (m *Manager) HandleAuthCallback(state, code string) error {
+	m.mu.Lock()
+	authState, ok := m.authStates[state]
+	if ok {
+		delete(m.authStates, state)
+	}
+	m.mu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("invalid or expired OAuth state")
+	}
+
+	// Exchange code for tokens
+	tokens, err := mcp.ExchangeCodeForToken(
+		authState.TokenEndpoint,
+		authState.ClientID,
+		authState.ClientSecret,
+		code,
+		authState.RedirectURI,
+		authState.PKCE.Verifier,
+	)
+	if err != nil {
+		return fmt.Errorf("token exchange failed: %w", err)
+	}
+
+	// Store tokens
+	if err := m.store.SaveOAuthTokens(authState.ServerID, tokens, authState.ClientID, authState.ClientSecret); err != nil {
+		return fmt.Errorf("failed to save tokens: %w", err)
+	}
+
+	log.Printf("OAuth tokens stored for server %s", authState.ServerID)
+
+	// Reconnect the server with the new token
+	srv, err := m.store.GetServer(authState.ServerID)
+	if err != nil {
+		return fmt.Errorf("server not found after auth: %w", err)
+	}
+
+	m.DisconnectServer(authState.ServerID)
+	go m.connectServer(srv)
+
+	return nil
+}
+
+// GetAuthStatus returns the OAuth status for a server.
+func (m *Manager) GetAuthStatus(serverID string) (hasTokens bool, expired bool) {
+	tokens, _, _, err := m.store.GetOAuthTokens(serverID)
+	if err != nil || tokens == nil {
+		return false, false
+	}
+	return true, tokens.IsExpired()
 }
 
 // StopAll disconnects all servers.

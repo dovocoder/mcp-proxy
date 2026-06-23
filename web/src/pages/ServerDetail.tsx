@@ -1,11 +1,13 @@
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, RefreshCw, Trash2, Wrench } from 'lucide-react';
+import { ArrowLeft, RefreshCw, Trash2, Wrench, LogIn, ShieldCheck, ShieldAlert, ExternalLink } from 'lucide-react';
 import { servers as serversApi, tools as toolsApi } from '../api/client';
+import { useState } from 'react';
 
 export default function ServerDetail() {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
 
   const { data } = useQuery({
     queryKey: ['server', id],
@@ -18,6 +20,15 @@ export default function ServerDetail() {
     queryFn: toolsApi.list,
   });
 
+  const isHTTP = data?.server.transport === 'http' || data?.server.transport === 'streamable-http';
+
+  const { data: authStatus } = useQuery({
+    queryKey: ['auth-status', id],
+    queryFn: () => serversApi.authStatus(id!),
+    enabled: !!id && isHTTP,
+    refetchInterval: 5000,
+  });
+
   const reconnectMutation = useMutation({
     mutationFn: () => serversApi.reconnect(id!),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['server', id] }),
@@ -28,6 +39,14 @@ export default function ServerDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       window.history.back();
+    },
+  });
+
+  const authMutation = useMutation({
+    mutationFn: () => serversApi.initiateAuth(id!),
+    onSuccess: (res) => {
+      setAuthUrl(res.auth_url);
+      window.open(res.auth_url, '_blank');
     },
   });
 
@@ -60,6 +79,56 @@ export default function ServerDetail() {
       {data.live_error && (
         <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/50 rounded-lg px-4 py-3">
           {data.live_error}
+        </div>
+      )}
+
+      {/* OAuth Authentication (for HTTP transports) */}
+      {isHTTP && (
+        <div className="bg-slate-900 rounded-xl border border-slate-800 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              {authStatus?.status === 'valid' ? (
+                <ShieldCheck className="w-5 h-5 text-emerald-400" />
+              ) : authStatus?.status === 'expired' ? (
+                <ShieldAlert className="w-5 h-5 text-amber-400" />
+              ) : (
+                <ShieldAlert className="w-5 h-5 text-slate-500" />
+              )}
+              <h3 className="font-semibold text-white">OAuth Authentication</h3>
+            </div>
+            <button
+              onClick={() => authMutation.mutate()}
+              disabled={authMutation.isPending}
+              className="flex items-center gap-2 px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              <LogIn className="w-4 h-4" />
+              {authStatus?.status === 'valid' ? 'Re-authenticate' : 'Authenticate with Entra ID'}
+            </button>
+          </div>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-slate-500">Status:</span>
+            <span className={`font-medium ${
+              authStatus?.status === 'valid' ? 'text-emerald-400' :
+              authStatus?.status === 'expired' ? 'text-amber-400' : 'text-slate-400'
+            }`}>
+              {authStatus?.status === 'valid' ? 'Authenticated' :
+               authStatus?.status === 'expired' ? 'Token expired — re-authenticate' :
+               'Not authenticated'}
+            </span>
+          </div>
+          {authMutation.error && (
+            <div className="mt-2 text-xs text-red-400">
+              {authMutation.error instanceof Error ? authMutation.error.message : 'Failed to initiate auth'}
+            </div>
+          )}
+          {authUrl && (
+            <div className="mt-2 text-xs text-slate-500">
+              If the browser didn't open,{' '}
+              <a href={authUrl} target="_blank" rel="noopener noreferrer" className="text-brand-400 hover:text-brand-300 inline-flex items-center gap-1">
+                click here to authenticate <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          )}
         </div>
       )}
 

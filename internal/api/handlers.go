@@ -32,6 +32,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Auth routes (no auth required)
 	mux.HandleFunc("POST /api/auth/login", h.handleLogin)
 
+	// OAuth callback (no auth — browser redirect)
+	mux.HandleFunc("GET /api/oauth/callback", h.handleOAuthCallback)
+
 	// MCP proxy endpoint (API key auth)
 	mux.Handle("POST /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxy)))
 	mux.Handle("GET /api/mcp/sse", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleSSE)))
@@ -44,6 +47,8 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PUT /api/servers/{id}", h.handleUpdateServer)
 	adminMux.HandleFunc("DELETE /api/servers/{id}", h.handleDeleteServer)
 	adminMux.HandleFunc("POST /api/servers/{id}/reconnect", h.handleReconnectServer)
+	adminMux.HandleFunc("POST /api/servers/{id}/auth", h.handleInitiateAuth)
+	adminMux.HandleFunc("GET /api/servers/{id}/auth-status", h.handleAuthStatus)
 
 	adminMux.HandleFunc("GET /api/keys", h.handleListAPIKeys)
 	adminMux.HandleFunc("POST /api/keys", h.handleCreateAPIKey)
@@ -385,6 +390,75 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// --- OAuth ---
+
+func (h *Handlers) handleInitiateAuth(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	// Build callback base URL from the request
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	// Check X-Forwarded-Proto for reverse proxy scenarios
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	callbackBaseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+
+	authURL, err := h.proxy.InitiateAuth(id, callbackBaseURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"auth_url": authURL,
+		"message":  "Open the auth_url in your browser to authenticate",
+	})
+}
+
+func (h *Handlers) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	state := r.URL.Query().Get("state")
+	code := r.URL.Query().Get("code")
+
+	if state == "" || code == "" {
+		writeError(w, http.StatusBadRequest, "Missing state or code parameter")
+		return
+	}
+
+	if err := h.proxy.HandleAuthCallback(state, code); err != nil {
+		// Return an HTML page so the browser shows a readable result
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, err.Error())
+		return
+	}
+
+	// Return success HTML page
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`<!DOCTYPE html><html><body><h2>✅ Authentication Successful</h2><p>You can close this window and return to MCP Proxy.</p><script>setTimeout(() => window.close(), 3000);</script></body></html>`))
+}
+
+func (h *Handlers) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	hasTokens, expired := h.proxy.GetAuthStatus(id)
+
+	status := "none"
+	if hasTokens && !expired {
+		status = "valid"
+	} else if hasTokens && expired {
+		status = "expired"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":     status,
+		"has_tokens": hasTokens,
+		"expired":    expired,
+	})
 }
 
 // SplitPath splits a URL path into segments.

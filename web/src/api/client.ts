@@ -78,6 +78,10 @@ export const servers = {
     request<{ status: string }>(`/servers/${id}`, { method: 'DELETE' }),
   reconnect: (id: string) =>
     request<{ status: string }>(`/servers/${id}/reconnect`, { method: 'POST' }),
+  initiateAuth: (id: string) =>
+    request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
+  authStatus: (id: string) =>
+    request<{ status: string; has_tokens: boolean; expired: boolean }>(`/servers/${id}/auth-status`),
 };
 
 // --- API Keys ---

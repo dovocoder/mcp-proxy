@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/agentic/mcp-proxy/internal/mcp"
 	"github.com/agentic/mcp-proxy/internal/models"
 
 	_ "modernc.org/sqlite"
@@ -76,6 +77,18 @@ func migrate(db *sql.DB) error {
 		password_hash TEXT NOT NULL,
 		role TEXT NOT NULL DEFAULT 'admin',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS oauth_tokens (
+		server_id TEXT PRIMARY KEY,
+		access_token TEXT NOT NULL,
+		token_type TEXT NOT NULL DEFAULT 'Bearer',
+		refresh_token TEXT NOT NULL DEFAULT '',
+		expires_at DATETIME,
+		scope TEXT NOT NULL DEFAULT '',
+		client_id TEXT NOT NULL DEFAULT '',
+		client_secret TEXT NOT NULL DEFAULT '',
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	`
 	_, err := db.Exec(schema)
@@ -271,6 +284,55 @@ func (s *Store) GetUserByUsername(username string) (*models.User, error) {
 	}
 	user.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 	return &user, nil
+}
+
+// --- OAuth Tokens ---
+
+// SaveOAuthTokens stores or updates OAuth tokens for a server.
+func (s *Store) SaveOAuthTokens(serverID string, tokens *mcp.OAuthTokens, clientID, clientSecret string) error {
+	var expiresAt interface{}
+	if !tokens.ExpiresAt.IsZero() {
+		expiresAt = tokens.ExpiresAt
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO oauth_tokens (server_id, access_token, token_type, refresh_token, expires_at, scope, client_id, client_secret, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(server_id) DO UPDATE SET
+			access_token = excluded.access_token,
+			token_type = excluded.token_type,
+			refresh_token = excluded.refresh_token,
+			expires_at = excluded.expires_at,
+			scope = excluded.scope,
+			client_id = excluded.client_id,
+			client_secret = excluded.client_secret,
+			updated_at = excluded.updated_at
+	`,
+		serverID, tokens.AccessToken, tokens.TokenType, tokens.RefreshToken,
+		expiresAt, tokens.Scope, clientID, clientSecret, time.Now(),
+	)
+	return err
+}
+
+// GetOAuthTokens retrieves stored OAuth tokens for a server.
+func (s *Store) GetOAuthTokens(serverID string) (*mcp.OAuthTokens, string, string, error) {
+	row := s.db.QueryRow(`SELECT access_token, token_type, refresh_token, expires_at, scope, client_id, client_secret FROM oauth_tokens WHERE server_id = ?`, serverID)
+	var t mcp.OAuthTokens
+	var clientID, clientSecret string
+	var expiresAt sql.NullTime
+	err := row.Scan(&t.AccessToken, &t.TokenType, &t.RefreshToken, &expiresAt, &t.Scope, &clientID, &clientSecret)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if expiresAt.Valid {
+		t.ExpiresAt = expiresAt.Time
+	}
+	return &t, clientID, clientSecret, nil
+}
+
+// DeleteOAuthTokens removes OAuth tokens for a server.
+func (s *Store) DeleteOAuthTokens(serverID string) error {
+	_, err := s.db.Exec(`DELETE FROM oauth_tokens WHERE server_id = ?`, serverID)
+	return err
 }
 
 // --- Scanner helpers ---
