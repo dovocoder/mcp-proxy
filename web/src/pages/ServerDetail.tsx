@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -12,15 +13,53 @@ import {
   Link as LinkIcon,
   Copy,
   Check,
+  Loader2,
 } from 'lucide-react';
-import { servers as serversApi, tools as toolsApi } from '../api/client';
-import { useState } from 'react';
+import { servers as serversApi, tools as toolsApi, type DeviceAuthResult } from '../api/client';
+import { cn } from '../lib/utils';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardAction,
+  CardContent,
+} from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Separator } from '@/components/ui/separator';
+
+function statusBadge(status: string) {
+  if (status === 'connected') return <Badge variant="default">{status}</Badge>;
+  if (status === 'error') return <Badge variant="destructive">{status}</Badge>;
+  return <Badge variant="secondary">{status}</Badge>;
+}
+
+function ConfigRow({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <dt className="text-sm text-muted-foreground shrink-0">{label}</dt>
+      <dd
+        className={cn(
+          'text-sm text-foreground text-right break-all min-w-0',
+          mono && 'font-mono'
+        )}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
 
 export default function ServerDetail() {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
-  const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+  const [deviceAuth, setDeviceAuth] = useState<DeviceAuthResult | null>(null);
+  const [devicePolling, setDevicePolling] = useState(false);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -34,10 +73,7 @@ export default function ServerDetail() {
     enabled: !!id,
   });
 
-  const { data: allTools } = useQuery({
-    queryKey: ['tools'],
-    queryFn: toolsApi.list,
-  });
+  const { data: allTools } = useQuery({ queryKey: ['tools'], queryFn: toolsApi.list });
 
   const isHTTP =
     data?.server.transport === 'http' || data?.server.transport === 'streamable-http';
@@ -62,15 +98,44 @@ export default function ServerDetail() {
     },
   });
 
-  const authMutation = useMutation({
-    mutationFn: () => serversApi.initiateAuth(id!),
-    onSuccess: (res) => {
-      setAuthUrl(res.auth_url);
-      window.open(res.auth_url, '_blank');
-    },
-  });
+  const initiateDeviceAuth = async () => {
+    if (!id) return;
+    setDeviceError(null);
+    try {
+      const res = await serversApi.initiateDeviceAuth(id);
+      setDeviceAuth(res);
+      setDevicePolling(true);
+      void pollDeviceAuth(id, res.interval || 5);
+    } catch (err) {
+      setDeviceError(err instanceof Error ? err.message : 'Failed to start device auth');
+    }
+  };
 
-  if (!data) return <div className="text-slate-500 p-4">Loading...</div>;
+  const pollDeviceAuth = async (serverId: string, interval: number) => {
+    try {
+      const res = await serversApi.pollDeviceAuth(serverId);
+      if (res.completed) {
+        setDevicePolling(false);
+        setDeviceAuth(null);
+        queryClient.invalidateQueries({ queryKey: ['auth-status', serverId] });
+        queryClient.invalidateQueries({ queryKey: ['server', serverId] });
+        return;
+      }
+      if (res.expired) {
+        setDevicePolling(false);
+        setDeviceAuth(null);
+        setDeviceError('Device authentication expired. Please try again.');
+        return;
+      }
+      setTimeout(() => void pollDeviceAuth(serverId, interval), interval * 1000);
+    } catch (err) {
+      setDevicePolling(false);
+      setDeviceAuth(null);
+      setDeviceError(err instanceof Error ? err.message : 'Device auth polling failed');
+    }
+  };
+
+  if (!data) return <div className="text-muted-foreground p-4">Loading...</div>;
 
   const srv = data.server;
   const serverTools = allTools?.filter((t) => t.server_id === id) || [];
@@ -78,246 +143,260 @@ export default function ServerDetail() {
   const mcpUrl = `/api/servers/${id}/mcp`;
   const sseUrl = `/api/servers/${id}/sse`;
 
-  const renderCopyButton = (url: string) => (
-    <button
-      onClick={() => copyToClipboard(url)}
-      className="flex-shrink-0 p-2 min-h-[40px] min-w-[40px] flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors"
-      aria-label="Copy to clipboard"
-    >
-      {copiedUrl === url ? (
-        <Check className="w-4 h-4 text-emerald-400" />
-      ) : (
-        <Copy className="w-4 h-4" />
-      )}
-    </button>
+  const renderCopyField = (label: string, method: string, url: string) => (
+    <div className="grid gap-1.5">
+      <Label className="flex items-center gap-2">
+        <span
+          className={cn(
+            'rounded px-1.5 py-0.5 font-mono text-xs',
+            method === 'POST'
+              ? 'bg-primary/15 text-primary'
+              : 'bg-emerald-500/15 text-emerald-400'
+          )}
+        >
+          {method}
+        </span>
+        <span className="text-xs text-muted-foreground">{label}</span>
+      </Label>
+      <div className="flex items-center gap-2">
+        <Input readOnly value={url} className="font-mono text-xs" />
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => copyToClipboard(url)}
+          aria-label="Copy to clipboard"
+          className="shrink-0"
+        >
+          {copiedUrl === url ? (
+            <Check className="size-4 text-emerald-400" />
+          ) : (
+            <Copy className="size-4" />
+          )}
+        </Button>
+      </div>
+    </div>
   );
+
+  const authStatusLabel =
+    authStatus?.status === 'valid'
+      ? 'Authenticated'
+      : authStatus?.status === 'expired'
+        ? 'Token expired — re-authenticate'
+        : 'Not authenticated';
 
   return (
     <div className="space-y-6 pb-20 lg:pb-0">
       {/* Header */}
       <div className="flex items-center gap-3 sm:gap-4">
-        <Link
-          to="/servers"
-          className="flex-shrink-0 p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
-        >
-          <ArrowLeft className="w-5 h-5" />
-        </Link>
+        <Button variant="ghost" size="icon" render={<Link to="/servers" />} className="shrink-0">
+          <ArrowLeft className="size-5" />
+        </Button>
         <div className="flex-1 min-w-0">
-          <h1 className="text-xl sm:text-2xl font-bold text-white truncate">{srv.name}</h1>
-          <p className="text-sm text-slate-500 mt-1">{srv.transport} transport</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-foreground truncate">{srv.name}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{srv.transport} transport</p>
         </div>
-        <span
-          className={`flex-shrink-0 text-xs font-medium px-3 py-1 rounded-full ${
-            srv.status === 'connected'
-              ? 'bg-emerald-950/50 text-emerald-400'
-              : srv.status === 'error'
-              ? 'bg-red-950/50 text-red-400'
-              : 'bg-slate-800 text-slate-400'
-          }`}
-        >
-          {srv.status}
-        </span>
+        {statusBadge(srv.status)}
       </div>
 
       {data.live_error && (
-        <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/50 rounded-xl px-4 py-3 break-words">
+        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive break-words">
           {data.live_error}
         </div>
       )}
 
-      {/* OAuth Authentication (for HTTP transports) */}
+      {/* OAuth Authentication */}
       {isHTTP && (
-        <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-5">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+        <Card>
+          <CardHeader>
             <div className="flex items-center gap-2">
               {authStatus?.status === 'valid' ? (
-                <ShieldCheck className="w-5 h-5 text-emerald-400 flex-shrink-0" />
-              ) : authStatus?.status === 'expired' ? (
-                <ShieldAlert className="w-5 h-5 text-amber-400 flex-shrink-0" />
+                <ShieldCheck className="size-5 text-emerald-400 shrink-0" />
               ) : (
-                <ShieldAlert className="w-5 h-5 text-slate-500 flex-shrink-0" />
+                <ShieldAlert className="size-5 text-amber-400 shrink-0" />
               )}
-              <h3 className="font-semibold text-white">OAuth Authentication</h3>
+              <div>
+                <CardTitle>OAuth Authentication</CardTitle>
+                <CardDescription>
+                  Status:{' '}
+                  <span
+                    className={cn(
+                      'font-medium',
+                      authStatus?.status === 'valid'
+                        ? 'text-emerald-400'
+                        : authStatus?.status === 'expired'
+                          ? 'text-amber-400'
+                          : 'text-muted-foreground'
+                    )}
+                  >
+                    {authStatusLabel}
+                  </span>
+                </CardDescription>
+              </div>
             </div>
-            <button
-              onClick={() => authMutation.mutate()}
-              disabled={authMutation.isPending}
-              className="flex items-center justify-center gap-2 px-4 py-2 min-h-[40px] bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
-            >
-              <LogIn className="w-4 h-4 flex-shrink-0" />
-              {authStatus?.status === 'valid' ? 'Re-authenticate' : 'Sign in with Microsoft'}
-            </button>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-slate-500">Status:</span>
-            <span
-              className={`font-medium ${
-                authStatus?.status === 'valid'
-                  ? 'text-emerald-400'
-                  : authStatus?.status === 'expired'
-                  ? 'text-amber-400'
-                  : 'text-slate-400'
-              }`}
-            >
-              {authStatus?.status === 'valid'
-                ? 'Authenticated'
-                : authStatus?.status === 'expired'
-                ? 'Token expired — re-authenticate'
-                : 'Not authenticated'}
-            </span>
-          </div>
-          <p className="text-xs text-slate-500 mt-2">
-            No client_id needed — just sign in with your Microsoft account
-          </p>
-          {authMutation.error && (
-            <div className="mt-2 text-xs text-red-400 break-words">
-              {authMutation.error instanceof Error
-                ? authMutation.error.message
-                : 'Failed to initiate auth'}
-            </div>
-          )}
-          {authUrl && (
-            <div className="mt-2 text-xs text-slate-500 break-words">
-              If the browser didn't open,{' '}
-              <a
-                href={authUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-brand-400 hover:text-brand-300 inline-flex items-center gap-1"
+            <CardAction>
+              <Button
+                onClick={initiateDeviceAuth}
+                disabled={devicePolling}
+                size="sm"
               >
-                click here to authenticate <ExternalLink className="w-3 h-3 flex-shrink-0" />
-              </a>
-            </div>
-          )}
-        </div>
+                {devicePolling ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <LogIn className="size-4" />
+                )}
+                {authStatus?.status === 'valid' ? 'Re-authenticate' : 'Sign in with Microsoft'}
+              </Button>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              No client_id needed — just sign in with your Microsoft account.
+            </p>
+
+            {deviceError && (
+              <div className="text-xs text-destructive break-words">{deviceError}</div>
+            )}
+
+            {deviceAuth && (
+              <div className="rounded-lg border border-border bg-muted/40 p-4 space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Visit the link below and enter this code:
+                </p>
+                <div className="text-center">
+                  <div className="font-mono text-3xl sm:text-4xl font-bold tracking-[0.2em] text-foreground">
+                    {deviceAuth.user_code}
+                  </div>
+                </div>
+                <div className="text-center">
+                  <a
+                    href={deviceAuth.verification_uri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-primary hover:underline break-all"
+                  >
+                    {deviceAuth.verification_uri}
+                    <ExternalLink className="size-4 shrink-0" />
+                  </a>
+                </div>
+                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  Polling for completion...
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Connection URLs */}
-      <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-5">
-        <div className="flex items-center gap-2 mb-3">
-          <LinkIcon className="w-4 h-4 text-brand-400 flex-shrink-0" />
-          <h3 className="font-semibold text-white">Connection URLs</h3>
-        </div>
-        <p className="text-xs text-slate-500 mb-3">
-          Use these endpoints with an API key to connect MCP clients to this specific server.
-        </p>
-        <div className="space-y-2">
+      <Card>
+        <CardHeader>
           <div className="flex items-center gap-2">
-            <span className="flex-shrink-0 text-xs font-mono px-1.5 py-0.5 bg-brand-950/50 text-brand-400 rounded">
-              POST
-            </span>
-            <code className="flex-1 text-xs text-slate-300 font-mono break-all">{mcpUrl}</code>
-            {renderCopyButton(mcpUrl)}
+            <LinkIcon className="size-4 text-primary shrink-0" />
+            <div>
+              <CardTitle>Connection URLs</CardTitle>
+              <CardDescription>
+                Use these endpoints with an API key to connect MCP clients to this server.
+              </CardDescription>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="flex-shrink-0 text-xs font-mono px-1.5 py-0.5 bg-emerald-950/50 text-emerald-400 rounded">
-              SSE
-            </span>
-            <code className="flex-1 text-xs text-slate-300 font-mono break-all">{sseUrl}</code>
-            {renderCopyButton(sseUrl)}
-          </div>
-        </div>
-      </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {renderCopyField('MCP endpoint', 'POST', mcpUrl)}
+          <Separator />
+          {renderCopyField('SSE endpoint', 'SSE', sseUrl)}
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
         {/* Configuration */}
-        <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-6">
-          <h2 className="font-semibold text-white mb-4">Configuration</h2>
-          <dl className="space-y-3">
-            <div className="flex justify-between gap-4">
-              <dt className="text-sm text-slate-500 flex-shrink-0">Transport</dt>
-              <dd className="text-sm text-slate-300 font-mono truncate text-right">{srv.transport}</dd>
-            </div>
-            {srv.transport === 'stdio' ? (
-              <>
-                <div className="flex justify-between gap-4">
-                  <dt className="text-sm text-slate-500 flex-shrink-0">Command</dt>
-                  <dd className="text-sm text-slate-300 font-mono truncate text-right">{srv.command}</dd>
+        <Card>
+          <CardHeader>
+            <CardTitle>Configuration</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <dl className="space-y-3">
+              <ConfigRow label="Transport" value={srv.transport} mono />
+              {srv.transport === 'stdio' ? (
+                <>
+                  <ConfigRow label="Command" value={srv.command} mono />
+                  {srv.args && srv.args.length > 0 && (
+                    <div className="grid gap-1">
+                      <dt className="text-sm text-muted-foreground">Args</dt>
+                      <dd className="rounded-lg bg-muted px-3 py-2 text-sm text-foreground font-mono break-all">
+                        {srv.args.join(' ')}
+                      </dd>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <ConfigRow label="URL" value={srv.url} mono />
+              )}
+              <ConfigRow label="Timeout" value={`${srv.timeout}s`} />
+              <ConfigRow label="Connect Timeout" value={`${srv.connect_timeout}s`} />
+              <ConfigRow label="Enabled" value={srv.enabled ? 'Yes' : 'No'} />
+              {srv.env && Object.keys(srv.env).length > 0 && (
+                <div className="grid gap-1">
+                  <dt className="text-sm text-muted-foreground">Environment</dt>
+                  <dd className="rounded-lg bg-muted px-3 py-2 text-sm text-foreground font-mono whitespace-pre-line break-all">
+                    {Object.keys(srv.env)
+                      .map((k) => `${k}=***`)
+                      .join('\n')}
+                  </dd>
                 </div>
-                {srv.args && srv.args.length > 0 && (
-                  <div>
-                    <dt className="text-sm text-slate-500 mb-1">Args</dt>
-                    <dd className="text-sm text-slate-300 font-mono bg-slate-800 rounded-lg px-3 py-2 break-all">
-                      {srv.args.join(' ')}
-                    </dd>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="flex justify-between gap-4">
-                <dt className="text-sm text-slate-500 flex-shrink-0">URL</dt>
-                <dd className="text-sm text-slate-300 font-mono truncate text-right">{srv.url}</dd>
-              </div>
-            )}
-            <div className="flex justify-between gap-4">
-              <dt className="text-sm text-slate-500 flex-shrink-0">Timeout</dt>
-              <dd className="text-sm text-slate-300">{srv.timeout}s</dd>
-            </div>
-            <div className="flex justify-between gap-4">
-              <dt className="text-sm text-slate-500 flex-shrink-0">Connect Timeout</dt>
-              <dd className="text-sm text-slate-300">{srv.connect_timeout}s</dd>
-            </div>
-            <div className="flex justify-between gap-4">
-              <dt className="text-sm text-slate-500 flex-shrink-0">Enabled</dt>
-              <dd className="text-sm text-slate-300">{srv.enabled ? 'Yes' : 'No'}</dd>
-            </div>
-            {srv.env && Object.keys(srv.env).length > 0 && (
-              <div>
-                <dt className="text-sm text-slate-500 mb-1">Environment</dt>
-                <dd className="text-sm text-slate-300 font-mono bg-slate-800 rounded-lg px-3 py-2 break-all whitespace-pre-line">
-                  {Object.keys(srv.env)
-                    .map((k) => `${k}=***`)
-                    .join('\n')}
-                </dd>
-              </div>
-            )}
-            {srv.auth_token && (
-              <div className="flex justify-between gap-4">
-                <dt className="text-sm text-slate-500 flex-shrink-0">Auth Token</dt>
-                <dd className="text-sm text-slate-300 font-mono">••••••••••••</dd>
-              </div>
-            )}
-          </dl>
-
-          <div className="flex flex-wrap gap-3 mt-6">
-            <button
-              onClick={() => reconnectMutation.mutate()}
-              className="flex items-center gap-2 px-4 py-2 min-h-[40px] bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium transition-colors"
-            >
-              <RefreshCw className="w-4 h-4 flex-shrink-0" />
+              )}
+              {srv.auth_token && <ConfigRow label="Auth Token" value="••••••••••••" mono />}
+            </dl>
+          </CardContent>
+          <Separator />
+          <CardContent className="flex flex-wrap gap-3 pt-4">
+            <Button onClick={() => reconnectMutation.mutate()} disabled={reconnectMutation.isPending}>
+              <RefreshCw className={cn('size-4', reconnectMutation.isPending && 'animate-spin')} />
               Reconnect
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="destructive"
               onClick={() => deleteMutation.mutate()}
-              className="flex items-center gap-2 px-4 py-2 min-h-[40px] bg-red-950/50 hover:bg-red-900/50 text-red-400 border border-red-900 rounded-lg font-medium transition-colors"
+              disabled={deleteMutation.isPending}
             >
-              <Trash2 className="w-4 h-4 flex-shrink-0" />
+              <Trash2 className="size-4" />
               Delete
-            </button>
-          </div>
-        </div>
+            </Button>
+          </CardContent>
+        </Card>
 
         {/* Tools */}
-        <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-6">
-          <div className="flex items-center gap-2 mb-4">
-            <Wrench className="w-4 h-4 text-slate-400 flex-shrink-0" />
-            <h2 className="font-semibold text-white">Tools ({serverTools.length})</h2>
-          </div>
-          <div className="space-y-2 max-h-96 overflow-y-auto">
-            {serverTools.length === 0 ? (
-              <p className="text-sm text-slate-500 text-center py-8">No tools discovered</p>
-            ) : (
-              serverTools.map((tool) => (
-                <div key={tool.name} className="bg-slate-800 rounded-lg px-4 py-3">
-                  <div className="font-medium text-white text-sm truncate">{tool.name}</div>
-                  {tool.description && (
-                    <div className="text-xs text-slate-500 mt-1 break-words">{tool.description}</div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Wrench className="size-4 text-muted-foreground shrink-0" />
+              <CardTitle>Tools ({serverTools.length})</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+              {serverTools.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">
+                  No tools discovered
+                </p>
+              ) : (
+                serverTools.map((tool) => (
+                  <div
+                    key={tool.name}
+                    className="rounded-lg bg-muted px-4 py-3 break-words"
+                  >
+                    <div className="font-medium text-foreground text-sm truncate">{tool.name}</div>
+                    {tool.description && (
+                      <div className="text-xs text-muted-foreground mt-1 break-words">
+                        {tool.description}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );

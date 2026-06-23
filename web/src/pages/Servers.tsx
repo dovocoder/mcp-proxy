@@ -1,8 +1,61 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Plus, Trash2, RefreshCw, Server as ServerIcon, Cloud, Zap, Terminal } from 'lucide-react';
+import {
+  Plus,
+  Trash2,
+  RefreshCw,
+  Server as ServerIcon,
+  Cloud,
+  Zap,
+  Terminal,
+  ChevronRight,
+} from 'lucide-react';
 import { servers as serversApi, type Server } from '../api/client';
+import { cn } from '../lib/utils';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardAction,
+  CardContent,
+  CardFooter,
+} from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Separator } from '@/components/ui/separator';
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from '@/components/ui/select';
+import {
+  Dialog,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from '@/components/ui/dialog';
+
+type Transport = 'stdio' | 'streamable-http' | 'http';
+
+interface PresetConfig {
+  name: string;
+  transport: Transport;
+  command?: string;
+  args?: string;
+  url?: string;
+  urlHint?: string;
+}
 
 const PRESETS = [
   {
@@ -15,7 +68,7 @@ const PRESETS = [
       transport: 'streamable-http',
       url: 'https://mcp.dev.azure.com/',
       urlHint: 'https://mcp.dev.azure.com/{your-organization}',
-    },
+    } as PresetConfig,
   },
   {
     id: 'azure-devops-local',
@@ -27,7 +80,7 @@ const PRESETS = [
       transport: 'stdio',
       command: 'npx',
       args: '-y @azure-devops/mcp',
-    },
+    } as PresetConfig,
   },
   {
     id: 'github',
@@ -39,7 +92,7 @@ const PRESETS = [
       transport: 'stdio',
       command: 'npx',
       args: '-y @modelcontextprotocol/server-github',
-    },
+    } as PresetConfig,
   },
   {
     id: 'custom',
@@ -48,12 +101,18 @@ const PRESETS = [
     description: 'Configure manually',
     config: null,
   },
-];
+] as const;
+
+function statusBadge(status: string) {
+  if (status === 'connected') return <Badge variant="default">{status}</Badge>;
+  if (status === 'error') return <Badge variant="destructive">{status}</Badge>;
+  return <Badge variant="secondary">{status}</Badge>;
+}
 
 export default function Servers() {
   const queryClient = useQueryClient();
   const { data: srvList } = useQuery({ queryKey: ['servers'], queryFn: serversApi.list });
-  const [showForm, setShowForm] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [preset, setPreset] = useState<string | null>(null);
 
   const deleteMutation = useMutation({
@@ -66,154 +125,168 @@ export default function Servers() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
   });
 
-  const handleAddClick = () => {
-    setShowForm(true);
-    setPreset(null);
+  const handleOpenChange = (open: boolean) => {
+    setDialogOpen(open);
+    if (!open) setPreset(null);
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-white">Servers</h1>
-          <p className="text-slate-500 mt-1 text-sm">Manage backend MCP server connections</p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-bold text-foreground truncate">Servers</h1>
+          <p className="text-muted-foreground mt-1 text-sm">Manage backend MCP server connections</p>
         </div>
-        <button
-          onClick={handleAddClick}
-          className="flex items-center gap-2 px-3 sm:px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium text-sm transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          <span className="hidden sm:inline">Add Server</span>
-          <span className="sm:hidden">Add</span>
-        </button>
+        <Dialog open={dialogOpen} onOpenChange={handleOpenChange}>
+          <DialogTrigger
+            render={
+              <Button size="sm" className="shrink-0">
+                <Plus className="size-4" />
+                <span className="hidden sm:inline">Add Server</span>
+                <span className="sm:hidden">Add</span>
+              </Button>
+            }
+          />
+          <DialogContent className="sm:max-w-lg">
+            {!preset ? (
+              <>
+                <DialogHeader>
+                  <DialogTitle>Choose a preset</DialogTitle>
+                  <DialogDescription>
+                    Pick a template to pre-fill the server form, or start from scratch.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid grid-cols-2 gap-3">
+                  {PRESETS.map((p) => {
+                    const Icon = p.icon;
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => setPreset(p.id)}
+                        className="flex flex-col items-center gap-2 rounded-lg border border-border bg-background p-4 text-center transition-colors hover:bg-muted hover:border-primary/50"
+                      >
+                        <Icon className="size-6 text-primary" />
+                        <div className="font-medium text-foreground text-sm">{p.name}</div>
+                        <div className="text-xs text-muted-foreground">{p.description}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+                <DialogFooter showCloseButton />
+              </>
+            ) : (
+              <ServerForm
+                preset={PRESETS.find((p) => p.id === preset)!}
+                onClose={() => {
+                  setDialogOpen(false);
+                  setPreset(null);
+                }}
+              />
+            )}
+          </DialogContent>
+        </Dialog>
       </div>
 
-      {showForm && !preset && (
-        <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">Choose a preset</h2>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            {PRESETS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setPreset(p.id)}
-                className="flex flex-col items-center gap-2 p-4 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-brand-500 rounded-lg transition-colors text-center"
-              >
-                <p.icon className="w-6 h-6 text-brand-400" />
-                <div className="font-medium text-white text-sm">{p.name}</div>
-                <div className="text-xs text-slate-500">{p.description}</div>
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={() => setShowForm(false)}
-            className="mt-4 text-sm text-slate-400 hover:text-white"
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-
-      {showForm && preset && (
-        <ServerForm
-          preset={PRESETS.find((p) => p.id === preset)!}
-          onClose={() => { setShowForm(false); setPreset(null); }}
-        />
-      )}
-
-      {!showForm && (
-        <div className="space-y-3">
-          {srvList?.length === 0 && (
-            <div className="bg-slate-900 rounded-xl border border-slate-800 p-8 sm:p-12 text-center">
-              <ServerIcon className="w-10 h-10 text-slate-700 mx-auto mb-3" />
-              <p className="text-slate-500">No servers configured yet</p>
-              <button
-                onClick={handleAddClick}
-                className="mt-3 text-brand-400 hover:text-brand-300 font-medium text-sm"
+      <div className="space-y-3">
+        {srvList?.length === 0 && (
+          <Card className="items-center py-10 text-center sm:py-14">
+            <CardContent className="flex flex-col items-center">
+              <ServerIcon className="size-10 text-muted-foreground/50 mb-3" />
+              <p className="text-muted-foreground">No servers configured yet</p>
+              <Button
+                variant="link"
+                size="sm"
+                className="mt-2"
+                onClick={() => setDialogOpen(true)}
               >
                 Add your first server →
-              </button>
-            </div>
-          )}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
-          {srvList?.map((srv) => (
-            <div key={srv.id} className="bg-slate-900 rounded-xl border border-slate-800 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <Link to={`/servers/${srv.id}`} className="flex items-center gap-3 min-w-0 flex-1">
-                  <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1 ${
-                    srv.status === 'connected' ? 'bg-emerald-400' :
-                    srv.status === 'error' ? 'bg-red-400' : 'bg-slate-600'
-                  }`} />
-                  <div className="min-w-0">
-                    <div className="font-semibold text-white hover:text-brand-300 transition-colors truncate">
-                      {srv.name}
-                    </div>
-                    <div className="text-sm text-slate-500 truncate">
-                      {srv.transport === 'stdio'
-                        ? `${srv.command} ${(srv.args || []).join(' ')}`
-                        : srv.url}
-                    </div>
-                  </div>
-                </Link>
-
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <span className={`text-xs font-medium px-2 py-1 rounded-full ${
-                    srv.status === 'connected'
-                      ? 'bg-emerald-950/50 text-emerald-400'
-                      : srv.status === 'error'
-                      ? 'bg-red-950/50 text-red-400'
-                      : 'bg-slate-800 text-slate-400'
-                  }`}>
-                    {srv.status}
-                  </span>
-                  <button
-                    onClick={() => reconnectMutation.mutate(srv.id)}
-                    className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
-                    title="Reconnect"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => deleteMutation.mutate(srv.id)}
-                    className="p-2 text-slate-400 hover:text-red-400 hover:bg-slate-800 rounded-lg transition-colors"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+        {srvList?.map((srv) => (
+          <Card key={srv.id} size="sm">
+            <CardHeader>
+              <Link to={`/servers/${srv.id}`} className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'size-2.5 shrink-0 rounded-full',
+                      srv.status === 'connected'
+                        ? 'bg-emerald-400'
+                        : srv.status === 'error'
+                          ? 'bg-red-400'
+                          : 'bg-muted-foreground/40'
+                    )}
+                  />
+                  <CardTitle className="truncate hover:text-primary transition-colors">
+                    {srv.name}
+                  </CardTitle>
                 </div>
-              </div>
-
-              <div className="mt-2 flex items-center gap-3 text-xs text-slate-600">
-                <span className="uppercase tracking-wide">{srv.transport}</span>
-                <span>{srv.tools_count ?? 0} tools</span>
-              </div>
-
-              {srv.live_error && (
-                <div className="mt-2 text-xs text-red-400 bg-red-950/30 border border-red-900/50 rounded-lg px-3 py-2">
+                <CardDescription className="truncate font-mono text-xs">
+                  {srv.transport === 'stdio'
+                    ? `${srv.command} ${(srv.args || []).join(' ')}`
+                    : srv.url}
+                </CardDescription>
+              </Link>
+              <CardAction className="flex items-center gap-1.5">
+                {statusBadge(srv.status)}
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => reconnectMutation.mutate(srv.id)}
+                  title="Reconnect"
+                >
+                  <RefreshCw className="size-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => deleteMutation.mutate(srv.id)}
+                  title="Delete"
+                  className="text-destructive hover:text-destructive"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </CardAction>
+            </CardHeader>
+            <CardContent className="flex items-center gap-3 text-xs text-muted-foreground">
+              <span className="uppercase tracking-wide">{srv.transport}</span>
+              <Separator orientation="vertical" className="h-3" />
+              <span>{srv.tools_count ?? 0} tools</span>
+              <Link
+                to={`/servers/${srv.id}`}
+                className="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline"
+              >
+                Details <ChevronRight className="size-3" />
+              </Link>
+            </CardContent>
+            {srv.live_error && (
+              <CardContent className="pt-0">
+                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive break-words">
                   {srv.live_error}
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+              </CardContent>
+            )}
+          </Card>
+        ))}
+      </div>
     </div>
   );
 }
 
-interface PresetConfig {
-  name: string;
-  transport: string;
-  command?: string;
-  args?: string;
-  url?: string;
-  urlHint?: string;
-}
-
-function ServerForm({ preset, onClose }: { preset: { id: string; name: string; config: PresetConfig | null }; onClose: () => void }) {
+function ServerForm({
+  preset,
+  onClose,
+}: {
+  preset: { id: string; name: string; config: PresetConfig | null };
+  onClose: () => void;
+}) {
   const queryClient = useQueryClient();
   const cfg = preset.config;
   const [name, setName] = useState(cfg?.name || '');
-  const [transport, setTransport] = useState(cfg?.transport || 'stdio');
+  const [transport, setTransport] = useState<Transport>(cfg?.transport || 'stdio');
   const [command, setCommand] = useState(cfg?.command || '');
   const [args, setArgs] = useState(cfg?.args || '');
   const [url, setUrl] = useState(cfg?.url || '');
@@ -278,68 +351,77 @@ function ServerForm({ preset, onClose }: { preset: { id: string; name: string; c
   };
 
   return (
-    <form onSubmit={handleSubmit} className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-6 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">Add MCP Server</h2>
-        <span className="text-xs text-slate-500 bg-slate-800 px-2 py-1 rounded">{preset.name}</span>
-      </div>
+    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <DialogHeader>
+        <DialogTitle>Add MCP Server</DialogTitle>
+        <DialogDescription>
+          Preset: <span className="font-medium text-foreground">{preset.name}</span>
+        </DialogDescription>
+      </DialogHeader>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium text-slate-300 mb-1.5">Name</label>
-          <input
+        <div className="grid gap-1.5">
+          <Label htmlFor="srv-name">Name</Label>
+          <Input
+            id="srv-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 text-sm"
             placeholder="my-server"
             required
           />
         </div>
-        <div>
-          <label className="block text-sm font-medium text-slate-300 mb-1.5">Transport</label>
-          <select
-            value={transport}
-            onChange={(e) => setTransport(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 text-sm"
-          >
-            <option value="stdio">stdio (local process)</option>
-            <option value="streamable-http">streamable-http (remote)</option>
-            <option value="http">http (legacy SSE)</option>
-          </select>
+        <div className="grid gap-1.5">
+          <Label htmlFor="srv-transport">Transport</Label>
+          <Select value={transport} onValueChange={(v) => setTransport(v as Transport)}>
+            <SelectTrigger id="srv-transport" className="w-full">
+              <SelectValue placeholder="Select transport" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="stdio">stdio (local process)</SelectItem>
+              <SelectItem value="streamable-http">streamable-http (remote)</SelectItem>
+              <SelectItem value="http">http (legacy SSE)</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
       {transport === 'stdio' ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-1.5">Command</label>
-            <input
+          <div className="grid gap-1.5">
+            <Label htmlFor="srv-command">Command</Label>
+            <Input
+              id="srv-command"
               value={command}
               onChange={(e) => setCommand(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
+              className="font-mono"
               placeholder="npx"
               required
             />
           </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-1.5">Args (space-separated)</label>
-            <input
+          <div className="grid gap-1.5">
+            <Label htmlFor="srv-args">Args (space-separated)</Label>
+            <Input
+              id="srv-args"
               value={args}
               onChange={(e) => setArgs(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
+              className="font-mono"
               placeholder="-y @modelcontextprotocol/server-github"
             />
           </div>
         </div>
       ) : (
-        <div>
-          <label className="block text-sm font-medium text-slate-300 mb-1.5">
-            URL {cfg?.urlHint && <span className="text-slate-600 font-normal">({cfg.urlHint})</span>}
-          </label>
-          <input
+        <div className="grid gap-1.5">
+          <Label htmlFor="srv-url">
+            URL
+            {cfg?.urlHint && (
+              <span className="text-muted-foreground font-normal"> ({cfg.urlHint})</span>
+            )}
+          </Label>
+          <Input
+            id="srv-url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
+            className="font-mono"
             placeholder="https://mcp.dev.azure.com/my-org"
             required
           />
@@ -347,69 +429,62 @@ function ServerForm({ preset, onClose }: { preset: { id: string; name: string; c
       )}
 
       {isHTTP && (
-        <div>
-          <label className="block text-sm font-medium text-slate-300 mb-1.5">
-            Auth Token <span className="text-slate-600 font-normal">— optional, used as client_id for OAuth</span>
-          </label>
-          <input
+        <div className="grid gap-1.5">
+          <Label htmlFor="srv-token">Auth Token</Label>
+          <Input
+            id="srv-token"
             type="password"
             value={authToken}
             onChange={(e) => setAuthToken(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
+            className="font-mono"
             placeholder="Leave empty for Entra ID (auto-detected)"
           />
-          <p className="text-xs text-slate-600 mt-1">
-            For Entra ID / Azure DevOps: leave empty — OAuth will use a built-in public client. Enter a client_id only if you have a custom app registration.
+          <p className="text-xs text-muted-foreground">
+            Optional — used as client_id for OAuth. For Entra ID / Azure DevOps: leave empty and
+            OAuth will use a built-in public client. Enter a client_id only if you have a custom app
+            registration.
           </p>
         </div>
       )}
 
       {isHTTP && (
-        <div>
-          <label className="block text-sm font-medium text-slate-300 mb-1.5">Additional Headers (one per line, key: value)</label>
-          <textarea
+        <div className="grid gap-1.5">
+          <Label htmlFor="srv-headers">Additional Headers (one per line, key: value)</Label>
+          <Textarea
+            id="srv-headers"
             value={headers}
             onChange={(e) => setHeaders(e.target.value)}
             rows={3}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
+            className="font-mono"
             placeholder="X-Custom-Header: value"
           />
         </div>
       )}
 
-      <div>
-        <label className="block text-sm font-medium text-slate-300 mb-1.5">Environment Variables (one per line, KEY=value)</label>
-        <textarea
+      <div className="grid gap-1.5">
+        <Label htmlFor="srv-env">Environment Variables (one per line, KEY=value)</Label>
+        <Textarea
+          id="srv-env"
           value={env}
           onChange={(e) => setEnv(e.target.value)}
           rows={3}
-          className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
+          className="font-mono"
           placeholder="GITHUB_PERSONAL_ACCESS_TOKEN=ghp_..."
         />
       </div>
 
       {error && (
-        <div className="text-sm text-red-400 bg-red-950/50 border border-red-900 rounded-lg px-3 py-2">
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive break-words">
           {error}
         </div>
       )}
 
-      <div className="flex gap-3">
-        <button
-          type="submit"
-          disabled={loading}
-          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg font-medium text-sm transition-colors"
-        >
+      <DialogFooter>
+        <DialogClose render={<Button variant="outline" type="button">Cancel</Button>} />
+        <Button type="submit" disabled={loading}>
           {loading ? 'Creating...' : 'Create Server'}
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-medium text-sm transition-colors"
-        >
-          Cancel
-        </button>
-      </div>
+        </Button>
+      </DialogFooter>
     </form>
   );
 }
