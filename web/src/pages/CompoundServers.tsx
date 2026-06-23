@@ -15,7 +15,8 @@ import {
   Check,
 } from 'lucide-react';
 import { compounds as compoundsApi, servers as serversApi, type Server } from '@/api/client';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardAction } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -105,11 +106,11 @@ export default function CompoundServers() {
       <div className="space-y-6 pb-20 lg:pb-0">
         {/* Header */}
         <div className="flex items-start gap-3 sm:gap-4">
-          <Button variant="ghost" size="icon" asChild className="shrink-0">
-            <Link to="/compounds">
+          <Link to="/compounds" className="shrink-0">
+            <Button variant="ghost" size="icon">
               <ArrowLeft />
-            </Link>
-          </Button>
+            </Button>
+          </Link>
           <div className="flex-1 min-w-0">
             <h1 className="text-xl sm:text-2xl font-bold text-foreground truncate">{detail.name}</h1>
             {detail.description && (
