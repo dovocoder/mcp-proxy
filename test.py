@@ -24,89 +24,168 @@ def get(path, headers=None):
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
 
+def delete(path, headers=None):
+    req = urllib.request.Request(f"{BASE}{path}", headers=headers or {}, method="DELETE")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
 print("=== Login ===")
 _, res = post("/api/auth/login", {"username": "admin", "password": "test123"})
 token = res["token"]
 auth_hdr = {"Authorization": f"Bearer {token}"}
 
-print("\n=== Create stdio time server ===")
-_, res = post("/api/servers", {
-    "name": "time",
+print("\n=== Create 2 stdio servers ===")
+_, res1 = post("/api/servers", {
+    "name": "time-server",
     "transport": "stdio",
     "command": "uvx",
     "args": ["mcp-server-time"],
     "enabled": True
 }, auth_hdr)
-time_server_id = res["id"]
-print(f"  Created: {time_server_id}")
-time.sleep(5)
+time_id = res1["id"]
+print(f"  Created time-server: {time_id}")
 
-print("\n=== Create streamable-http Azure DevOps server ===")
-# Set auth_token to a test client ID so the OAuth flow can proceed
-_, res = post("/api/servers", {
-    "name": "azure-devops",
-    "transport": "streamable-http",
-    "url": "https://mcp.dev.azure.com/testorg",
-    "auth_token": "test-client-id-12345",
+_, res2 = post("/api/servers", {
+    "name": "fetch-server",
+    "transport": "stdio",
+    "command": "uvx",
+    "args": ["mcp-server-fetch"],
     "enabled": True
 }, auth_hdr)
-ado_server_id = res["id"]
-print(f"  Created: {ado_server_id}")
-time.sleep(3)
+fetch_id = res2["id"]
+print(f"  Created fetch-server: {fetch_id}")
+
+time.sleep(8)
 
 print("\n=== List Servers ===")
-_, servers = get("/api/servers", auth_hdr)
-for s in servers:
+_, servers_list = get("/api/servers", auth_hdr)
+for s in servers_list:
     print(f"  {s['name']} ({s['transport']}): status={s['status']}, tools={s.get('tools_count', 0)}")
-    if s.get('live_error'):
-        print(f"    error: {s['live_error']}")
 
-print("\n=== Check auth status ===")
-_, res = get(f"/api/servers/{ado_server_id}/auth-status", auth_hdr)
-print(f"  {json.dumps(res, indent=2)}")
+# Get total tool count (global)
+_, all_tools = get("/api/tools", auth_hdr)
+print(f"\n  Global tools: {len(all_tools)}")
+for t in all_tools:
+    print(f"    - {t['server_name']}__{t['name']}")
 
-print("\n=== Initiate OAuth flow ===")
-status, res = post(f"/api/servers/{ado_server_id}/auth", {}, auth_hdr)
-print(f"  HTTP Status: {status}")
-if "auth_url" in res:
-    auth_url = res["auth_url"]
-    print(f"  Auth URL: {auth_url[:150]}...")
-    # Verify key components
-    checks = {
-        "Entra ID authorize endpoint": "login.microsoftonline.com" in auth_url,
-        "response_type=code": "response_type=code" in auth_url,
-        "client_id present": "client_id=test-client-id-12345" in auth_url or "client_id=" in auth_url,
-        "PKCE code_challenge": "code_challenge=" in auth_url,
-        "PKCE method S256": "code_challenge_method=S256" in auth_url,
-        "redirect_uri": "redirect_uri=" in auth_url,
-        "state parameter": "state=" in auth_url,
-        "scope present": "scope=" in auth_url or True,  # scope might be empty
-    }
-    for name, ok in checks.items():
-        print(f"  {'✅' if ok else '❌'} {name}")
-elif "error" in res:
-    print(f"  Error: {res['error']}")
+print("\n=== Create compound 'dev-tools' with both servers ===")
+_, compound = post("/api/compounds", {
+    "name": "dev-tools",
+    "description": "Development tools group",
+    "member_ids": [time_id, fetch_id]
+}, auth_hdr)
+compound_id = compound["id"]
+print(f"  Created: {compound_id}")
 
-print("\n=== Create API Key + MCP Proxy test ===")
-_, res = post("/api/keys", {"name": "test-key", "scopes": ["read", "write", "admin"]}, auth_hdr)
-apikey = res["key"]
+print("\n=== Get compound detail ===")
+_, detail = get(f"/api/compounds/{compound_id}", auth_hdr)
+print(f"  Name: {detail['name']}")
+print(f"  Members: {len(detail['members'])}")
+for m in detail['members']:
+    print(f"    - {m['name']} ({m['status']})")
+print(f"  Tool count: {detail['tool_count']}")
 
-_, res = post("/api/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, {"X-API-Key": apikey})
-tools = res.get("result", {}).get("tools", [])
-print(f"  Found {len(tools)} tools:")
-for t in tools:
+print("\n=== Create compound 'time-only' with just time-server ===")
+_, compound2 = post("/api/compounds", {
+    "name": "time-only",
+    "member_ids": [time_id]
+}, auth_hdr)
+compound2_id = compound2["id"]
+
+_, detail2 = get(f"/api/compounds/{compound2_id}", auth_hdr)
+print(f"  Tool count: {detail2['tool_count']}")
+
+print("\n=== Create API key scoped to 'dev-tools' compound ===")
+_, key_res = post("/api/keys", {
+    "name": "dev-key",
+    "scopes": ["read", "write"],
+    "compound_id": compound_id
+}, auth_hdr)
+compound_key = key_res["key"]
+print(f"  Key: {key_res['key_prefix']}")
+print(f"  Compound ID: {key_res.get('compound_id')}")
+
+print("\n=== Create API key scoped to 'time-only' compound ===")
+_, key_res2 = post("/api/keys", {
+    "name": "time-key",
+    "scopes": ["read", "write"],
+    "compound_id": compound2_id
+}, auth_hdr)
+time_key = key_res2["key"]
+print(f"  Key: {key_res2['key_prefix']}")
+
+print("\n=== Create global API key (no compound) ===")
+_, key_res3 = post("/api/keys", {
+    "name": "global-key",
+    "scopes": ["read", "write"]
+}, auth_hdr)
+global_key = key_res3["key"]
+
+print("\n=== MCP tools/list with dev-tools compound key ===")
+_, res = post("/api/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, {"X-API-Key": compound_key})
+dev_tools = res.get("result", {}).get("tools", [])
+print(f"  Found {len(dev_tools)} tools (should be from both servers):")
+for t in dev_tools:
     print(f"    - {t['name']}")
 
+print("\n=== MCP tools/list with time-only compound key ===")
+_, res = post("/api/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, {"X-API-Key": time_key})
+time_tools = res.get("result", {}).get("tools", [])
+print(f"  Found {len(time_tools)} tools (should be from time-server only):")
+for t in time_tools:
+    print(f"    - {t['name']}")
+
+print("\n=== MCP tools/list with global key ===")
+_, res = post("/api/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}, {"X-API-Key": global_key})
+global_tools = res.get("result", {}).get("tools", [])
+print(f"  Found {len(global_tools)} tools (should match global tool count):")
+for t in global_tools:
+    print(f"    - {t['name']}")
+
+print("\n=== MCP tools/call with compound key (should work) ===")
 _, res = post("/api/mcp", {
-    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-    "params": {"name": "time__get_current_time", "arguments": {"timezone": "UTC"}}
-}, {"X-API-Key": apikey})
+    "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+    "params": {"name": "time-server__get_current_time", "arguments": {"timezone": "UTC"}}
+}, {"X-API-Key": compound_key})
 content = res.get("result", {}).get("content", [{}])
 if content:
-    print(f"  Time result: {content[0].get('text', '')[:150]}")
+    print(f"  ✅ Tool call succeeded: {content[0].get('text', '')[:100]}")
+else:
+    print(f"  ❌ Tool call failed: {res}")
+
+print("\n=== MCP tools/call with time-only key for fetch tool (should fail) ===")
+_, res = post("/api/mcp", {
+    "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+    "params": {"name": "fetch-server__fetch", "arguments": {"url": "https://example.com"}}
+}, {"X-API-Key": time_key})
+if "error" in res:
+    print(f"  ✅ Correctly blocked: {res['error'].get('message', '')}")
+else:
+    print(f"  ❌ Should have been blocked but wasn't: {res}")
+
+print("\n=== Remove fetch-server from dev-tools compound ===")
+_, res = delete(f"/api/compounds/{compound_id}/members/{fetch_id}", auth_hdr)
+print(f"  {res}")
+
+_, detail = get(f"/api/compounds/{compound_id}", auth_hdr)
+print(f"  Members after removal: {len(detail['members'])}")
+print(f"  Tool count after removal: {detail['tool_count']}")
+
+print("\n=== List API keys (check compound_id is shown) ===")
+_, keys = get("/api/keys", auth_hdr)
+for k in keys:
+    print(f"  {k['name']}: compound_id={k.get('compound_id', 'null')}")
 
 print("\n=== Dashboard ===")
 _, stats = get("/api/dashboard", auth_hdr)
 print(f"  {json.dumps(stats, indent=2)}")
+
+print("\n=== List compounds ===")
+_, compounds = get("/api/compounds", auth_hdr)
+for c in compounds:
+    print(f"  {c['name']} ({c['id'][:8]}...)")
 
 print("\n✅ All tests passed!")

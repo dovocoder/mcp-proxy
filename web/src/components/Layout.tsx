@@ -1,5 +1,5 @@
 import { NavLink, useNavigate, Outlet } from 'react-router-dom';
-import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network } from 'lucide-react';
+import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers } from 'lucide-react';
 import { clearToken } from '../api/client';
 
 interface LayoutProps {
@@ -8,6 +8,7 @@ interface LayoutProps {
     connected_servers: number;
     total_tools: number;
     total_api_keys: number;
+    total_compounds: number;
   };
 }
 
@@ -22,6 +23,7 @@ export default function Layout({ stats }: LayoutProps) {
   const navItems = [
     { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
     { to: '/servers', label: 'Servers', icon: Server },
+    { to: '/compounds', label: 'Compounds', icon: Layers },
     { to: '/keys', label: 'API Keys', icon: KeyRound },
     { to: '/tools', label: 'Tools', icon: Wrench },
   ];
@@ -75,6 +77,10 @@ export default function Layout({ stats }: LayoutProps) {
             <div className="flex justify-between text-xs">
               <span className="text-slate-500">API Keys</span>
               <span className="text-slate-300">{stats.total_api_keys}</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-slate-500">Compounds</span>
+              <span className="text-slate-300">{stats.total_compounds}</span>
             </div>
           </div>
         )}

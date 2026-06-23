@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Server, KeyRound, Wrench, CheckCircle2, XCircle, Activity } from 'lucide-react';
+import { Server, KeyRound, Wrench, CheckCircle2, XCircle, Activity, Layers } from 'lucide-react';
 import { dashboard, servers as serversApi } from '../api/client';
 
 export default function Dashboard() {
@@ -35,6 +35,13 @@ export default function Dashboard() {
       color: 'text-purple-400',
       bg: 'bg-purple-950/50',
     },
+    {
+      label: 'Compounds',
+      value: stats?.total_compounds ?? 0,
+      icon: Layers,
+      color: 'text-cyan-400',
+      bg: 'bg-cyan-950/50',
+    },
   ];
 
   return (
@@ -45,7 +52,7 @@ export default function Dashboard() {
       </div>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         {cards.map((card) => (
           <div key={card.label} className="bg-slate-900 rounded-xl border border-slate-800 p-5">
             <div className={`inline-flex items-center justify-center w-10 h-10 rounded-lg ${card.bg} mb-3`}>

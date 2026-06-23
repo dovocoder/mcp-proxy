@@ -263,11 +263,33 @@ func (m *Manager) GetServerStatus(id string) (status string, toolCount int, last
 
 // ListTools returns all tools from all connected servers.
 func (m *Manager) ListTools() []models.Tool {
+	return m.listToolsFiltered(nil)
+}
+
+// ListToolsForCompound returns tools only from servers that are members of the compound.
+func (m *Manager) ListToolsForCompound(compoundID string) []models.Tool {
+	memberIDs, err := m.store.GetCompoundMemberIDs(compoundID)
+	if err != nil || len(memberIDs) == 0 {
+		return []models.Tool{}
+	}
+	memberSet := make(map[string]bool, len(memberIDs))
+	for _, id := range memberIDs {
+		memberSet[id] = true
+	}
+	return m.listToolsFiltered(memberSet)
+}
+
+// listToolsFiltered returns tools from connected servers. If filter is non-nil,
+// only servers whose ID is in the filter set are included.
+func (m *Manager) listToolsFiltered(filter map[string]bool) []models.Tool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var tools []models.Tool
 	for id, client := range m.clients {
+		if filter != nil && !filter[id] {
+			continue
+		}
 		srv, err := m.store.GetServer(id)
 		if err != nil {
 			continue
@@ -289,14 +311,15 @@ func (m *Manager) ListTools() []models.Tool {
 }
 
 // HandleJSONRPC processes a JSON-RPC request from a client, routing to the appropriate backend.
-func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest) (json.RawMessage, error) {
+// If compoundID is non-empty, tools are scoped to that compound's member servers.
+func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, compoundID string) (json.RawMessage, error) {
 	switch req.Method {
 	case "initialize":
 		return m.handleInitialize(req)
 	case "tools/list":
-		return m.handleToolsList(req)
+		return m.handleToolsList(req, compoundID)
 	case "tools/call":
-		return m.handleToolsCall(ctx, req)
+		return m.handleToolsCall(ctx, req, compoundID)
 	default:
 		return nil, fmt.Errorf("unsupported method: %s", req.Method)
 	}
@@ -316,8 +339,13 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest) (json.RawMessage, err
 	return json.Marshal(result)
 }
 
-func (m *Manager) handleToolsList(req mcp.JSONRPCRequest) (json.RawMessage, error) {
-	allTools := m.ListTools()
+func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, compoundID string) (json.RawMessage, error) {
+	var allTools []models.Tool
+	if compoundID != "" {
+		allTools = m.ListToolsForCompound(compoundID)
+	} else {
+		allTools = m.ListTools()
+	}
 	var mcpTools []mcp.Tool
 	for _, t := range allTools {
 		// Prefix tool name with server name to avoid collisions
@@ -339,7 +367,7 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest) (json.RawMessage, erro
 	return json.Marshal(result)
 }
 
-func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest) (json.RawMessage, error) {
+func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, compoundID string) (json.RawMessage, error) {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -358,6 +386,24 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest) (
 	srv, err := m.store.GetServerByName(serverName)
 	if err != nil {
 		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+
+	// If compound-scoped, verify the server is a member
+	if compoundID != "" {
+		memberIDs, err := m.store.GetCompoundMemberIDs(compoundID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to verify compound membership: %w", err)
+		}
+		allowed := false
+		for _, mid := range memberIDs {
+			if mid == srv.ID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, fmt.Errorf("tool '%s' is not available in this compound", params.Name)
+		}
 	}
 
 	m.mu.RLock()

@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, KeyRound, Copy, Check, AlertCircle } from 'lucide-react';
-import { apiKeys as apiKeysApi, type APIKeyWithSecret } from '../api/client';
+import { Plus, Trash2, KeyRound, Copy, Check, AlertCircle, Layers } from 'lucide-react';
+import { apiKeys as apiKeysApi, compounds as compoundsApi, type APIKeyWithSecret } from '../api/client';
 
 export default function APIKeys() {
   const queryClient = useQueryClient();
   const { data: keys } = useQuery({ queryKey: ['apiKeys'], queryFn: apiKeysApi.list });
+  const { data: compounds } = useQuery({ queryKey: ['compounds'], queryFn: compoundsApi.list });
   const [showForm, setShowForm] = useState(false);
   const [newKey, setNewKey] = useState<APIKeyWithSecret | null>(null);
   const [copied, setCopied] = useState(false);
@@ -73,6 +74,7 @@ export default function APIKeys() {
 
       {showForm && (
         <KeyForm
+          compounds={compounds || []}
           onClose={() => setShowForm(false)}
           onSuccess={(key) => {
             setNewKey(key);
@@ -97,8 +99,14 @@ export default function APIKeys() {
                 <KeyRound className="w-4 h-4 text-slate-500" />
                 <div>
                   <div className="font-medium text-white">{key.name}</div>
-                  <div className="text-xs text-slate-500 font-mono">
+                  <div className="text-xs text-slate-500 font-mono flex items-center gap-2">
                     {key.key_prefix} · scopes: {key.scopes.join(', ') || 'none'}
+                    {key.compound_id && (
+                      <span className="inline-flex items-center gap-1 text-cyan-400">
+                        <Layers className="w-3 h-3" />
+                        {compounds?.find((c) => c.id === key.compound_id)?.name || 'compound'}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -133,9 +141,18 @@ export default function APIKeys() {
   );
 }
 
-function KeyForm({ onClose, onSuccess }: { onClose: () => void; onSuccess: (key: APIKeyWithSecret) => void }) {
+function KeyForm({
+  compounds,
+  onClose,
+  onSuccess,
+}: {
+  compounds: { id: string; name: string }[];
+  onClose: () => void;
+  onSuccess: (key: APIKeyWithSecret) => void;
+}) {
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<string[]>(['read', 'write']);
+  const [compoundId, setCompoundId] = useState('');
   const [expiresIn, setExpiresIn] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -153,7 +170,8 @@ function KeyForm({ onClose, onSuccess }: { onClose: () => void; onSuccess: (key:
     setLoading(true);
     setError('');
     try {
-      const data: { name: string; scopes: string[]; expires_in_days?: number } = { name, scopes };
+      const data: { name: string; scopes: string[]; compound_id?: string; expires_in_days?: number } = { name, scopes };
+      if (compoundId) data.compound_id = compoundId;
       if (expiresIn) data.expires_in_days = parseInt(expiresIn);
       const key = await apiKeysApi.create(data);
       onSuccess(key);
@@ -198,6 +216,24 @@ function KeyForm({ onClose, onSuccess }: { onClose: () => void; onSuccess: (key:
           ))}
         </div>
       </div>
+
+      {compounds.length > 0 && (
+        <div>
+          <label className="block text-sm font-medium text-slate-300 mb-1.5">
+            Compound Server <span className="text-slate-500 font-normal">(scope key to specific compound)</span>
+          </label>
+          <select
+            value={compoundId}
+            onChange={(e) => setCompoundId(e.target.value)}
+            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500"
+          >
+            <option value="">All servers (global)</option>
+            {compounds.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div>
         <label className="block text-sm font-medium text-slate-300 mb-1.5">Expires in (days, optional)</label>

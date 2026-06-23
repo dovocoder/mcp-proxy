@@ -28,9 +28,10 @@ type Server struct {
 type APIKey struct {
 	ID          string     `json:"id"`
 	Name        string     `json:"name"`
-	KeyHash     string     `json:"-"` // never serialized
+	KeyHash     string     `json:"-"`
 	KeyPrefix   string     `json:"key_prefix"`
 	Scopes      []string   `json:"scopes"` // "read", "write", "admin"
+	CompoundID  *string    `json:"compound_id,omitempty"` // if set, key only exposes this compound's tools
 	Active      bool       `json:"active"`
 	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
@@ -44,6 +45,21 @@ type User struct {
 	PasswordHash string    `json:"-"`
 	Role         string    `json:"role"` // "admin"
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// CompoundServer represents a named group of MCP servers.
+type CompoundServer struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// CompoundServerWithMembers includes the member server IDs.
+type CompoundServerWithMembers struct {
+	CompoundServer
+	Members     []Server `json:"members"`
+	ToolCount   int       `json:"tool_count"`
 }
 
 // Tool represents a discovered MCP tool from a backend server.
@@ -87,9 +103,23 @@ type UpdateServerRequest struct {
 
 // CreateAPIKeyRequest is the payload for creating a new API key.
 type CreateAPIKeyRequest struct {
-	Name      string   `json:"name"`
-	Scopes    []string `json:"scopes"`
-	ExpiresIn *int     `json:"expires_in_days,omitempty"` // days from now
+	Name       string   `json:"name"`
+	Scopes     []string `json:"scopes"`
+	CompoundID *string  `json:"compound_id,omitempty"` // scope key to a compound server
+	ExpiresIn  *int     `json:"expires_in_days,omitempty"` // days from now
+}
+
+// CreateCompoundRequest is the payload for creating a compound server.
+type CreateCompoundRequest struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	MemberIDs   []string `json:"member_ids,omitempty"`
+}
+
+// UpdateCompoundRequest is the payload for updating a compound server.
+type UpdateCompoundRequest struct {
+	Name        *string  `json:"name,omitempty"`
+	Description *string  `json:"description,omitempty"`
 }
 
 // LoginRequest is the payload for admin login.
@@ -116,8 +146,9 @@ type ServerStatus struct {
 
 // DashboardStats represents summary statistics for the dashboard.
 type DashboardStats struct {
-	TotalServers    int `json:"total_servers"`
+	TotalServers     int `json:"total_servers"`
 	ConnectedServers int `json:"connected_servers"`
-	TotalTools      int `json:"total_tools"`
-	TotalAPIKeys    int `json:"total_api_keys"`
+	TotalTools       int `json:"total_tools"`
+	TotalAPIKeys     int `json:"total_api_keys"`
+	TotalCompounds   int `json:"total_compounds"`
 }

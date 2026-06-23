@@ -90,6 +90,19 @@ func migrate(db *sql.DB) error {
 		client_secret TEXT NOT NULL DEFAULT '',
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
+
+	CREATE TABLE IF NOT EXISTS compound_servers (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		description TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS compound_members (
+		compound_id TEXT NOT NULL,
+		server_id TEXT NOT NULL,
+		PRIMARY KEY (compound_id, server_id)
+	);
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -100,7 +113,12 @@ func migrate(db *sql.DB) error {
 	_, err = db.Exec(`ALTER TABLE servers ADD COLUMN auth_token TEXT NOT NULL DEFAULT ''`)
 	if err != nil {
 		// Column already exists — this is expected
-		// modernc.org/sqlite returns error for duplicate ALTER TABLE ADD COLUMN
+	}
+
+	// Migration: add compound_id column to api_keys
+	_, err = db.Exec(`ALTER TABLE api_keys ADD COLUMN compound_id TEXT`)
+	if err != nil {
+		// Column already exists
 	}
 
 	return nil
@@ -212,24 +230,24 @@ func (s *Store) CreateAPIKey(key *models.APIKey) error {
 		active = 1
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO api_keys (id, name, key_hash, key_prefix, scopes, active, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO api_keys (id, name, key_hash, key_prefix, scopes, active, expires_at, created_at, compound_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		key.ID, key.Name, key.KeyHash, key.KeyPrefix,
-		string(scopesJSON), active, key.ExpiresAt, key.CreatedAt,
+		string(scopesJSON), active, key.ExpiresAt, key.CreatedAt, key.CompoundID,
 	)
 	return err
 }
 
 // GetAPIKeyByHash looks up an API key by its hash.
 func (s *Store) GetAPIKeyByHash(hash string) (*models.APIKey, error) {
-	row := s.db.QueryRow(`SELECT id, name, key_hash, key_prefix, scopes, active, last_used_at, expires_at, created_at FROM api_keys WHERE key_hash = ? AND active = 1`, hash)
+	row := s.db.QueryRow(`SELECT id, name, key_hash, key_prefix, scopes, active, last_used_at, expires_at, created_at, compound_id FROM api_keys WHERE key_hash = ? AND active = 1`, hash)
 	return scanAPIKey(row)
 }
 
 // ListAPIKeys returns all API keys (without hashes).
 func (s *Store) ListAPIKeys() ([]*models.APIKey, error) {
-	rows, err := s.db.Query(`SELECT id, name, key_hash, key_prefix, scopes, active, last_used_at, expires_at, created_at FROM api_keys ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT id, name, key_hash, key_prefix, scopes, active, last_used_at, expires_at, created_at, compound_id FROM api_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -394,10 +412,11 @@ func scanAPIKeyImpl(s rowScanner) (*models.APIKey, error) {
 	var lastUsed sql.NullTime
 	var expiresAt sql.NullTime
 	var createdAt string
+	var compoundID sql.NullString
 
 	err := s.Scan(
 		&key.ID, &key.Name, &key.KeyHash, &key.KeyPrefix,
-		&scopesJSON, &active, &lastUsed, &expiresAt, &createdAt,
+		&scopesJSON, &active, &lastUsed, &expiresAt, &createdAt, &compoundID,
 	)
 	if err != nil {
 		return nil, err
@@ -410,8 +429,130 @@ func scanAPIKeyImpl(s rowScanner) (*models.APIKey, error) {
 	if expiresAt.Valid {
 		key.ExpiresAt = &expiresAt.Time
 	}
+	if compoundID.Valid && compoundID.String != "" {
+		cid := compoundID.String
+		key.CompoundID = &cid
+	}
 	json.Unmarshal([]byte(scopesJSON), &key.Scopes)
 	key.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 
 	return &key, nil
+}
+
+// --- Compound Servers ---
+
+// CreateCompound inserts a new compound server and optionally adds members.
+func (s *Store) CreateCompound(c *models.CompoundServer, memberIDs []string) error {
+	_, err := s.db.Exec(`INSERT INTO compound_servers (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
+		c.ID, c.Name, c.Description, c.CreatedAt)
+	if err != nil {
+		return err
+	}
+	for _, sid := range memberIDs {
+		if _, err := s.db.Exec(`INSERT OR IGNORE INTO compound_members (compound_id, server_id) VALUES (?, ?)`, c.ID, sid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetCompound retrieves a compound server by ID (without members).
+func (s *Store) GetCompound(id string) (*models.CompoundServer, error) {
+	row := s.db.QueryRow(`SELECT id, name, description, created_at FROM compound_servers WHERE id = ?`, id)
+	var c models.CompoundServer
+	var createdAt string
+	if err := row.Scan(&c.ID, &c.Name, &c.Description, &createdAt); err != nil {
+		return nil, err
+	}
+	c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return &c, nil
+}
+
+// ListCompounds returns all compound servers.
+func (s *Store) ListCompounds() ([]*models.CompoundServer, error) {
+	rows, err := s.db.Query(`SELECT id, name, description, created_at FROM compound_servers ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var compounds []*models.CompoundServer
+	for rows.Next() {
+		var c models.CompoundServer
+		var createdAt string
+		if err := rows.Scan(&c.ID, &c.Name, &c.Description, &createdAt); err != nil {
+			return nil, err
+		}
+		c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		compounds = append(compounds, &c)
+	}
+	return compounds, nil
+}
+
+// GetCompoundMemberIDs returns the server IDs that are members of a compound.
+func (s *Store) GetCompoundMemberIDs(compoundID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT server_id FROM compound_members WHERE compound_id = ?`, compoundID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// AddCompoundMember adds a server to a compound.
+func (s *Store) AddCompoundMember(compoundID, serverID string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO compound_members (compound_id, server_id) VALUES (?, ?)`, compoundID, serverID)
+	return err
+}
+
+// RemoveCompoundMember removes a server from a compound.
+func (s *Store) RemoveCompoundMember(compoundID, serverID string) error {
+	_, err := s.db.Exec(`DELETE FROM compound_members WHERE compound_id = ? AND server_id = ?`, compoundID, serverID)
+	return err
+}
+
+// UpdateCompound updates a compound server's name and description.
+func (s *Store) UpdateCompound(id string, name, description *string) error {
+	if name != nil {
+		if _, err := s.db.Exec(`UPDATE compound_servers SET name = ? WHERE id = ?`, *name, id); err != nil {
+			return err
+		}
+	}
+	if description != nil {
+		if _, err := s.db.Exec(`UPDATE compound_servers SET description = ? WHERE id = ?`, *description, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteCompound removes a compound server and its members.
+func (s *Store) DeleteCompound(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM compound_members WHERE compound_id = ?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM compound_servers WHERE id = ?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Null out compound_id on api_keys that referenced this compound
+	if _, err := tx.Exec(`UPDATE api_keys SET compound_id = NULL WHERE compound_id = ?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

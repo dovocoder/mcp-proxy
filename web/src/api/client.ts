@@ -91,6 +91,7 @@ export interface APIKey {
   name: string;
   key_prefix: string;
   scopes: string[];
+  compound_id?: string | null;
   active: boolean;
   last_used_at?: string;
   expires_at?: string;
@@ -104,7 +105,7 @@ export interface APIKeyWithSecret extends APIKey {
 
 export const apiKeys = {
   list: () => request<APIKey[]>('/keys'),
-  create: (data: { name: string; scopes: string[]; expires_in_days?: number }) =>
+  create: (data: { name: string; scopes: string[]; compound_id?: string; expires_in_days?: number }) =>
     request<APIKeyWithSecret>('/keys', { method: 'POST', body: JSON.stringify(data) }),
   delete: (id: string) =>
     request<{ status: string }>(`/keys/${id}`, { method: 'DELETE' }),
@@ -124,6 +125,35 @@ export const tools = {
   list: () => request<Tool[]>('/tools'),
 };
 
+// --- Compound Servers ---
+
+export interface CompoundServer {
+  id: string;
+  name: string;
+  description?: string;
+  created_at: string;
+}
+
+export interface CompoundServerWithMembers extends CompoundServer {
+  members: Server[];
+  tool_count: number;
+}
+
+export const compounds = {
+  list: () => request<CompoundServer[]>('/compounds'),
+  get: (id: string) => request<CompoundServerWithMembers>(`/compounds/${id}`),
+  create: (data: { name: string; description?: string; member_ids?: string[] }) =>
+    request<CompoundServer>('/compounds', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: { name?: string; description?: string }) =>
+    request<CompoundServer>(`/compounds/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/compounds/${id}`, { method: 'DELETE' }),
+  addMember: (id: string, serverId: string) =>
+    request<{ status: string }>(`/compounds/${id}/members/${serverId}`, { method: 'POST' }),
+  removeMember: (id: string, serverId: string) =>
+    request<{ status: string }>(`/compounds/${id}/members/${serverId}`, { method: 'DELETE' }),
+};
+
 // --- Dashboard ---
 
 export interface DashboardStats {
@@ -131,6 +161,7 @@ export interface DashboardStats {
   connected_servers: number;
   total_tools: number;
   total_api_keys: number;
+  total_compounds: number;
 }
 
 export const dashboard = {

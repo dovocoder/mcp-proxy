@@ -5,9 +5,10 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import ServersPage from './pages/Servers';
 import ServerDetail from './pages/ServerDetail';
+import CompoundServersPage from './pages/CompoundServers';
 import APIKeysPage from './pages/APIKeys';
 import ToolsPage from './pages/Tools';
-import { isAuthenticated } from './api/client';
+import { isAuthenticated, dashboard as dashboardApi } from './api/client';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   if (!isAuthenticated()) {
@@ -19,10 +20,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 export default function App() {
   const { data: stats } = useQuery({
     queryKey: ['dashboard'],
-    queryFn: async () => {
-      const { dashboard } = await import('./api/client');
-      return dashboard.stats();
-    },
+    queryFn: () => dashboardApi.stats(),
     enabled: isAuthenticated(),
   });
 
@@ -40,6 +38,8 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="servers" element={<ServersPage />} />
         <Route path="servers/:id" element={<ServerDetail />} />
+        <Route path="compounds" element={<CompoundServersPage />} />
+        <Route path="compounds/:id" element={<CompoundServersPage />} />
         <Route path="keys" element={<APIKeysPage />} />
         <Route path="tools" element={<ToolsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

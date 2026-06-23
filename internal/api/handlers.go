@@ -57,6 +57,15 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("GET /api/tools", h.handleListTools)
 	adminMux.HandleFunc("GET /api/dashboard", h.handleDashboard)
 
+	// Compound server routes
+	adminMux.HandleFunc("GET /api/compounds", h.handleListCompounds)
+	adminMux.HandleFunc("POST /api/compounds", h.handleCreateCompound)
+	adminMux.HandleFunc("GET /api/compounds/{id}", h.handleGetCompound)
+	adminMux.HandleFunc("PUT /api/compounds/{id}", h.handleUpdateCompound)
+	adminMux.HandleFunc("DELETE /api/compounds/{id}", h.handleDeleteCompound)
+	adminMux.HandleFunc("POST /api/compounds/{id}/members/{serverId}", h.handleAddCompoundMember)
+	adminMux.HandleFunc("DELETE /api/compounds/{id}/members/{serverId}", h.handleRemoveCompoundMember)
+
 	mux.Handle("/api/", h.auth.JWTMiddleware(adminMux))
 }
 
@@ -101,7 +110,15 @@ func (h *Handlers) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.proxy.HandleJSONRPC(r.Context(), req)
+	// Extract compound_id from API key context (if any)
+	var compoundID string
+	if apiKey, ok := auth.APIKeyFromContext(r.Context()).(*models.APIKey); ok && apiKey != nil {
+		if apiKey.CompoundID != nil {
+			compoundID = *apiKey.CompoundID
+		}
+	}
+
+	result, err := h.proxy.HandleJSONRPC(r.Context(), req, compoundID)
 	if err != nil {
 		resp := mcp.JSONRPCResponse{
 			JSONRPC: "2.0",
@@ -305,13 +322,14 @@ func (h *Handlers) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apiKey := &models.APIKey{
-		ID:        uuid.NewString(),
-		Name:      req.Name,
-		KeyHash:   keyHash,
-		KeyPrefix: keyPrefix,
-		Scopes:    req.Scopes,
-		Active:    true,
-		CreatedAt: time.Now(),
+		ID:         uuid.NewString(),
+		Name:       req.Name,
+		KeyHash:    keyHash,
+		KeyPrefix:  keyPrefix,
+		Scopes:     req.Scopes,
+		CompoundID: req.CompoundID,
+		Active:     true,
+		CreatedAt:  time.Now(),
 	}
 
 	if req.ExpiresIn != nil && *req.ExpiresIn > 0 {
@@ -326,14 +344,15 @@ func (h *Handlers) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 	// Return the key once — never again
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"id":         apiKey.ID,
-		"name":       apiKey.Name,
-		"key":        keyString,
-		"key_prefix": keyPrefix,
-		"scopes":     apiKey.Scopes,
-		"expires_at": apiKey.ExpiresAt,
-		"created_at": apiKey.CreatedAt,
-		"message":    "Save this key — it will not be shown again",
+		"id":          apiKey.ID,
+		"name":        apiKey.Name,
+		"key":         keyString,
+		"key_prefix":  keyPrefix,
+		"scopes":      apiKey.Scopes,
+		"compound_id": apiKey.CompoundID,
+		"expires_at":  apiKey.ExpiresAt,
+		"created_at":  apiKey.CreatedAt,
+		"message":     "Save this key — it will not be shown again",
 	})
 }
 
@@ -361,6 +380,7 @@ func (h *Handlers) handleListTools(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	servers, _ := h.store.ListServers()
 	keys, _ := h.store.ListAPIKeys()
+	compounds, _ := h.store.ListCompounds()
 	tools := h.proxy.ListTools()
 
 	connected := 0
@@ -376,6 +396,7 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		ConnectedServers: connected,
 		TotalTools:       len(tools),
 		TotalAPIKeys:     len(keys),
+		TotalCompounds:   len(compounds),
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -390,6 +411,138 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// --- Compound Servers ---
+
+func (h *Handlers) handleListCompounds(w http.ResponseWriter, r *http.Request) {
+	compounds, err := h.store.ListCompounds()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list compound servers")
+		return
+	}
+	if compounds == nil {
+		compounds = []*models.CompoundServer{}
+	}
+	writeJSON(w, http.StatusOK, compounds)
+}
+
+func (h *Handlers) handleCreateCompound(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateCompoundRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+
+	compound := &models.CompoundServer{
+		ID:        uuid.NewString(),
+		Name:      req.Name,
+		Description: req.Description,
+		CreatedAt: time.Now(),
+	}
+
+	if err := h.store.CreateCompound(compound, req.MemberIDs); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create compound: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, compound)
+}
+
+func (h *Handlers) handleGetCompound(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	compound, err := h.store.GetCompound(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Compound server not found")
+		return
+	}
+
+	memberIDs, _ := h.store.GetCompoundMemberIDs(id)
+	var members []models.Server
+	for _, mid := range memberIDs {
+		srv, err := h.store.GetServer(mid)
+		if err != nil {
+			continue
+		}
+		status, _, _ := h.proxy.GetServerStatus(mid)
+		srv.Status = status
+		members = append(members, *srv)
+	}
+	if members == nil {
+		members = []models.Server{}
+	}
+
+	toolCount := len(h.proxy.ListToolsForCompound(id))
+
+	writeJSON(w, http.StatusOK, models.CompoundServerWithMembers{
+		CompoundServer: *compound,
+		Members:         members,
+		ToolCount:       toolCount,
+	})
+}
+
+func (h *Handlers) handleUpdateCompound(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req models.UpdateCompoundRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if err := h.store.UpdateCompound(id, req.Name, req.Description); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update compound: %v", err))
+		return
+	}
+
+	compound, _ := h.store.GetCompound(id)
+	writeJSON(w, http.StatusOK, compound)
+}
+
+func (h *Handlers) handleDeleteCompound(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteCompound(id); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete compound: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handlers) handleAddCompoundMember(w http.ResponseWriter, r *http.Request) {
+	compoundID := r.PathValue("id")
+	serverID := r.PathValue("serverId")
+
+	// Verify both exist
+	if _, err := h.store.GetCompound(compoundID); err != nil {
+		writeError(w, http.StatusNotFound, "Compound server not found")
+		return
+	}
+	if _, err := h.store.GetServer(serverID); err != nil {
+		writeError(w, http.StatusNotFound, "Server not found")
+		return
+	}
+
+	if err := h.store.AddCompoundMember(compoundID, serverID); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to add member: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
+}
+
+func (h *Handlers) handleRemoveCompoundMember(w http.ResponseWriter, r *http.Request) {
+	compoundID := r.PathValue("id")
+	serverID := r.PathValue("serverId")
+
+	if err := h.store.RemoveCompoundMember(compoundID, serverID); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to remove member: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
 
 // --- OAuth ---
