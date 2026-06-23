@@ -10,6 +10,7 @@ import {
   Zap,
   Terminal,
   ChevronRight,
+  Pencil,
 } from 'lucide-react';
 import { servers as serversApi, type Server } from '../api/client';
 import { cn } from '../lib/utils';
@@ -114,6 +115,7 @@ export default function Servers() {
   const { data: srvList } = useQuery({ queryKey: ['servers'], queryFn: serversApi.list });
   const [dialogOpen, setDialogOpen] = useState(false);
   const [preset, setPreset] = useState<string | null>(null);
+  const [editServer, setEditServer] = useState<Server | null>(null);
 
   const deleteMutation = useMutation({
     mutationFn: serversApi.delete,
@@ -127,7 +129,15 @@ export default function Servers() {
 
   const handleOpenChange = (open: boolean) => {
     setDialogOpen(open);
-    if (!open) setPreset(null);
+    if (!open) {
+      setPreset(null);
+      setEditServer(null);
+    }
+  };
+
+  const handleEditOpen = (srv: Server) => {
+    setEditServer(srv);
+    setDialogOpen(true);
   };
 
   return (
@@ -148,7 +158,15 @@ export default function Servers() {
             }
           />
           <DialogContent className="sm:max-w-lg">
-            {!preset ? (
+            {editServer ? (
+              <ServerForm
+                server={editServer}
+                onClose={() => {
+                  setDialogOpen(false);
+                  setEditServer(null);
+                }}
+              />
+            ) : !preset ? (
               <>
                 <DialogHeader>
                   <DialogTitle>Choose a preset</DialogTitle>
@@ -243,6 +261,14 @@ export default function Servers() {
                 <Button
                   variant="ghost"
                   size="icon-sm"
+                  onClick={() => handleEditOpen(srv)}
+                  title="Edit"
+                >
+                  <Pencil className="size-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
                   onClick={() => deleteMutation.mutate(srv.id)}
                   title="Delete"
                   className="text-destructive hover:text-destructive"
@@ -278,21 +304,41 @@ export default function Servers() {
 
 function ServerForm({
   preset,
+  server,
   onClose,
 }: {
-  preset: { id: string; name: string; config: PresetConfig | null };
+  preset?: { id: string; name: string; config: PresetConfig | null };
+  server?: Server | null;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const cfg = preset.config;
-  const [name, setName] = useState(cfg?.name || '');
-  const [transport, setTransport] = useState<Transport>(cfg?.transport || 'stdio');
-  const [command, setCommand] = useState(cfg?.command || '');
-  const [args, setArgs] = useState(cfg?.args || '');
-  const [url, setUrl] = useState(cfg?.url || '');
-  const [headers, setHeaders] = useState('');
-  const [env, setEnv] = useState('');
-  const [authToken, setAuthToken] = useState('');
+  const isEdit = !!server;
+  const cfg = preset?.config;
+
+  const [name, setName] = useState(server?.name || cfg?.name || '');
+  const [transport, setTransport] = useState<Transport>(
+    (server?.transport as Transport) || cfg?.transport || 'stdio',
+  );
+  const [command, setCommand] = useState(server?.command || cfg?.command || '');
+  const [args, setArgs] = useState(
+    server?.args?.join(' ') || cfg?.args || '',
+  );
+  const [url, setUrl] = useState(server?.url || cfg?.url || '');
+  const [headers, setHeaders] = useState(
+    server?.headers
+      ? Object.entries(server.headers)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n')
+      : '',
+  );
+  const [env, setEnv] = useState(
+    server?.env
+      ? Object.entries(server.env)
+          .map(([k, v]) => `${k}=${v}`)
+          .join('\n')
+      : '',
+  );
+  const [authToken, setAuthToken] = useState(server?.auth_token || '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -307,9 +353,9 @@ function ServerForm({
       const data: Partial<Server> = {
         name,
         transport,
-        enabled: true,
-        timeout: 120,
-        connect_timeout: 60,
+        enabled: server?.enabled ?? true,
+        timeout: server?.timeout ?? 120,
+        connect_timeout: server?.connect_timeout ?? 60,
       };
 
       if (transport === 'stdio') {
@@ -324,6 +370,8 @@ function ServerForm({
             if (idx > 0) hdrs[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
           });
           data.headers = hdrs;
+        } else {
+          data.headers = {};
         }
       }
 
@@ -338,13 +386,19 @@ function ServerForm({
           if (idx > 0) envVars[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
         });
         data.env = envVars;
+      } else {
+        data.env = {};
       }
 
-      await serversApi.create(data);
+      if (isEdit && server) {
+        await serversApi.update(server.id, data);
+      } else {
+        await serversApi.create(data);
+      }
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create server');
+      setError(err instanceof Error ? err.message : `Failed to ${isEdit ? 'update' : 'create'} server`);
     } finally {
       setLoading(false);
     }
@@ -353,9 +407,13 @@ function ServerForm({
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <DialogHeader>
-        <DialogTitle>Add MCP Server</DialogTitle>
+        <DialogTitle>{isEdit ? 'Edit MCP Server' : 'Add MCP Server'}</DialogTitle>
         <DialogDescription>
-          Preset: <span className="font-medium text-foreground">{preset.name}</span>
+          {isEdit ? (
+            <>Update configuration for <span className="font-medium text-foreground">{server!.name}</span></>
+          ) : (
+            <>Preset: <span className="font-medium text-foreground">{preset?.name}</span></>
+          )}
         </DialogDescription>
       </DialogHeader>
 
@@ -482,7 +540,9 @@ function ServerForm({
       <DialogFooter>
         <DialogClose render={<Button variant="outline" type="button">Cancel</Button>} />
         <Button type="submit" disabled={loading}>
-          {loading ? 'Creating...' : 'Create Server'}
+          {loading
+            ? isEdit ? 'Saving...' : 'Creating...'
+            : isEdit ? 'Save Changes' : 'Create Server'}
         </Button>
       </DialogFooter>
     </form>
