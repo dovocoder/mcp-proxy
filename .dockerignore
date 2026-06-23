@@ -1,0 +1,32 @@
+# Build artifacts
+mcp-proxy
+*.exe
+
+# Database
+*.db
+data/
+
+# Frontend build deps
+web/node_modules/
+web/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Test files
+test.py
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# OS
+.DS_Store
+README.md

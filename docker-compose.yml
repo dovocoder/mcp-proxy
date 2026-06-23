@@ -1,0 +1,15 @@
+services:
+  mcp-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - mcp-proxy-data:/app/data
+    environment:
+      MCP_PROXY_ADMIN_PASS: ${MCP_PROXY_ADMIN_PASS:-changeme}
+      MCP_PROXY_JWT_SECRET: ${MCP_PROXY_JWT_SECRET:-}
+      MCP_PROXY_PORT: "8080"
+    restart: unless-stopped
+
+volumes:
+  mcp-proxy-data:
