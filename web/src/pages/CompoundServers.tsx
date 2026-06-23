@@ -15,8 +15,7 @@ import {
   Check,
 } from 'lucide-react';
 import { compounds as compoundsApi, servers as serversApi, type Server } from '@/api/client';
-import { Button, buttonVariants } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardAction } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
