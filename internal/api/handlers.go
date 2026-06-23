@@ -36,6 +36,14 @@ func New(s *store.Store, p *proxy.Manager, a *auth.AuthService) *Handlers {
 
 // SetupRoutes registers all API routes on the given mux.
 func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
+	// Health check (no auth — used by load balancers / Dokploy / Traefik)
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
 	// Auth routes (no auth required)
 	mux.HandleFunc("POST /api/auth/login", h.handleLogin)
 

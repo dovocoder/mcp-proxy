@@ -42,7 +42,6 @@ VOLUME ["/app/data"]
 EXPOSE 8080
 
 ENV MCP_PROXY_DB=/app/data/mcp-proxy.db
-ENV MCP_PROXY_WEB_DIST=/app/web/dist
 
 ENTRYPOINT ["./mcp-proxy"]
 CMD []
