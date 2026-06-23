@@ -14,6 +14,8 @@ import {
   Copy,
   Check,
   Loader2,
+  Terminal,
+  Eraser,
 } from 'lucide-react';
 import { servers as serversApi, tools as toolsApi, type DeviceAuthResult } from '../api/client';
 import { cn } from '../lib/utils';
@@ -83,6 +85,20 @@ export default function ServerDetail() {
     queryFn: () => serversApi.authStatus(id!),
     enabled: !!id && isHTTP,
     refetchInterval: 5000,
+  });
+
+  const isStdio = data?.server.transport === 'stdio';
+
+  const { data: logsData } = useQuery({
+    queryKey: ['server-logs', id],
+    queryFn: () => serversApi.logs(id!),
+    enabled: !!id && isStdio,
+    refetchInterval: 3000,
+  });
+
+  const clearLogsMutation = useMutation({
+    mutationFn: () => serversApi.clearLogs(id!),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['server-logs', id] }),
   });
 
   const reconnectMutation = useMutation({
@@ -307,6 +323,58 @@ export default function ServerDetail() {
           {renderCopyField('SSE endpoint', 'SSE', sseUrl)}
         </CardContent>
       </Card>
+
+      {/* Debug Logs (stdio only) */}
+      {isStdio && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Terminal className="size-4 text-muted-foreground shrink-0" />
+              <div>
+                <CardTitle>Debug Logs</CardTitle>
+                <CardDescription>
+                  stderr output from the stdio subprocess. Auto-refreshes every 3s.
+                  {logsData && logsData.count > 0 && ` ${logsData.count} lines captured.`}
+                </CardDescription>
+              </div>
+            </div>
+            <CardAction>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => clearLogsMutation.mutate()}
+                disabled={clearLogsMutation.isPending || !logsData?.count}
+              >
+                <Eraser className="size-4" />
+                <span className="hidden sm:inline">Clear</span>
+              </Button>
+            </CardAction>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-lg bg-black/60 border border-border overflow-hidden">
+              {logsData && logsData.logs && logsData.logs.length > 0 ? (
+                <div className="max-h-80 overflow-y-auto p-3 font-mono text-xs space-y-0.5">
+                  {logsData.logs.map((entry, i) => (
+                    <div key={i} className="flex gap-3 hover:bg-white/5 px-1 py-0.5 rounded">
+                      <span className="text-muted-foreground/60 shrink-0">
+                        {new Date(entry.timestamp).toLocaleTimeString()}
+                      </span>
+                      <span className="text-green-400/90 break-all whitespace-pre-wrap min-w-0">
+                        {entry.line}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+                  <Terminal className="size-5 mr-2 opacity-50" />
+                  No stderr output yet
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
         {/* Configuration */}

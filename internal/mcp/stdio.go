@@ -26,9 +26,11 @@ type stdioConn struct {
 	mu       sync.Mutex
 	pending  map[uint64]chan JSONRPCResponse
 	closed   bool
+
+	onStderr func(line string) // callback invoked for each stderr line
 }
 
-func newStdioConn(command string, args []string, env map[string]string, connectTimeout time.Duration) (*stdioConn, error) {
+func newStdioConn(command string, args []string, env map[string]string, connectTimeout time.Duration, onStderr func(string)) (*stdioConn, error) {
 	cmd := exec.Command(command, args...)
 
 	// Set environment
@@ -55,11 +57,12 @@ func newStdioConn(command string, args []string, env map[string]string, connectT
 	}
 
 	conn := &stdioConn{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		stderr:  stderr,
-		pending: make(map[uint64]chan JSONRPCResponse),
+		cmd:      cmd,
+		stdin:    stdin,
+		stdout:   stdout,
+		stderr:   stderr,
+		pending:  make(map[uint64]chan JSONRPCResponse),
+		onStderr: onStderr,
 	}
 
 	// Start reading responses
@@ -166,8 +169,10 @@ func (c *stdioConn) readLoop() {
 func (c *stdioConn) readStderr() {
 	scanner := bufio.NewScanner(c.stderr)
 	for scanner.Scan() {
-		// Log stderr for debugging - in production this would go to a logger
-		_ = scanner.Text()
+		line := scanner.Text()
+		if c.onStderr != nil {
+			c.onStderr(line)
+		}
 	}
 }
 

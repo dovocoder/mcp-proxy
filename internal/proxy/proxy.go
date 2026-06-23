@@ -17,6 +17,49 @@ import (
 	"github.com/google/uuid"
 )
 
+// LogEntry is a single stderr log line with timestamp.
+type LogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Line      string    `json:"line"`
+}
+
+// serverLog is a per-server ring buffer of stderr log lines.
+type serverLog struct {
+	mu     sync.Mutex
+	lines  []LogEntry
+	maxLen int
+}
+
+func newServerLog(maxLen int) *serverLog {
+	return &serverLog{maxLen: maxLen}
+}
+
+func (sl *serverLog) add(line string) {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	sl.lines = append(sl.lines, LogEntry{
+		Timestamp: time.Now(),
+		Line:      line,
+	})
+	if len(sl.lines) > sl.maxLen {
+		sl.lines = sl.lines[len(sl.lines)-sl.maxLen:]
+	}
+}
+
+func (sl *serverLog) get() []LogEntry {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	out := make([]LogEntry, len(sl.lines))
+	copy(out, sl.lines)
+	return out
+}
+
+func (sl *serverLog) clear() {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	sl.lines = nil
+}
+
 // Manager manages all backend MCP server connections.
 type Manager struct {
 	store       *store.Store
@@ -26,6 +69,8 @@ type Manager struct {
 	errors      map[string]string              // serverID -> last error message
 	authStates  map[string]*mcp.AuthState     // state -> pending OAuth flow
 	deviceAuths map[string]*DeviceAuthResult   // serverID -> pending device code flow
+	logMu       sync.RWMutex
+	serverLogs  map[string]*serverLog          // serverID -> stderr log ring buffer
 }
 
 // New creates a new proxy Manager.
@@ -37,6 +82,7 @@ func New(s *store.Store) *Manager {
 		errors:      make(map[string]string),
 		authStates:  make(map[string]*mcp.AuthState),
 		deviceAuths: make(map[string]*DeviceAuthResult),
+		serverLogs:  make(map[string]*serverLog),
 	}
 }
 
@@ -93,6 +139,9 @@ func (m *Manager) connectServer(srv *models.Server) {
 		AuthToken:      authToken,
 		Timeout:        srv.Timeout,
 		ConnectTimeout: srv.ConnectTimeout,
+		OnStderr: func(line string) {
+			m.addServerLog(srv.ID, line)
+		},
 	}
 
 	client := mcp.NewClient(cfg)
@@ -792,6 +841,49 @@ func (m *Manager) StopAll() {
 	for id, client := range m.clients {
 		client.Disconnect()
 		delete(m.clients, id)
+	}
+}
+
+// --- Server Logs (stdio debug) ---
+
+const maxLogLines = 500
+
+// addServerLog appends a stderr line to the server's log buffer.
+func (m *Manager) addServerLog(serverID, line string) {
+	m.logMu.RLock()
+	sl, ok := m.serverLogs[serverID]
+	m.logMu.RUnlock()
+
+	if !ok {
+		sl = newServerLog(maxLogLines)
+		m.logMu.Lock()
+		m.serverLogs[serverID] = sl
+		m.logMu.Unlock()
+	}
+
+	sl.add(line)
+}
+
+// GetServerLogs returns recent stderr log lines for a server.
+func (m *Manager) GetServerLogs(serverID string) []LogEntry {
+	m.logMu.RLock()
+	sl, ok := m.serverLogs[serverID]
+	m.logMu.RUnlock()
+
+	if !ok {
+		return []LogEntry{}
+	}
+	return sl.get()
+}
+
+// ClearServerLogs clears the log buffer for a server.
+func (m *Manager) ClearServerLogs(serverID string) {
+	m.logMu.RLock()
+	sl, ok := m.serverLogs[serverID]
+	m.logMu.RUnlock()
+
+	if ok {
+		sl.clear()
 	}
 }
 

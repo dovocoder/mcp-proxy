@@ -56,15 +56,19 @@ export interface Server {
   headers?: Record<string, string>;
   env?: Record<string, string>;
   auth_token?: string;
+  enabled: boolean;
   timeout: number;
   connect_timeout: number;
-  enabled: boolean;
   status: string;
-  last_seen?: string;
-  created_at: string;
-  updated_at: string;
   tools_count?: number;
   live_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LogEntry {
+  timestamp: string;
+  line: string;
 }
 
 export const servers = {
@@ -78,6 +82,10 @@ export const servers = {
     request<{ status: string }>(`/servers/${id}`, { method: 'DELETE' }),
   reconnect: (id: string) =>
     request<{ status: string }>(`/servers/${id}/reconnect`, { method: 'POST' }),
+  logs: (id: string) =>
+    request<{ logs: LogEntry[]; count: number }>(`/servers/${id}/logs`),
+  clearLogs: (id: string) =>
+    request<{ status: string }>(`/servers/${id}/logs`, { method: 'DELETE' }),
   initiateAuth: (id: string) =>
     request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
   authStatus: (id: string) =>

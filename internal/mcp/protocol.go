@@ -79,6 +79,7 @@ type Client struct {
 	authToken      string
 	timeout        time.Duration
 	connectTimeout time.Duration
+	onStderr       func(string) // callback for stderr lines (stdio transport only)
 
 	mu        sync.Mutex
 	tools     []Tool
@@ -101,6 +102,7 @@ type ClientConfig struct {
 	AuthToken      string
 	Timeout        int // seconds
 	ConnectTimeout int // seconds
+	OnStderr       func(string) // optional callback for stderr lines (stdio only)
 }
 
 // NewClient creates a new MCP client for a backend server.
@@ -123,6 +125,7 @@ func NewClient(cfg ClientConfig) *Client {
 		authToken:      cfg.AuthToken,
 		timeout:        timeout,
 		connectTimeout: connTimeout,
+		onStderr:       cfg.OnStderr,
 		status:         "disconnected",
 	}
 }
@@ -134,7 +137,7 @@ func (c *Client) Connect() error {
 
 	switch c.transport {
 	case "stdio":
-		conn, err := newStdioConn(c.command, c.args, c.env, c.connectTimeout)
+		conn, err := newStdioConn(c.command, c.args, c.env, c.connectTimeout, c.onStderr)
 		if err != nil {
 			c.status = "error"
 			c.lastErr = err.Error()
