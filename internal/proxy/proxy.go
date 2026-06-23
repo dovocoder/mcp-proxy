@@ -19,6 +19,7 @@ type Manager struct {
 	store   *store.Store
 	mu      sync.RWMutex
 	clients map[string]*mcp.Client // serverID -> client
+	errors  map[string]string     // serverID -> last error message
 }
 
 // New creates a new proxy Manager.
@@ -26,6 +27,7 @@ func New(s *store.Store) *Manager {
 	return &Manager{
 		store:   s,
 		clients: make(map[string]*mcp.Client),
+		errors:  make(map[string]string),
 	}
 }
 
@@ -54,6 +56,7 @@ func (m *Manager) connectServer(srv *models.Server) {
 		Env:            srv.Env,
 		URL:            srv.URL,
 		Headers:        srv.Headers,
+		AuthToken:      srv.AuthToken,
 		Timeout:        srv.Timeout,
 		ConnectTimeout: srv.ConnectTimeout,
 	}
@@ -61,12 +64,16 @@ func (m *Manager) connectServer(srv *models.Server) {
 	client := mcp.NewClient(cfg)
 	if err := client.Connect(); err != nil {
 		log.Printf("Failed to connect to server %s: %v", srv.Name, err)
+		m.mu.Lock()
+		m.errors[srv.ID] = err.Error()
+		m.mu.Unlock()
 		_ = m.store.UpdateServerStatus(srv.ID, "error")
 		return
 	}
 
 	m.mu.Lock()
 	m.clients[srv.ID] = client
+	delete(m.errors, srv.ID)
 	m.mu.Unlock()
 
 	_ = m.store.UpdateServerStatus(srv.ID, "connected")
@@ -98,6 +105,7 @@ func (m *Manager) AddServer(req *models.CreateServerRequest) (*models.Server, er
 		URL:            req.URL,
 		Headers:        req.Headers,
 		Env:            req.Env,
+		AuthToken:      req.AuthToken,
 		Timeout:        timeout,
 		ConnectTimeout: connTimeout,
 		Enabled:        enabled,
@@ -145,6 +153,9 @@ func (m *Manager) UpdateServer(id string, req *models.UpdateServerRequest) (*mod
 	if req.Env != nil {
 		srv.Env = *req.Env
 	}
+	if req.AuthToken != nil {
+		srv.AuthToken = *req.AuthToken
+	}
 	if req.Timeout != nil {
 		srv.Timeout = *req.Timeout
 	}
@@ -182,6 +193,7 @@ func (m *Manager) DisconnectServer(id string) {
 	if ok {
 		delete(m.clients, id)
 	}
+	delete(m.errors, id)
 	m.mu.Unlock()
 
 	if ok {
@@ -206,17 +218,18 @@ func (m *Manager) ReconnectServer(id string) error {
 func (m *Manager) GetServerStatus(id string) (status string, toolCount int, lastErr string) {
 	m.mu.RLock()
 	client, ok := m.clients[id]
+	lastErr = m.errors[id]
 	m.mu.RUnlock()
 
 	if !ok {
 		srv, err := m.store.GetServer(id)
 		if err != nil {
-			return "disconnected", 0, ""
+			return "disconnected", 0, lastErr
 		}
-		return srv.Status, 0, ""
+		return srv.Status, 0, lastErr
 	}
 
-	status, lastErr = client.Status()
+	status, _ = client.Status()
 	toolCount = len(client.Tools())
 	return
 }

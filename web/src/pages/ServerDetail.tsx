@@ -113,6 +113,12 @@ export default function ServerDetail() {
                 </dd>
               </div>
             )}
+            {srv.auth_token && (
+              <div className="flex justify-between">
+                <dt className="text-sm text-slate-500">Auth Token</dt>
+                <dd className="text-sm text-slate-300 font-mono">••••••••••••</dd>
+              </div>
+            )}
           </dl>
 
           <div className="flex gap-3 mt-6">

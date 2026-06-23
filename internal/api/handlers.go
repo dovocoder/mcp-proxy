@@ -193,15 +193,15 @@ func (h *Handlers) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Name is required")
 		return
 	}
-	if req.Transport != "stdio" && req.Transport != "http" {
+	if req.Transport != "stdio" && req.Transport != "http" && req.Transport != "streamable-http" {
 		req.Transport = "stdio"
 	}
 	if req.Transport == "stdio" && req.Command == "" {
 		writeError(w, http.StatusBadRequest, "Command is required for stdio transport")
 		return
 	}
-	if req.Transport == "http" && req.URL == "" {
-		writeError(w, http.StatusBadRequest, "URL is required for http transport")
+	if (req.Transport == "http" || req.Transport == "streamable-http") && req.URL == "" {
+		writeError(w, http.StatusBadRequest, "URL is required for http/streamable-http transport")
 		return
 	}
 

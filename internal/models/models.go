@@ -8,12 +8,13 @@ import (
 type Server struct {
 	ID             string     `json:"id"`
 	Name           string     `json:"name"`
-	Transport      string     `json:"transport"` // "stdio" or "http"
+	Transport      string     `json:"transport"` // "stdio", "http", or "streamable-http"
 	Command        string     `json:"command,omitempty"`
 	Args           []string   `json:"args,omitempty"`
 	URL            string     `json:"url,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
+	AuthToken      string     `json:"auth_token,omitempty"`
 	Timeout        int        `json:"timeout"`
 	ConnectTimeout int        `json:"connect_timeout"`
 	Enabled        bool       `json:"enabled"`
@@ -63,6 +64,7 @@ type CreateServerRequest struct {
 	URL            string              `json:"url,omitempty"`
 	Headers        map[string]string   `json:"headers,omitempty"`
 	Env            map[string]string   `json:"env,omitempty"`
+	AuthToken      string              `json:"auth_token,omitempty"`
 	Timeout        int                 `json:"timeout,omitempty"`
 	ConnectTimeout int                 `json:"connect_timeout,omitempty"`
 	Enabled        *bool               `json:"enabled,omitempty"`
@@ -77,6 +79,7 @@ type UpdateServerRequest struct {
 	URL            *string             `json:"url,omitempty"`
 	Headers        *map[string]string  `json:"headers,omitempty"`
 	Env            *map[string]string  `json:"env,omitempty"`
+	AuthToken      *string             `json:"auth_token,omitempty"`
 	Timeout        *int                `json:"timeout,omitempty"`
 	ConnectTimeout *int                `json:"connect_timeout,omitempty"`
 	Enabled        *bool               `json:"enabled,omitempty"`

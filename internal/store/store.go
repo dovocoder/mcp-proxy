@@ -48,6 +48,7 @@ func migrate(db *sql.DB) error {
 		url TEXT NOT NULL DEFAULT '',
 		headers TEXT NOT NULL DEFAULT '{}',
 		env TEXT NOT NULL DEFAULT '{}',
+		auth_token TEXT NOT NULL DEFAULT '',
 		timeout INTEGER NOT NULL DEFAULT 120,
 		connect_timeout INTEGER NOT NULL DEFAULT 60,
 		enabled INTEGER NOT NULL DEFAULT 1,
@@ -78,7 +79,18 @@ func migrate(db *sql.DB) error {
 	);
 	`
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migration: add auth_token column if it doesn't exist (for existing DBs)
+	_, err = db.Exec(`ALTER TABLE servers ADD COLUMN auth_token TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		// Column already exists — this is expected
+		// modernc.org/sqlite returns error for duplicate ALTER TABLE ADD COLUMN
+	}
+
+	return nil
 }
 
 // --- Servers ---
@@ -94,11 +106,11 @@ func (s *Store) CreateServer(srv *models.Server) error {
 	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO servers (id, name, transport, command, args, url, headers, env, timeout, connect_timeout, enabled, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO servers (id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		srv.ID, srv.Name, srv.Transport, srv.Command, string(argsJSON),
-		srv.URL, string(headersJSON), string(envJSON),
+		srv.URL, string(headersJSON), string(envJSON), srv.AuthToken,
 		srv.Timeout, srv.ConnectTimeout, enabled, srv.Status,
 		srv.CreatedAt, srv.UpdatedAt,
 	)
@@ -107,19 +119,19 @@ func (s *Store) CreateServer(srv *models.Server) error {
 
 // GetServer retrieves a server by ID.
 func (s *Store) GetServer(id string) (*models.Server, error) {
-	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers WHERE id = ?`, id)
 	return scanServer(row)
 }
 
 // GetServerByName retrieves a server by name.
 func (s *Store) GetServerByName(name string) (*models.Server, error) {
-	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers WHERE name = ?`, name)
+	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers WHERE name = ?`, name)
 	return scanServer(row)
 }
 
 // ListServers returns all servers.
 func (s *Store) ListServers() ([]*models.Server, error) {
-	rows, err := s.db.Query(`SELECT id, name, transport, command, args, url, headers, env, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -149,12 +161,12 @@ func (s *Store) UpdateServer(srv *models.Server) error {
 	_, err := s.db.Exec(`
 		UPDATE servers SET
 			name = ?, transport = ?, command = ?, args = ?, url = ?,
-			headers = ?, env = ?, timeout = ?, connect_timeout = ?,
+			headers = ?, env = ?, auth_token = ?, timeout = ?, connect_timeout = ?,
 			enabled = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		srv.Name, srv.Transport, srv.Command, string(argsJSON),
-		srv.URL, string(headersJSON), string(envJSON),
+		srv.URL, string(headersJSON), string(envJSON), srv.AuthToken,
 		srv.Timeout, srv.ConnectTimeout, enabled,
 		time.Now(), srv.ID,
 	)
@@ -284,7 +296,7 @@ func scanServerImpl(s rowScanner) (*models.Server, error) {
 
 	err := s.Scan(
 		&srv.ID, &srv.Name, &srv.Transport, &srv.Command, &argsJSON,
-		&srv.URL, &headersJSON, &envJSON,
+		&srv.URL, &headersJSON, &envJSON, &srv.AuthToken,
 		&srv.Timeout, &srv.ConnectTimeout, &enabled, &srv.Status,
 		&lastSeen, &createdAt, &updatedAt,
 	)

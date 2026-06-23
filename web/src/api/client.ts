@@ -55,6 +55,7 @@ export interface Server {
   url?: string;
   headers?: Record<string, string>;
   env?: Record<string, string>;
+  auth_token?: string;
   timeout: number;
   connect_timeout: number;
   enabled: boolean;
