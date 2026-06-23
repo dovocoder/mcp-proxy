@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { NavLink, useNavigate, Outlet } from 'react-router-dom';
-import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers } from 'lucide-react';
+import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, X } from 'lucide-react';
 import { clearToken } from '../api/client';
 
 interface LayoutProps {
@@ -14,6 +15,7 @@ interface LayoutProps {
 
 export default function Layout({ stats }: LayoutProps) {
   const navigate = useNavigate();
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   const handleLogout = () => {
     clearToken();
@@ -22,16 +24,63 @@ export default function Layout({ stats }: LayoutProps) {
 
   const navItems = [
     { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
-    { to: '/servers', label: 'Servers', icon: Server },
-    { to: '/compounds', label: 'Compounds', icon: Layers },
-    { to: '/keys', label: 'API Keys', icon: KeyRound },
-    { to: '/tools', label: 'Tools', icon: Wrench },
+    { to: '/servers', label: 'Servers', icon: Server, end: false },
+    { to: '/compounds', label: 'Compounds', icon: Layers, end: false },
+    { to: '/keys', label: 'API Keys', icon: KeyRound, end: false },
+    { to: '/tools', label: 'Tools', icon: Wrench, end: false },
   ];
 
+  const handleNavClick = () => setMobileOpen(false);
+
   return (
-    <div className="flex h-screen bg-slate-950">
-      {/* Sidebar */}
-      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
+    <div className="min-h-screen bg-slate-950 flex flex-col lg:flex-row">
+      {/* Mobile header */}
+      <header className="lg:hidden flex items-center justify-between px-4 h-14 bg-slate-900 border-b border-slate-800 sticky top-0 z-50">
+        <div className="flex items-center gap-2">
+          <Network className="w-6 h-6 text-brand-500" />
+          <span className="font-bold text-white">MCP Proxy</span>
+        </div>
+        <button
+          onClick={() => setMobileOpen(!mobileOpen)}
+          className="p-2 text-slate-400 hover:text-white rounded-lg"
+        >
+          {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
+      </header>
+
+      {/* Mobile slide-down menu */}
+      {mobileOpen && (
+        <div className="lg:hidden bg-slate-900 border-b border-slate-800 px-4 py-3 space-y-1">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              onClick={handleNavClick}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-brand-600 text-white'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                }`
+              }
+            >
+              <item.icon className="w-5 h-5" />
+              {item.label}
+            </NavLink>
+          ))}
+          <button
+            onClick={() => { handleLogout(); handleNavClick(); }}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+          >
+            <LogOut className="w-5 h-5" />
+            Logout
+          </button>
+        </div>
+      )}
+
+      {/* Desktop sidebar */}
+      <aside className="hidden lg:flex w-64 bg-slate-900 border-r border-slate-800 flex-col sticky top-0 h-screen">
         <div className="px-6 py-5 border-b border-slate-800">
           <div className="flex items-center gap-2">
             <Network className="w-7 h-7 text-brand-500" />
@@ -96,12 +145,32 @@ export default function Layout({ stats }: LayoutProps) {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto">
-        <div className="p-8">
+        <div className="p-4 sm:p-6 lg:p-8 max-w-6xl mx-auto">
           <Outlet />
         </div>
       </main>
+
+      {/* Mobile bottom nav */}
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800 flex items-center justify-around h-14 z-50">
+        {navItems.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={({ isActive }) =>
+              `flex flex-col items-center justify-center gap-0.5 flex-1 h-full transition-colors ${
+                isActive ? 'text-brand-400' : 'text-slate-500'
+              }`
+            }
+          >
+            <item.icon className="w-5 h-5" />
+            <span className="text-[10px] font-medium">{item.label}</span>
+          </NavLink>
+        ))}
+      </nav>
+
+      {/* Spacer for bottom nav on mobile */}
+      <div className="lg:hidden h-14" />
     </div>
   );
 }
-
-

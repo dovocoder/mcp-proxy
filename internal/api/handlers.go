@@ -82,6 +82,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("POST /api/servers/{id}/reconnect", h.handleReconnectServer)
 	adminMux.HandleFunc("POST /api/servers/{id}/auth", h.handleInitiateAuth)
 	adminMux.HandleFunc("GET /api/servers/{id}/auth-status", h.handleAuthStatus)
+	adminMux.HandleFunc("POST /api/servers/{id}/device-auth", h.handleInitiateDeviceAuth)
+	adminMux.HandleFunc("POST /api/servers/{id}/device-auth/poll", h.handlePollDeviceAuth)
+	adminMux.HandleFunc("DELETE /api/servers/{id}/device-auth", h.handleCancelDeviceAuth)
 
 	adminMux.HandleFunc("GET /api/keys", h.handleListAPIKeys)
 	adminMux.HandleFunc("POST /api/keys", h.handleCreateAPIKey)
@@ -612,6 +615,36 @@ func (h *Handlers) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"has_tokens": hasTokens,
 		"expired":    expired,
 	})
+}
+
+func (h *Handlers) handleInitiateDeviceAuth(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	result, err := h.proxy.InitiateDeviceAuth(id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handlers) handlePollDeviceAuth(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.proxy.PollDeviceAuth(id); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Check if auth completed
+	hasTokens, expired := h.proxy.GetAuthStatus(id)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"completed":  hasTokens,
+		"expired":    expired,
+	})
+}
+
+func (h *Handlers) handleCancelDeviceAuth(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	h.proxy.CancelDeviceAuth(id)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
 // SplitPath splits a URL path into segments.

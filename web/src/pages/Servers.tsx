@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Plus, Trash2, RefreshCw, Server as ServerIcon, Cloud, Zap } from 'lucide-react';
+import { Plus, Trash2, RefreshCw, Server as ServerIcon, Cloud, Zap, Terminal } from 'lucide-react';
 import { servers as serversApi, type Server } from '../api/client';
 
 const PRESETS = [
   {
     id: 'azure-devops',
-    name: 'Azure DevOps (Remote)',
+    name: 'Azure DevOps',
     icon: Cloud,
     description: 'Microsoft hosted MCP server',
     config: {
@@ -20,21 +20,20 @@ const PRESETS = [
   {
     id: 'azure-devops-local',
     name: 'Azure DevOps (Local)',
-    icon: Cloud,
+    icon: Terminal,
     description: 'Local stdio server via npx',
     config: {
       name: 'azure-devops-local',
       transport: 'stdio',
       command: 'npx',
       args: '-y @azure-devops/mcp',
-      urlHint: 'Organization name (e.g. contoso)',
     },
   },
   {
     id: 'github',
     name: 'GitHub MCP',
     icon: Zap,
-    description: 'GitHub MCP server',
+    description: 'GitHub MCP server via npx',
     config: {
       name: 'github',
       transport: 'stdio',
@@ -76,20 +75,21 @@ export default function Servers() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Servers</h1>
-          <p className="text-slate-500 mt-1">Manage backend MCP server connections</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-white">Servers</h1>
+          <p className="text-slate-500 mt-1 text-sm">Manage backend MCP server connections</p>
         </div>
         <button
           onClick={handleAddClick}
-          className="flex items-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium transition-colors"
+          className="flex items-center gap-2 px-3 sm:px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium text-sm transition-colors"
         >
           <Plus className="w-4 h-4" />
-          Add Server
+          <span className="hidden sm:inline">Add Server</span>
+          <span className="sm:hidden">Add</span>
         </button>
       </div>
 
       {showForm && !preset && (
-        <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
+        <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-6">
           <h2 className="text-lg font-semibold text-white mb-4">Choose a preset</h2>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {PRESETS.map((p) => (
@@ -123,12 +123,12 @@ export default function Servers() {
       {!showForm && (
         <div className="space-y-3">
           {srvList?.length === 0 && (
-            <div className="bg-slate-900 rounded-xl border border-slate-800 p-12 text-center">
-              <ServerIcon className="w-12 h-12 text-slate-700 mx-auto mb-3" />
+            <div className="bg-slate-900 rounded-xl border border-slate-800 p-8 sm:p-12 text-center">
+              <ServerIcon className="w-10 h-10 text-slate-700 mx-auto mb-3" />
               <p className="text-slate-500">No servers configured yet</p>
               <button
                 onClick={handleAddClick}
-                className="mt-4 text-brand-400 hover:text-brand-300 font-medium"
+                className="mt-3 text-brand-400 hover:text-brand-300 font-medium text-sm"
               >
                 Add your first server →
               </button>
@@ -136,18 +136,18 @@ export default function Servers() {
           )}
 
           {srvList?.map((srv) => (
-            <div key={srv.id} className="bg-slate-900 rounded-xl border border-slate-800 p-5">
-              <div className="flex items-center justify-between">
-                <Link to={`/servers/${srv.id}`} className="flex items-center gap-3 flex-1">
-                  <div className={`w-3 h-3 rounded-full ${
+            <div key={srv.id} className="bg-slate-900 rounded-xl border border-slate-800 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <Link to={`/servers/${srv.id}`} className="flex items-center gap-3 min-w-0 flex-1">
+                  <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1 ${
                     srv.status === 'connected' ? 'bg-emerald-400' :
                     srv.status === 'error' ? 'bg-red-400' : 'bg-slate-600'
                   }`} />
-                  <div>
-                    <div className="font-semibold text-white hover:text-brand-300 transition-colors">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-white hover:text-brand-300 transition-colors truncate">
                       {srv.name}
                     </div>
-                    <div className="text-sm text-slate-500">
+                    <div className="text-sm text-slate-500 truncate">
                       {srv.transport === 'stdio'
                         ? `${srv.command} ${(srv.args || []).join(' ')}`
                         : srv.url}
@@ -155,10 +155,8 @@ export default function Servers() {
                   </div>
                 </Link>
 
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-slate-600 uppercase tracking-wide">{srv.transport}</span>
-                  <span className="text-sm text-slate-500">{srv.tools_count ?? 0} tools</span>
-                  <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className={`text-xs font-medium px-2 py-1 rounded-full ${
                     srv.status === 'connected'
                       ? 'bg-emerald-950/50 text-emerald-400'
                       : srv.status === 'error'
@@ -184,8 +182,13 @@ export default function Servers() {
                 </div>
               </div>
 
+              <div className="mt-2 flex items-center gap-3 text-xs text-slate-600">
+                <span className="uppercase tracking-wide">{srv.transport}</span>
+                <span>{srv.tools_count ?? 0} tools</span>
+              </div>
+
               {srv.live_error && (
-                <div className="mt-3 text-xs text-red-400 bg-red-950/30 border border-red-900/50 rounded-lg px-3 py-2">
+                <div className="mt-2 text-xs text-red-400 bg-red-950/30 border border-red-900/50 rounded-lg px-3 py-2">
                   {srv.live_error}
                 </div>
               )}
@@ -275,19 +278,19 @@ function ServerForm({ preset, onClose }: { preset: { id: string; name: string; c
   };
 
   return (
-    <form onSubmit={handleSubmit} className="bg-slate-900 rounded-xl border border-slate-800 p-6 space-y-4">
+    <form onSubmit={handleSubmit} className="bg-slate-900 rounded-xl border border-slate-800 p-4 sm:p-6 space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-white">Add MCP Server</h2>
         <span className="text-xs text-slate-500 bg-slate-800 px-2 py-1 rounded">{preset.name}</span>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <label className="block text-sm font-medium text-slate-300 mb-1.5">Name</label>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500"
+            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 text-sm"
             placeholder="my-server"
             required
           />
@@ -297,23 +300,23 @@ function ServerForm({ preset, onClose }: { preset: { id: string; name: string; c
           <select
             value={transport}
             onChange={(e) => setTransport(e.target.value)}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500"
+            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 text-sm"
           >
-            <option value="stdio">stdio</option>
-            <option value="http">http (legacy)</option>
-            <option value="streamable-http">streamable-http</option>
+            <option value="stdio">stdio (local process)</option>
+            <option value="streamable-http">streamable-http (remote)</option>
+            <option value="http">http (legacy SSE)</option>
           </select>
         </div>
       </div>
 
       {transport === 'stdio' ? (
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5">Command</label>
             <input
               value={command}
               onChange={(e) => setCommand(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500"
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
               placeholder="npx"
               required
             />
@@ -323,7 +326,7 @@ function ServerForm({ preset, onClose }: { preset: { id: string; name: string; c
             <input
               value={args}
               onChange={(e) => setArgs(e.target.value)}
-              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500"
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
               placeholder="-y @modelcontextprotocol/server-github"
             />
           </div>
@@ -346,18 +349,17 @@ function ServerForm({ preset, onClose }: { preset: { id: string; name: string; c
       {isHTTP && (
         <div>
           <label className="block text-sm font-medium text-slate-300 mb-1.5">
-            Auth Token (Bearer)
-            <span className="text-slate-600 font-normal ml-1">{'\u2014'} sent as Authorization header</span>
+            Auth Token <span className="text-slate-600 font-normal">— optional, used as client_id for OAuth</span>
           </label>
           <input
             type="password"
             value={authToken}
             onChange={(e) => setAuthToken(e.target.value)}
             className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-brand-500 font-mono text-sm"
-            placeholder="OAuth token, PAT, or API key"
+            placeholder="Leave empty for Entra ID (auto-detected)"
           />
           <p className="text-xs text-slate-600 mt-1">
-            For Azure DevOps: use an OAuth token from the Microsoft auth flow.
+            For Entra ID / Azure DevOps: leave empty — OAuth will use a built-in public client. Enter a client_id only if you have a custom app registration.
           </p>
         </div>
       )}
@@ -396,14 +398,14 @@ function ServerForm({ preset, onClose }: { preset: { id: string; name: string; c
         <button
           type="submit"
           disabled={loading}
-          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
+          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white rounded-lg font-medium text-sm transition-colors"
         >
           {loading ? 'Creating...' : 'Create Server'}
         </button>
         <button
           type="button"
           onClick={onClose}
-          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-medium transition-colors"
+          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-medium text-sm transition-colors"
         >
           Cancel
         </button>

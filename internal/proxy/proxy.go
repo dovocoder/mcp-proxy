@@ -3,8 +3,10 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,20 +18,22 @@ import (
 
 // Manager manages all backend MCP server connections.
 type Manager struct {
-	store      *store.Store
-	mu         sync.RWMutex
-	clients    map[string]*mcp.Client // serverID -> client
-	errors     map[string]string     // serverID -> last error message
-	authStates map[string]*mcp.AuthState // serverID -> pending OAuth flow
+	store       *store.Store
+	mu          sync.RWMutex
+	clients     map[string]*mcp.Client         // serverID -> client
+	errors      map[string]string              // serverID -> last error message
+	authStates  map[string]*mcp.AuthState     // state -> pending OAuth flow
+	deviceAuths map[string]*DeviceAuthResult   // serverID -> pending device code flow
 }
 
 // New creates a new proxy Manager.
 func New(s *store.Store) *Manager {
 	return &Manager{
-		store:      s,
-		clients:    make(map[string]*mcp.Client),
-		errors:     make(map[string]string),
-		authStates: make(map[string]*mcp.AuthState),
+		store:       s,
+		clients:     make(map[string]*mcp.Client),
+		errors:      make(map[string]string),
+		authStates:  make(map[string]*mcp.AuthState),
+		deviceAuths: make(map[string]*DeviceAuthResult),
 	}
 }
 
@@ -490,6 +494,14 @@ func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string,
 		log.Printf("Using configured client ID for server %s", srv.Name)
 	}
 
+	// If still no client ID, check if the authorization server is Entra ID.
+	// Entra ID doesn't support dynamic registration, but we can use a well-known
+	// public client (Azure CLI's client_id) with PKCE — no app registration needed.
+	if clientID == "" && (mcp.IsEntraID(metadata.Issuer) || mcp.IsEntraID(metadata.AuthorizationEndpoint) || mcp.IsEntraID(metadata.TokenEndpoint)) {
+		clientID = mcp.EntraIDPublicClientID
+		log.Printf("Using Entra ID public client for server %s (no app registration required)", srv.Name)
+	}
+
 	if clientID == "" {
 		return "", fmt.Errorf("no client ID available — dynamic registration not supported by the authorization server. Configure a client_id in the server's Auth Token field, or register an OAuth app in your identity provider (e.g., Microsoft Entra ID) and enter the client ID")
 	}
@@ -587,6 +599,125 @@ func (m *Manager) GetAuthStatus(serverID string) (hasTokens bool, expired bool) 
 		return false, false
 	}
 	return true, tokens.IsExpired()
+}
+
+// DeviceAuthResult holds the result of initiating a device code flow.
+type DeviceAuthResult struct {
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	Message         string `json:"message"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
+	DeviceCode      string `json:"-"`
+	ServerID        string `json:"-"`
+	ClientID        string `json:"-"`
+	TokenEndpoint   string `json:"-"`
+}
+
+// InitiateDeviceAuth starts a device code flow for a server. This is the preferred
+// method for Entra ID because it doesn't require a redirect URI — works from any deployment.
+func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error) {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil {
+		return nil, fmt.Errorf("server not found: %w", err)
+	}
+
+	if srv.Transport != "http" && srv.Transport != "streamable-http" {
+		return nil, fmt.Errorf("OAuth only supported for http/streamable-http transports")
+	}
+
+	// Discover OAuth metadata
+	metadata, err := mcp.DiscoverOAuthMetadata(srv.URL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover OAuth metadata: %w", err)
+	}
+
+	// Determine client ID: configured > Entra ID public client
+	clientID := srv.AuthToken
+	if clientID == "" && (mcp.IsEntraID(metadata.Issuer) || mcp.IsEntraID(metadata.AuthorizationEndpoint) || mcp.IsEntraID(metadata.TokenEndpoint)) {
+		clientID = mcp.EntraIDPublicClientID
+		log.Printf("Using Entra ID public client for device code flow (server %s)", srv.Name)
+	}
+	if clientID == "" {
+		return nil, fmt.Errorf("no client ID available — configure a client_id in the server's Auth Token field")
+	}
+
+	// Build scope from metadata
+	scope := ""
+	if len(metadata.ScopesSupported) > 0 {
+		scope = strings.Join(metadata.ScopesSupported, " ")
+	}
+
+	// Request device code
+	dcResp, err := mcp.RequestDeviceCode(metadata, clientID, scope)
+	if err != nil {
+		return nil, fmt.Errorf("device code request failed: %w", err)
+	}
+
+	result := &DeviceAuthResult{
+		UserCode:        dcResp.UserCode,
+		VerificationURI: dcResp.VerificationURI,
+		Message:         dcResp.Message,
+		ExpiresIn:       dcResp.ExpiresIn,
+		Interval:        dcResp.Interval,
+		DeviceCode:      dcResp.DeviceCode,
+		ServerID:        serverID,
+		ClientID:        clientID,
+		TokenEndpoint:   metadata.TokenEndpoint,
+	}
+
+	// Store for polling
+	m.mu.Lock()
+	m.deviceAuths[serverID] = result
+	m.mu.Unlock()
+
+	return result, nil
+}
+
+// PollDeviceAuth polls the token endpoint for a pending device code flow.
+// Returns nil if authentication is still pending, or tokens if completed.
+func (m *Manager) PollDeviceAuth(serverID string) error {
+	m.mu.Lock()
+	auth, ok := m.deviceAuths[serverID]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no pending device auth for server %s", serverID)
+	}
+
+	tokens, err := mcp.PollDeviceToken(auth.TokenEndpoint, auth.ClientID, auth.DeviceCode)
+	if err != nil {
+		if errors.Is(err, mcp.ErrAuthorizationPending) {
+			return nil // Still pending — frontend should keep polling
+		}
+		return fmt.Errorf("device auth poll failed: %w", err)
+	}
+
+	// Success — store tokens and clean up
+	if err := m.store.SaveOAuthTokens(serverID, tokens, auth.ClientID, ""); err != nil {
+		return fmt.Errorf("failed to save tokens: %w", err)
+	}
+
+	m.mu.Lock()
+	delete(m.deviceAuths, serverID)
+	m.mu.Unlock()
+
+	log.Printf("OAuth tokens stored via device code flow for server %s", serverID)
+
+	// Reconnect the server with the new token
+	srv, err := m.store.GetServer(serverID)
+	if err == nil {
+		m.DisconnectServer(serverID)
+		go m.connectServer(srv)
+	}
+
+	return nil
+}
+
+// CancelDeviceAuth removes a pending device auth flow.
+func (m *Manager) CancelDeviceAuth(serverID string) {
+	m.mu.Lock()
+	delete(m.deviceAuths, serverID)
+	m.mu.Unlock()
 }
 
 // StopAll disconnects all servers.

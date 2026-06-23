@@ -26,17 +26,20 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
+    <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4 py-8">
       <div className="w-full max-w-md">
-        <div className="text-center mb-8">
+        <div className="text-center mb-6 sm:mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-brand-600 mb-4">
             <Network className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-2xl font-bold text-white">MCP Proxy</h1>
-          <p className="text-slate-500 mt-1">Gateway Management Console</p>
+          <p className="text-sm text-slate-500 mt-1">Gateway Management Console</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="bg-slate-900 rounded-xl border border-slate-800 p-6 space-y-4">
+        <form
+          onSubmit={handleSubmit}
+          className="bg-slate-900 rounded-xl border border-slate-800 p-5 sm:p-6 space-y-4"
+        >
           <div>
             <label className="block text-sm font-medium text-slate-300 mb-1.5">Username</label>
             <div className="relative">
@@ -45,7 +48,7 @@ export default function Login() {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="w-full pl-10 pr-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors"
+                className="w-full pl-10 pr-3 py-2.5 min-h-[44px] bg-slate-800 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors"
                 placeholder="admin"
                 required
               />
@@ -60,7 +63,7 @@ export default function Login() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full pl-10 pr-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors"
+                className="w-full pl-10 pr-3 py-2.5 min-h-[44px] bg-slate-800 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors"
                 placeholder="••••••••"
                 required
               />
@@ -68,7 +71,7 @@ export default function Login() {
           </div>
 
           {error && (
-            <div className="text-sm text-red-400 bg-red-950/50 border border-red-900 rounded-lg px-3 py-2">
+            <div className="text-sm text-red-400 bg-red-950/50 border border-red-900 rounded-lg px-3 py-2 break-words">
               {error}
             </div>
           )}
@@ -76,13 +79,13 @@ export default function Login() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+            className="w-full py-2.5 min-h-[44px] bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
           >
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
 
-        <p className="text-center text-xs text-slate-600 mt-6">
+        <p className="text-center text-xs text-slate-600 mt-5 sm:mt-6 px-4">
           Default credentials: admin / admin (set MCP_PROXY_ADMIN_PASS to change)
         </p>
       </div>

@@ -82,7 +82,23 @@ export const servers = {
     request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
   authStatus: (id: string) =>
     request<{ status: string; has_tokens: boolean; expired: boolean }>(`/servers/${id}/auth-status`),
+  initiateDeviceAuth: (id: string) =>
+    request<DeviceAuthResult>(`/servers/${id}/device-auth`, { method: 'POST' }),
+  pollDeviceAuth: (id: string) =>
+    request<{ completed: boolean; expired: boolean }>(`/servers/${id}/device-auth/poll`, { method: 'POST' }),
+  cancelDeviceAuth: (id: string) =>
+    request<{ status: string }>(`/servers/${id}/device-auth`, { method: 'DELETE' }),
 };
+
+// --- Device Auth ---
+
+export interface DeviceAuthResult {
+  user_code: string;
+  verification_uri: string;
+  message: string;
+  expires_in: number;
+  interval: number;
+}
 
 // --- API Keys ---
 

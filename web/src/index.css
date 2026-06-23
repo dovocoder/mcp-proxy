@@ -42,3 +42,10 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #64748b;
 }
+
+@media (max-width: 640px) {
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+}

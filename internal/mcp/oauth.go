@@ -254,6 +254,47 @@ func discoverViaProtectedResource(serverURL string) (*OAuthServerMetadata, error
 		}
 	}
 
+	// If we found authorization servers but no metadata, try OIDC discovery
+	// (Entra ID uses openid-configuration, not oauth-authorization-server)
+	for _, authServerURL := range prm.AuthorizationServers {
+		oidcURL := authServerURL + "/.well-known/openid-configuration"
+		oidcReq, err := http.NewRequest("GET", oidcURL, nil)
+		if err != nil {
+			continue
+		}
+		oidcReq.Header.Set("Accept", "application/json")
+
+		oidcResp, err := client.Do(oidcReq)
+		if err != nil {
+			continue
+		}
+
+		if oidcResp.StatusCode == http.StatusOK {
+			body, _ := io.ReadAll(oidcResp.Body)
+			oidcResp.Body.Close()
+
+			// Parse OIDC metadata — it has the same endpoints we need
+			var oidc struct {
+				Issuer                string `json:"issuer"`
+				AuthorizationEndpoint string `json:"authorization_endpoint"`
+				TokenEndpoint         string `json:"token_endpoint"`
+				RevocationEndpoint    string `json:"revocation_endpoint,omitempty"`
+				ScopesSupported       []string `json:"scopes_supported,omitempty"`
+			}
+			if json.Unmarshal(body, &oidc) == nil && oidc.AuthorizationEndpoint != "" {
+				return &OAuthServerMetadata{
+					Issuer:               oidc.Issuer,
+					AuthorizationEndpoint: oidc.AuthorizationEndpoint,
+					TokenEndpoint:         oidc.TokenEndpoint,
+					RevocationEndpoint:    oidc.RevocationEndpoint,
+					ScopesSupported:       prm.ScopesSupported,
+				}, nil
+			}
+		} else {
+			oidcResp.Body.Close()
+		}
+	}
+
 	// If we found authorization servers but no metadata, use Entra ID default endpoints
 	if len(prm.AuthorizationServers) > 0 {
 		authServer := prm.AuthorizationServers[0]
@@ -477,6 +518,25 @@ func RefreshToken(tokenEndpoint, clientID, clientSecret, refreshToken string) (*
 	return tokens, nil
 }
 
+// Well-known public client IDs for identity providers that don't support
+// dynamic client registration. These are first-party public clients that
+// accept any Azure AD / Entra ID user with PKCE (no secret required).
+const (
+	// Azure CLI public client — works with the /organizations tenant for any Entra ID user.
+	EntraIDPublicClientID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+)
+
+// IsEntraID checks if an authorization server URL belongs to Microsoft Entra ID.
+func IsEntraID(authServerURL string) bool {
+	return isEntraIDURL(authServerURL)
+}
+
+func isEntraIDURL(url string) bool {
+	return strings.Contains(url, "login.microsoftonline.com") ||
+		strings.Contains(url, "login.windows.net") ||
+		strings.Contains(url, "login.microsoft.com")
+}
+
 // GenerateState generates a random OAuth state parameter.
 func GenerateState() (string, error) {
 	b := make([]byte, 16)
@@ -485,3 +545,158 @@ func GenerateState() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
+
+// DeviceCodeResponse represents the response from the device authorization endpoint.
+type DeviceCodeResponse struct {
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
+	Message         string `json:"message"`
+}
+
+// RequestDeviceCode initiates the device code flow by requesting a device code
+// from the authorization server's device authorization endpoint.
+func RequestDeviceCode(metadata *OAuthServerMetadata, clientID, scope string) (*DeviceCodeResponse, error) {
+	// Construct the device authorization endpoint.
+	// Entra ID: https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode
+	// The issuer is typically https://login.microsoftonline.com/{tenant}/v2.0
+	// so we need to insert /oauth2 before /v2.0/devicecode
+	deviceEndpoint := ""
+
+	if isEntraIDURL(metadata.Issuer) || isEntraIDURL(metadata.TokenEndpoint) {
+		// Entra ID device code endpoint: {base}/{tenant}/oauth2/v2.0/devicecode
+		// Derive from token endpoint which is {base}/{tenant}/oauth2/v2.0/token
+		if metadata.TokenEndpoint != "" {
+			// Replace /token with /devicecode
+			deviceEndpoint = strings.Replace(metadata.TokenEndpoint, "/token", "/devicecode", 1)
+		}
+		if deviceEndpoint == "" && metadata.Issuer != "" {
+			// Issuer is like https://login.microsoftonline.com/{tenant}/v2.0
+			// Need: https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode
+			deviceEndpoint = strings.Replace(metadata.Issuer, "/v2.0", "/oauth2/v2.0/devicecode", 1)
+		}
+	} else if metadata.Issuer != "" {
+		// Generic OAuth: try {issuer}/devicecode
+		deviceEndpoint = strings.TrimSuffix(metadata.Issuer, "/") + "/devicecode"
+	} else if metadata.TokenEndpoint != "" {
+		// Derive from token endpoint: replace /token with /devicecode
+		idx := strings.LastIndex(metadata.TokenEndpoint, "/")
+		if idx > 0 {
+			base := metadata.TokenEndpoint[:idx]
+			deviceEndpoint = base + "/devicecode"
+		}
+	}
+	if deviceEndpoint == "" {
+		return nil, fmt.Errorf("cannot determine device authorization endpoint")
+	}
+
+	params := url.Values{
+		"client_id": {clientID},
+	}
+	if scope != "" {
+		params.Set("scope", scope)
+	}
+
+	req, err := http.NewRequest("POST", deviceEndpoint, strings.NewReader(params.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("device code request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("device code request failed (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var dcResp DeviceCodeResponse
+	if err := json.Unmarshal(respBody, &dcResp); err != nil {
+		return nil, fmt.Errorf("failed to parse device code response: %w", err)
+	}
+	if dcResp.DeviceCode == "" || dcResp.UserCode == "" {
+		return nil, fmt.Errorf("device code response missing required fields")
+	}
+	if dcResp.Interval == 0 {
+		dcResp.Interval = 5
+	}
+
+	return &dcResp, nil
+}
+
+// PollDeviceToken polls the token endpoint for a device code flow.
+// Returns tokens when the user completes authentication, or an error if expired/declined.
+func PollDeviceToken(tokenEndpoint, clientID, deviceCode string) (*OAuthTokens, error) {
+	params := url.Values{
+		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+		"client_id":   {clientID},
+		"device_code": {deviceCode},
+	}
+
+	req, err := http.NewRequest("POST", tokenEndpoint, strings.NewReader(params.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token poll failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		// Parse error to check if it's "authorization_pending"
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil {
+			if errResp.Error == "authorization_pending" || errResp.Error == "slow_down" {
+				return nil, ErrAuthorizationPending
+			}
+		}
+		return nil, fmt.Errorf("token poll failed (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token,omitempty"`
+		ExpiresIn    int    `json:"expires_in,omitempty"`
+		Scope        string `json:"scope,omitempty"`
+	}
+	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse token response: %w", err)
+	}
+
+	tokens := &OAuthTokens{
+		AccessToken:  tokenResp.AccessToken,
+		TokenType:    tokenResp.TokenType,
+		RefreshToken: tokenResp.RefreshToken,
+		Scope:        tokenResp.Scope,
+	}
+	if tokenResp.ExpiresIn > 0 {
+		tokens.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	}
+
+	if tokens.AccessToken == "" {
+		return nil, fmt.Errorf("token response missing access_token")
+	}
+
+	return tokens, nil
+}
+
+// ErrAuthorizationPending indicates the user has not yet completed device authentication.
+var ErrAuthorizationPending = fmt.Errorf("authorization pending")
