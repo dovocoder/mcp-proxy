@@ -85,7 +85,7 @@ func main() {
 		srv.Close()
 	}()
 
-	log.Printf("MCP Proxy starting on http://localhost:%s", cfg.Port)
+	log.Printf("MCP Proxy starting on http://0.0.0.0:%s", cfg.Port)
 	log.Printf("Default admin: %s (set MCP_PROXY_ADMIN_PASS to change)", cfg.AdminUsername)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
