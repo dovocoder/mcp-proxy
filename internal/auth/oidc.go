@@ -488,18 +488,17 @@ func (p *OIDCProvider) IntrospectToken(accessToken string) (ProviderUser, error)
 	form := url.Values{
 		"token": {accessToken},
 	}
-	if clientID != "" {
-		form.Set("client_id", clientID)
-	}
-	if clientSecret != "" {
-		form.Set("client_secret", clientSecret)
-	}
 
 	req, err := http.NewRequest("POST", introspectionURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return ProviderUser{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	// PocketID requires HTTP Basic auth for introspection — form params don't work
+	if clientID != "" && clientSecret != "" {
+		req.SetBasicAuth(clientID, clientSecret)
+	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -519,12 +518,11 @@ func (p *OIDCProvider) IntrospectToken(accessToken string) (ProviderUser, error)
 	}
 
 	var result struct {
-		Active       bool                   `json:"active"`
-		Subject      string                 `json:"sub"`
-		Email        string                 `json:"email"`
-		Name         string                 `json:"name"`
-		Username     string                 `json:"preferred_username"`
-		Claims       map[string]interface{} `json:"-"`
+		Active   bool   `json:"active"`
+		Subject  string `json:"sub"`
+		Email    string `json:"email"`
+		Name     string `json:"name"`
+		Username string `json:"preferred_username"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return ProviderUser{}, fmt.Errorf("failed to parse introspection response: %w", err)

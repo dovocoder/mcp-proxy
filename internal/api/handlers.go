@@ -882,6 +882,9 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 		upstreamParams.Set("resource", resource)
 	}
 
+	log.Printf("[OAuth-Authorize] redirect_uri=%s -> %s, has_pkce=%v, resource=%s, scope=%s",
+		clientRedirectURI, proxyCallbackURL, codeChallenge != "", resource, scope)
+
 	http.Redirect(w, r, upstreamURL+"?"+upstreamParams.Encode(), http.StatusFound)
 }
 
@@ -901,10 +904,12 @@ func (h *Handlers) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// Try to decode the state as a proxy-issued JWT
 	clientRedirect, clientState, err := h.auth.VerifyOAuthState(state)
 	if err != nil {
+		log.Printf("[OAuth-Callback] State not a proxy JWT (len=%d), trying MCP server auth flow: %v", len(state), err)
 		// Not a proxy-issued state — fall back to the existing MCP server auth flow
 		// (this handles the case where the proxy itself initiates OAuth for an
 		// upstream MCP server like GitHub Copilot)
 		if err := h.proxy.HandleAuthCallback(state, code); err != nil {
+			log.Printf("[OAuth-Callback] MCP server auth callback failed: %v", err)
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, err.Error())
@@ -918,6 +923,7 @@ func (h *Handlers) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Proxy-issued state: forward the code + client's original state to the
 	// client's actual redirect_uri
+	log.Printf("[OAuth-Callback] Redirecting to client: %s (has_state=%v)", clientRedirect, clientState != "")
 	targetURL := clientRedirect
 	if clientState != "" {
 		targetURL += "?" + url.Values{
@@ -1865,22 +1871,38 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Body.Close()
 
-		// Parse form data
-		vals, err := url.ParseQuery(string(bodyBytes))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "Failed to parse form data")
-			return
-		}
-
-		// Replace redirect_uri with the proxy's callback URL
+		// Determine if body is JSON or form-encoded
+		contentType := r.Header.Get("Content-Type")
 		scheme := "http"
 		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 			scheme = "https"
 		}
 		proxyCallbackURL := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
-		vals.Set("redirect_uri", proxyCallbackURL)
 
-		bodyReader = strings.NewReader(vals.Encode())
+		if strings.Contains(contentType, "json") {
+			// JSON body — parse, replace redirect_uri, re-encode as JSON
+			var jsonBody map[string]interface{}
+			if err := json.Unmarshal(bodyBytes, &jsonBody); err != nil {
+				writeError(w, http.StatusBadRequest, "Failed to parse JSON body")
+				return
+			}
+			jsonBody["redirect_uri"] = proxyCallbackURL
+			newBody, _ := json.Marshal(jsonBody)
+			bodyReader = strings.NewReader(string(newBody))
+			log.Printf("[OAuth-Proxy] Token request (JSON): replaced redirect_uri with %s", proxyCallbackURL)
+		} else {
+			// Form-encoded body — parse, replace redirect_uri, re-encode
+			vals, err := url.ParseQuery(string(bodyBytes))
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "Failed to parse form data")
+				return
+			}
+			log.Printf("[OAuth-Proxy] Token request (form): grant_type=%s, has_code=%v, has_verifier=%v, redirect_uri=%s -> %s",
+				vals.Get("grant_type"), vals.Get("code") != "", vals.Get("code_verifier") != "",
+				vals.Get("redirect_uri"), proxyCallbackURL)
+			vals.Set("redirect_uri", proxyCallbackURL)
+			bodyReader = strings.NewReader(vals.Encode())
+		}
 	} else if r.Body != nil {
 		bodyReader = r.Body
 	}
@@ -1912,6 +1934,25 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// For token requests, log the upstream response status
+	if r.URL.Path == "/api/oauth/token" {
+		respBody, _ := io.ReadAll(resp.Body)
+		respBodyStr := string(respBody)
+		// Log whether token exchange succeeded (don't log token values)
+		hasToken := strings.Contains(respBodyStr, "\"access_token\"")
+		log.Printf("[OAuth-Proxy] Token exchange: upstream returned %d, has_token=%v, body_len=%d",
+			resp.StatusCode, hasToken, len(respBodyStr))
+		// Write the response body back to the client
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
 
 	// Copy response headers
 	for k, vs := range resp.Header {
