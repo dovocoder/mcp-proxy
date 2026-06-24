@@ -237,6 +237,27 @@ func (p *OIDCProvider) Issuer() string {
 	return p.config.Issuer
 }
 
+// Discovery returns the discovered OIDC endpoints (nil if not discovered yet).
+func (p *OIDCProvider) Discovery() *OIDCProviderConfig {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.discovery
+}
+
+// ClientID returns the configured OAuth client ID.
+func (p *OIDCProvider) ClientID() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.config.ClientID
+}
+
+// ClientSecret returns the configured OAuth client secret.
+func (p *OIDCProvider) ClientSecret() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.config.ClientSecret
+}
+
 // ProviderUser represents the extracted user info from OIDC.
 type ProviderUser struct {
 	Subject string

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -240,7 +241,18 @@ func (a *AuthService) APIKeyMiddleware(next http.Handler) http.Handler {
 }
 
 // writeMCPAuthError writes a 401 with WWW-Authenticate header for MCP client discovery.
+// Also logs the auth failure for debugging MCP client connection issues.
 func (a *AuthService) writeMCPAuthError(w http.ResponseWriter, r *http.Request, message string) {
+	// Log the auth failure with request details for debugging
+	clientIP := r.RemoteAddr
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		clientIP = forwarded
+	}
+	log.Printf("[MCP-Auth] 401 %s %s — %s (client=%s, has_auth_header=%v, auth_methods=%s)",
+		r.Method, r.URL.Path, message, clientIP,
+		r.Header.Get("Authorization") != "" || r.Header.Get("X-API-Key") != "",
+		a.authMethodsDescription())
+
 	// If OIDC is configured, add resource_metadata hint for MCP clients
 	if a.HasOIDC() {
 		scheme := "http"
@@ -249,11 +261,20 @@ func (a *AuthService) writeMCPAuthError(w http.ResponseWriter, r *http.Request, 
 		}
 		metadataURL := fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", scheme, r.Host)
 		w.Header().Set("WWW-Authenticate",
-			fmt.Sprintf(`Bearer resource_metadata="%s"`, metadataURL))
+			fmt.Sprintf(`Bearer resource_metadata="%s", scope="openid profile email"`, metadataURL))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// authMethodsDescription returns a comma-separated list of configured auth methods.
+func (a *AuthService) authMethodsDescription() string {
+	methods := []string{"api-key"}
+	if a.HasOIDC() {
+		methods = append(methods, "oidc")
+	}
+	return strings.Join(methods, ", ")
 }
 
 // AdminUserFromContext extracts the admin user info from JWT claims in context.

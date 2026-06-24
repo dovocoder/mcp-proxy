@@ -81,8 +81,14 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Protected Resource Metadata (RFC 9728) — for MCP client OAuth discovery
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", h.handleProtectedResourceMetadata)
 
+	// Authorization Server Metadata (RFC 8414) — wraps OIDC provider endpoints + adds DCR/CIMD
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", h.handleAuthorizationServerMetadata)
+
 	// Client ID Metadata Document (CIMD) — public endpoint fetched by authorization servers
 	mux.HandleFunc("GET /api/oauth/client-metadata", h.handleClientMetadata)
+
+	// Dynamic Client Registration (RFC 7591) — returns pre-registered OIDC credentials
+	mux.HandleFunc("POST /api/oauth/register", h.handleOAuthRegister)
 
 	// --- MCP client endpoints (API key auth) ---
 	// Global (all servers)
@@ -1527,7 +1533,8 @@ func (h *Handlers) handleRegistrySearch(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleProtectedResourceMetadata returns RFC 9728 Protected Resource Metadata.
-// MCP clients use this to discover the authorization server (OIDC issuer).
+// MCP clients use this to discover the authorization server.
+// Points to the proxy itself as the authorization server (which wraps the OIDC provider).
 func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
@@ -1540,12 +1547,107 @@ func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *htt
 	}
 
 	if h.auth.HasOIDC() {
-		resp["authorization_servers"] = []string{h.auth.OIDC().Issuer()}
-		// Also include OAuth2 metadata for clients that expect it
+		// Point to the proxy itself as the auth server — the proxy serves
+		// /.well-known/oauth-authorization-server which wraps the OIDC provider
+		// and adds DCR + CIMD support that the upstream provider may lack.
+		resp["authorization_servers"] = []string{resourceURL}
 		resp["bearer_methods"] = []string{"header"}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAuthorizationServerMetadata returns RFC 8414 Authorization Server Metadata.
+// This wraps the upstream OIDC provider's endpoints and adds:
+// - registration_endpoint (DCR) — so clients like Raycast that require DCR can connect
+// - client_id_metadata_document_supported — for clients that prefer CIMD
+// The issuer is the proxy itself, not the upstream OIDC provider.
+func (h *Handlers) handleAuthorizationServerMetadata(w http.ResponseWriter, r *http.Request) {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	proxyURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+
+	if !h.auth.HasOIDC() {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "OAuth not configured"})
+		return
+	}
+
+	oidc := h.auth.OIDC()
+	discovery := oidc.Discovery()
+
+	resp := map[string]interface{}{
+		"issuer":                                proxyURL,
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"token_endpoint_auth_method_supported":  []string{"none", "client_secret_post"},
+		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"code_challenge_methods_supported":      []string{"S256"},
+		// DCR support — returns pre-registered OIDC credentials
+		"registration_endpoint":                 fmt.Sprintf("%s/api/oauth/register", proxyURL),
+		// CIMD support — the proxy serves a client metadata document
+		"client_id_metadata_document_supported": true,
+	}
+
+	// Wrap upstream OIDC provider endpoints
+	if discovery != nil {
+		resp["authorization_endpoint"] = discovery.AuthorizationEndpoint
+		resp["token_endpoint"] = discovery.TokenEndpoint
+		if discovery.JwksURI != "" {
+			resp["jwks_uri"] = discovery.JwksURI
+		}
+		if discovery.UserinfoEndpoint != "" {
+			resp["userinfo_endpoint"] = discovery.UserinfoEndpoint
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleOAuthRegister implements RFC 7591 Dynamic Client Registration.
+// Returns the proxy's pre-registered OIDC client credentials so that
+// any MCP client can register without manual setup.
+func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	if !h.auth.HasOIDC() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "OAuth not configured"})
+		return
+	}
+
+	oidc := h.auth.OIDC()
+	clientID := oidc.ClientID()
+	clientSecret := oidc.ClientSecret()
+
+	if clientID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "No OAuth client configured"})
+		return
+	}
+
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	redirectURI := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
+
+	resp := map[string]interface{}{
+		"client_id":                clientID,
+		"client_id_issued_at":      time.Now().Unix(),
+		"redirect_uris":            []string{redirectURI},
+		"grant_types":              []string{"authorization_code", "refresh_token"},
+		"response_types":           []string{"code"},
+		"token_endpoint_auth_method": "none",
+	}
+
+	// Only include client_secret for confidential clients
+	if clientSecret != "" {
+		resp["client_secret"] = clientSecret
+		resp["client_secret_expires_at"] = 0 // never expires
+		resp["token_endpoint_auth_method"] = "client_secret_post"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleClientMetadata serves the Client ID Metadata Document (CIMD).

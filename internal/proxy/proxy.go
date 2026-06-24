@@ -560,7 +560,7 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 
 func (m *Manager) handleInitialize(req mcp.JSONRPCRequest) (json.RawMessage, error) {
 	result := map[string]interface{}{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": "2025-03-26",
 		"capabilities": map[string]interface{}{
 			"tools": map[string]interface{}{},
 		},
