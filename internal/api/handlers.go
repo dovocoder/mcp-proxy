@@ -1576,6 +1576,9 @@ func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *htt
 		// and adds DCR + CIMD support that the upstream provider may lack.
 		resp["authorization_servers"] = []string{baseURL}
 		resp["bearer_methods"] = []string{"header"}
+		// Per MCP spec: "If scope is not available, use all scopes defined in
+		// scopes_supported from the Protected Resource Metadata document."
+		resp["scopes_supported"] = []string{"openid", "profile", "email"}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -1624,6 +1627,12 @@ func (h *Handlers) handleAuthorizationServerMetadata(w http.ResponseWriter, r *h
 		if discovery.UserinfoEndpoint != "" {
 			resp["userinfo_endpoint"] = discovery.UserinfoEndpoint
 		}
+		if discovery.RevocationEndpoint != "" {
+			resp["revocation_endpoint"] = discovery.RevocationEndpoint
+		}
+		if discovery.IntrospectionEndpoint != "" {
+			resp["introspection_endpoint"] = discovery.IntrospectionEndpoint
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -1647,19 +1656,30 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
+	// Parse the request body to extract the client's requested redirect_uris.
+	// Per RFC 7591, the DCR response should echo back the requested redirect_uris.
+	var dcrReq struct {
+		RedirectURIs []string `json:"redirect_uris"`
 	}
-	redirectURI := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
+	var redirectURIs []string
+	if err := json.NewDecoder(r.Body).Decode(&dcrReq); err == nil && len(dcrReq.RedirectURIs) > 0 {
+		redirectURIs = dcrReq.RedirectURIs
+	} else {
+		// Fallback to the proxy's callback URL if the client didn't send any
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		redirectURIs = []string{fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)}
+	}
 
 	resp := map[string]interface{}{
-		"client_id":                clientID,
-		"client_id_issued_at":      time.Now().Unix(),
-		"redirect_uris":            []string{redirectURI},
-		"grant_types":              []string{"authorization_code", "refresh_token"},
-		"response_types":           []string{"code"},
-		"token_endpoint_auth_method": "none",
+		"client_id":                   clientID,
+		"client_id_issued_at":         time.Now().Unix(),
+		"redirect_uris":               redirectURIs,
+		"grant_types":                 []string{"authorization_code", "refresh_token"},
+		"response_types":              []string{"code"},
+		"token_endpoint_auth_method":  "none",
 	}
 
 	// Only include client_secret for confidential clients

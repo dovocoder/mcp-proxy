@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,23 +170,37 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 }
 
 // CORSMiddleware adds CORS headers. In production, restricts to the same origin.
+// Public OAuth discovery endpoints (/.well-known/*, /api/oauth/*) allow any origin
+// so that MCP clients like Raycast can fetch them cross-origin.
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			// Only allow same-origin requests (the frontend is served by the same server)
-			// Check if the Origin matches the request Host
-			scheme := "https"
-			if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
-				scheme = "http"
-			}
-			allowedOrigin := scheme + "://" + r.Host
-			if origin == allowedOrigin {
+			// Public OAuth discovery endpoints must be accessible from any origin.
+			isPublicPath := strings.HasPrefix(r.URL.Path, "/.well-known/") ||
+				strings.HasPrefix(r.URL.Path, "/api/oauth/")
+
+			if isPublicPath {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, MCP-Protocol-Version, Mcp-Session-Id")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Max-Age", "3600")
+			} else {
+				// Only allow same-origin requests (the frontend is served by the same server)
+				// Check if the Origin matches the request Host
+				scheme := "https"
+				if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+					scheme = "http"
+				}
+				allowedOrigin := scheme + "://" + r.Host
+				if origin == allowedOrigin {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+					w.Header().Set("Access-Control-Max-Age", "3600")
+				}
 			}
 		}
 

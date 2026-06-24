@@ -549,6 +549,10 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 	switch req.Method {
 	case "initialize":
 		return m.handleInitialize(req)
+	case "notifications/initialized":
+		// No response needed for notifications — the SSE handler already
+		// returns 202 for notifications without an ID. Return nil result.
+		return nil, nil
 	case "tools/list":
 		return m.handleToolsList(req, scope)
 	case "tools/call":
@@ -559,8 +563,27 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 }
 
 func (m *Manager) handleInitialize(req mcp.JSONRPCRequest) (json.RawMessage, error) {
+	// Read the client's requested protocol version from the initialize params
+	clientVersion := ""
+	if len(req.Params) > 0 {
+		var params struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err == nil {
+			clientVersion = params.ProtocolVersion
+		}
+	}
+
+	// Negotiate the highest protocol version both client and server support.
+	// The proxy currently supports "2025-03-26".
+	const supportedVersion = "2025-03-26"
+	negotiatedVersion := supportedVersion
+	if clientVersion == supportedVersion {
+		negotiatedVersion = clientVersion
+	}
+
 	result := map[string]interface{}{
-		"protocolVersion": "2025-03-26",
+		"protocolVersion": negotiatedVersion,
 		"capabilities": map[string]interface{}{
 			"tools": map[string]interface{}{},
 		},

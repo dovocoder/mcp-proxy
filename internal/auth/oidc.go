@@ -23,6 +23,8 @@ type OIDCProviderConfig struct {
 	TokenEndpoint         string `json:"token_endpoint"`
 	UserinfoEndpoint      string `json:"userinfo_endpoint"`
 	JwksURI               string `json:"jwks_uri"`
+	RevocationEndpoint     string `json:"revocation_endpoint,omitempty"`
+	IntrospectionEndpoint string `json:"introspection_endpoint,omitempty"`
 }
 
 // OIDCConfig is the local OIDC client configuration.
@@ -102,6 +104,12 @@ func (p *OIDCProvider) discover() error {
 	log.Printf("OIDC: discovered issuer %s", d.Issuer)
 	log.Printf("OIDC: auth endpoint: %s", d.AuthorizationEndpoint)
 	log.Printf("OIDC: token endpoint: %s", d.TokenEndpoint)
+	if d.RevocationEndpoint != "" {
+		log.Printf("OIDC: revocation endpoint: %s", d.RevocationEndpoint)
+	}
+	if d.IntrospectionEndpoint != "" {
+		log.Printf("OIDC: introspection endpoint: %s", d.IntrospectionEndpoint)
+	}
 	return nil
 }
 

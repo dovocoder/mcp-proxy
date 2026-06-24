@@ -247,6 +247,9 @@ func (h *Handlers) sseMessage(w http.ResponseWriter, r *http.Request, fallbackSc
 // DELETE same paths                  — terminate session
 
 func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, scope proxy.Scope) {
+	// Set MCP-Protocol-Version on ALL responses (POST, GET, DELETE)
+	w.Header().Set("MCP-Protocol-Version", "2025-03-26")
+
 	// DELETE — terminate session
 	if r.Method == http.MethodDelete {
 		sessionID := r.Header.Get("Mcp-Session-Id")
@@ -292,9 +295,6 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "Invalid JSON-RPC request")
 		return
 	}
-
-	// Set MCP-Protocol-Version on all responses
-	w.Header().Set("MCP-Protocol-Version", "2025-03-26")
 
 	// JSON-RPC notifications (no id) — return 202 Accepted with no body
 	if req.ID == nil {

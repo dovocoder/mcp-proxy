@@ -253,13 +253,17 @@ func (a *AuthService) writeMCPAuthError(w http.ResponseWriter, r *http.Request, 
 		r.Header.Get("Authorization") != "" || r.Header.Get("X-API-Key") != "",
 		a.authMethodsDescription())
 
-	// If OIDC is configured, add resource_metadata hint for MCP clients
+	// If OIDC is configured, add resource_metadata hint for MCP clients.
+	// Per RFC 9728, the resource_metadata URL must point to the path that
+	// matches the resource (path-insertion variant). MCP clients try this
+	// variant FIRST. For a request to /api/compounds/{id}/mcp, the URL becomes:
+	// https://host/.well-known/oauth-protected-resource/api/compounds/{id}/mcp
 	if a.HasOIDC() {
 		scheme := "http"
 		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 			scheme = "https"
 		}
-		metadataURL := fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", scheme, r.Host)
+		metadataURL := fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource%s", scheme, r.Host, r.URL.Path)
 		w.Header().Set("WWW-Authenticate",
 			fmt.Sprintf(`Bearer resource_metadata="%s", scope="openid profile email"`, metadataURL))
 	}
