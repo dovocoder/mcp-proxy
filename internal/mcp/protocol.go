@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -287,13 +288,16 @@ func (c *Client) sendInitialized() error {
 func (c *Client) discoverTools() error {
 	result, err := c.Call("tools/list", nil)
 	if err != nil {
+		log.Printf("[MCP] discoverTools failed: %v", err)
 		return err
 	}
 	var tl ToolListResult
 	if err := json.Unmarshal(result, &tl); err != nil {
+		log.Printf("[MCP] discoverTools: failed to parse result: %v (raw len=%d)", err, len(result))
 		return fmt.Errorf("failed to parse tools/list result: %w", err)
 	}
 	c.tools = tl.Tools
+	log.Printf("[MCP] discoverTools: found %d tools", len(c.tools))
 	return nil
 }
 
@@ -373,12 +377,17 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 	c.setHeaders(httpReq)
 	c.setSessionHeader(httpReq)
 
+	log.Printf("[MCP] → %s (id=%d, url=%s, auth=%v)", method, reqID, c.httpURL, c.authToken != "")
+
 	client := &http.Client{Timeout: c.timeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		log.Printf("[MCP] ✗ %s (id=%d) network error: %v", method, reqID, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	log.Printf("[MCP] ← %s (id=%d) HTTP %d, content-type=%s, session=%q", method, reqID, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Mcp-Session-Id"))
 
 	// Handle non-200 responses
 	if resp.StatusCode == http.StatusNotFound {
@@ -390,10 +399,12 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("[MCP] ✗ %s (id=%d) 401 Unauthorized: %s", method, reqID, string(respBody))
 		return nil, fmt.Errorf("unauthorized (HTTP 401) — check your auth token. Server response: %s", string(respBody))
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("[MCP] ✗ %s (id=%d) HTTP %d: %s", method, reqID, resp.StatusCode, string(respBody))
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -408,7 +419,11 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	// Handle SSE streaming response
 	if strings.Contains(contentType, "text/event-stream") {
-		return c.parseSSEResponse(resp.Body, reqID)
+		result, err := c.parseSSEResponse(resp.Body, reqID)
+		if err != nil {
+			log.Printf("[MCP] ✗ %s (id=%d) SSE parse error: %v", method, reqID, err)
+		}
+		return result, err
 	}
 
 	// Handle simple JSON response
@@ -419,9 +434,11 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	var rpcResp JSONRPCResponse
 	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
+		log.Printf("[MCP] ✗ %s (id=%d) JSON parse error: %v (body len=%d)", method, reqID, err, len(respBody))
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	if rpcResp.Error != nil {
+		log.Printf("[MCP] ✗ %s (id=%d) RPC error %d: %s", method, reqID, rpcResp.Error.Code, rpcResp.Error.Message)
 		return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 	return rpcResp.Result, nil
