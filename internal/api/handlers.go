@@ -1910,7 +1910,13 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward the request to the upstream provider
-	client := &http.Client{Timeout: 30 * time.Second}
+	// Don't follow redirects — OAuth endpoints should not redirect POST requests
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bodyReader)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to create upstream request")
@@ -1943,8 +1949,13 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		respBodyStr := string(respBody)
 		// Log whether token exchange succeeded (don't log token values)
 		hasToken := strings.Contains(respBodyStr, "\"access_token\"")
-		log.Printf("[OAuth-Proxy] Token exchange: upstream returned %d, has_token=%v, body_len=%d",
-			resp.StatusCode, hasToken, len(respBodyStr))
+		if resp.StatusCode != 200 {
+			log.Printf("[OAuth-Proxy] Token exchange FAILED: upstream=%s, status=%d, body=%s",
+				upstreamURL, resp.StatusCode, respBodyStr)
+		} else {
+			log.Printf("[OAuth-Proxy] Token exchange OK: upstream=%s, status=%d, has_token=%v, body_len=%d",
+				upstreamURL, resp.StatusCode, hasToken, len(respBodyStr))
+		}
 		// Write the response body back to the client
 		for k, vs := range resp.Header {
 			for _, v := range vs {
