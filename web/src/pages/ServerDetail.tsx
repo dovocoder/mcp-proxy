@@ -41,6 +41,13 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 function statusBadge(status: string) {
@@ -264,11 +271,6 @@ export default function ServerDetail() {
   );
 
   const authMethod = authStatus?.auth_method || (srv.auth_token ? 'bearer' : 'none');
-  const authMethodLabel =
-    authMethod === 'oauth' ? 'OAuth' :
-    authMethod === 'bearer' ? 'Bearer Token' :
-    authMethod === 'env_bearer' ? 'Env Var Bearer' :
-    'None';
 
   const authStatusLabel =
     authStatus?.status === 'valid'
@@ -322,12 +324,10 @@ export default function ServerDetail() {
               ) : (
                 <ShieldAlert className="size-5 text-amber-400 shrink-0" />
               )}
-              <div>
+              <div className="flex-1 min-w-0">
                 <CardTitle>Authentication</CardTitle>
                 <CardDescription className="flex flex-wrap items-center gap-2">
-                  <span className="text-muted-foreground">Method:</span>
-                  <Badge variant="secondary">{authMethodLabel}</Badge>
-                  <span className="text-muted-foreground">Status:</span>{' '}
+                  <span className="text-muted-foreground">Status:</span>
                   <span
                     className={cn(
                       'font-medium',
@@ -345,27 +345,88 @@ export default function ServerDetail() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* Method selector dropdown */}
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Authentication Method</Label>
+              <Select
+                value={authMethod}
+                onValueChange={(v) => {
+                  if (v === 'none') {
+                    setBearerMutation.mutate({ method: 'none' });
+                  } else if (v === 'oauth') {
+                    initiateDeviceAuth();
+                  } else if (v === 'bearer') {
+                    // Don't immediately save — user needs to paste token first
+                    // Just clear any env var if switching
+                  } else if (v === 'env_bearer') {
+                    // Don't immediately save — user needs to type env var first
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">
+                    <span className="flex items-center gap-2">
+                      <ShieldAlert className="size-4 text-muted-foreground" />
+                      No Authentication
+                    </span>
+                  </SelectItem>
+                  <SelectItem value="oauth">
+                    <span className="flex items-center gap-2">
+                      <Globe className="size-4 text-primary" />
+                      OAuth (Auto-discovery)
+                    </span>
+                  </SelectItem>
+                  <SelectItem value="bearer">
+                    <span className="flex items-center gap-2">
+                      <KeyRound className="size-4 text-primary" />
+                      Manual Bearer Token
+                    </span>
+                  </SelectItem>
+                  <SelectItem value="env_bearer">
+                    <span className="flex items-center gap-2">
+                      <Variable className="size-4 text-primary" />
+                      Env Var Bearer Token
+                    </span>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Separator />
+
             {/* OAuth section */}
             {authMethod === 'oauth' && (
               <div className="space-y-3">
-                <div className="flex items-center justify-end">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
+                    <Globe className="size-3.5 shrink-0" />
+                    {authStatus?.issuer && (
+                      <span className="truncate">
+                        Provider: <span className="text-foreground font-medium">{oauthProviderName}</span>
+                      </span>
+                    )}
+                  </div>
                   <Button
                     onClick={initiateDeviceAuth}
                     disabled={devicePolling}
                     size="sm"
+                    className="shrink-0"
                   >
                     {devicePolling ? (
                       <Loader2 className="size-4 animate-spin" />
                     ) : (
                       <LogIn className="size-4" />
                     )}
-                    {authStatus?.status === 'valid' ? 'Re-authenticate' : `Sign in with ${oauthProviderName}`}
+                    {authStatus?.status === 'valid' ? 'Re-authenticate' : 'Authenticate'}
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {authStatus?.device_auth_supported === false
-                    ? `Authorization code flow with PKCE. A client_id is required — configure it in the server's Auth Token field.`
-                    : `Device code flow — no redirect URI needed. Just sign in with your ${oauthProviderName} account.`}
+                    ? 'Authorization code flow with PKCE. A client_id may be required — configure it as OAuth Client ID in the edit form.'
+                    : `Device code flow — sign in with your ${oauthProviderName} account.`}
                 </p>
                 {deviceError && (
                   <div className="text-xs text-destructive break-words">{deviceError}</div>
@@ -405,10 +466,14 @@ export default function ServerDetail() {
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <KeyRound className="size-3.5" />
-                  Manual bearer token configured
+                  {authStatus?.status === 'valid'
+                    ? 'Bearer token configured — connection active'
+                    : 'Paste a pre-obtained bearer token below'}
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Update token</Label>
+                  <Label className="text-xs">
+                    {authStatus?.status === 'valid' ? 'Update token (optional)' : 'Bearer Token'}
+                  </Label>
                   <div className="relative">
                     <Textarea
                       value={bearerToken}
@@ -434,7 +499,7 @@ export default function ServerDetail() {
                     onClick={() => setBearerMutation.mutate({ method: 'bearer', bearer_token: bearerToken })}
                   >
                     {setBearerMutation.isPending && <Loader2 className="size-4 animate-spin" />}
-                    Update Token
+                    Save Token
                   </Button>
                   <Button
                     variant="outline"
@@ -453,10 +518,14 @@ export default function ServerDetail() {
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Variable className="size-3.5" />
-                  Token read from env var: <code className="font-mono text-foreground bg-muted/40 rounded px-1.5 py-0.5">{authStatus?.bearer_token_env || srv.bearer_token_env}</code>
+                  Token read from environment variable at runtime — never stored in database
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Change env var name</Label>
+                  <Label className="text-xs">
+                    {authStatus?.status === 'valid'
+                      ? `Current: ${authStatus?.bearer_token_env || srv.bearer_token_env}`
+                      : 'Environment Variable Name'}
+                  </Label>
                   <Input
                     value={bearerTokenEnv}
                     onChange={(e) => setBearerTokenEnv(e.target.value)}
@@ -471,7 +540,7 @@ export default function ServerDetail() {
                     onClick={() => setBearerMutation.mutate({ method: 'env_bearer', bearer_token_env: bearerTokenEnv })}
                   >
                     {setBearerMutation.isPending && <Loader2 className="size-4 animate-spin" />}
-                    Update
+                    Save
                   </Button>
                   <Button
                     variant="outline"
@@ -485,127 +554,11 @@ export default function ServerDetail() {
               </div>
             )}
 
-            {/* No auth — show method picker */}
+            {/* No auth hint */}
             {authMethod === 'none' && (
-              <div className="space-y-4">
-                <Separator />
-                <div className="grid gap-3">
-                  {/* OAuth option */}
-                  <div className="rounded-lg border border-border p-3 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <Globe className="size-4 text-primary" />
-                      <span className="text-sm font-medium text-foreground">OAuth</span>
-                      <Badge variant="secondary" className="text-xs">Auto-discovery</Badge>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Discover OAuth metadata from the server and authenticate via device code or authorization code flow.
-                    </p>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={initiateDeviceAuth}
-                      disabled={devicePolling}
-                    >
-                      {devicePolling ? <Loader2 className="size-4 animate-spin" /> : <LogIn className="size-4" />}
-                      Start OAuth Flow
-                    </Button>
-                    {deviceError && (
-                      <div className="text-xs text-destructive break-words">{deviceError}</div>
-                    )}
-                  </div>
-
-                  {/* Bearer token option */}
-                  <div className="rounded-lg border border-border p-3 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <KeyRound className="size-4 text-primary" />
-                      <span className="text-sm font-medium text-foreground">Manual Bearer Token</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Paste a pre-obtained bearer token. Stored encrypted in the database.
-                    </p>
-                    <div className="relative">
-                      <Textarea
-                        value={bearerToken}
-                        onChange={(e) => setBearerToken(e.target.value)}
-                        placeholder="Paste bearer token..."
-                        className={`font-mono text-xs pr-10 ${!showToken ? '[-webkit-text-security:disc] [text-security:disc]' : ''}`}
-                        rows={2}
-                      />
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        className="absolute right-1.5 top-1.5"
-                        onClick={() => setShowToken(!showToken)}
-                      >
-                        {showToken ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                      </Button>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!bearerToken || setBearerMutation.isPending}
-                      onClick={() => setBearerMutation.mutate({ method: 'bearer', bearer_token: bearerToken })}
-                    >
-                      {setBearerMutation.isPending && <Loader2 className="size-4 animate-spin" />}
-                      Save Token
-                    </Button>
-                  </div>
-
-                  {/* Env var bearer option */}
-                  <div className="rounded-lg border border-border p-3 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <Variable className="size-4 text-primary" />
-                      <span className="text-sm font-medium text-foreground">Env Var Bearer Token</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Read the bearer token from an environment variable at runtime. The token is never stored in the database — only the variable name.
-                    </p>
-                    <Input
-                      value={bearerTokenEnv}
-                      onChange={(e) => setBearerTokenEnv(e.target.value)}
-                      placeholder="e.g. GITHUB_COPILOT_TOKEN"
-                      className="font-mono text-xs"
-                    />
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!bearerTokenEnv || setBearerMutation.isPending}
-                      onClick={() => setBearerMutation.mutate({ method: 'env_bearer', bearer_token_env: bearerTokenEnv })}
-                    >
-                      {setBearerMutation.isPending && <Loader2 className="size-4 animate-spin" />}
-                      Save Env Var
-                    </Button>
-                  </div>
-                </div>
-
-                {deviceAuth && (
-                  <div className="rounded-lg border border-border bg-muted/40 p-4 space-y-3">
-                    <p className="text-sm text-muted-foreground">
-                      Visit the link below and enter this code:
-                    </p>
-                    <div className="text-center">
-                      <div className="font-mono text-3xl sm:text-4xl font-bold tracking-[0.2em] text-foreground">
-                        {deviceAuth.user_code}
-                      </div>
-                    </div>
-                    <div className="text-center">
-                      <a
-                        href={deviceAuth.verification_uri}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 text-primary hover:underline break-all"
-                      >
-                        {deviceAuth.verification_uri}
-                        <ExternalLink className="size-4 shrink-0" />
-                      </a>
-                    </div>
-                    <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-                      <Loader2 className="size-3.5 animate-spin" />
-                      Polling for completion...
-                    </div>
-                  </div>
-                )}
-              </div>
+              <p className="text-xs text-muted-foreground">
+                Select an authentication method above to configure how this server authenticates.
+              </p>
             )}
           </CardContent>
         </Card>
