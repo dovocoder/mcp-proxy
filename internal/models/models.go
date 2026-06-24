@@ -266,3 +266,12 @@ type EnvVarExport struct {
 	Encrypted   string `json:"encrypted"`   // base64(nonce + ciphertext) — decrypt locally with API key
 	Nonce       string `json:"nonce_hint"`  // first 8 chars of nonce for identification
 }
+
+// DisabledTool represents a tool that has been disabled (hidden from clients).
+// If ServerID is nil, the disable is global; if set, it's scoped to a compound.
+type DisabledTool struct {
+	ID        string    `json:"id"`
+	ToolName  string    `json:"tool_name"`           // namespaced tool name (serverName__toolName)
+	ServerID  *string   `json:"server_id,omitempty"` // nil = global, set = compound-specific
+	CreatedAt time.Time `json:"created_at"`
+}

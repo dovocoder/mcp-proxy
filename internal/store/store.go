@@ -141,6 +141,14 @@ func migrate(db *sql.DB) error {
 		updated_at TEXT NOT NULL,
 		UNIQUE(project, environment, key)
 	);
+
+	CREATE TABLE IF NOT EXISTS disabled_tools (
+		id TEXT PRIMARY KEY,
+		tool_name TEXT NOT NULL,
+		server_id TEXT,
+		created_at TEXT NOT NULL,
+		UNIQUE(tool_name, server_id)
+	);
 `
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -663,6 +671,11 @@ func (s *Store) DeleteCompound(id string) error {
 	}
 	// Null out compound_id on api_keys that referenced this compound
 	if _, err := tx.Exec(`UPDATE api_keys SET compound_id = NULL WHERE compound_id = ?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Remove per-compound disabled tool entries
+	if _, err := tx.Exec(`DELETE FROM disabled_tools WHERE server_id = ?`, id); err != nil {
 		tx.Rollback()
 		return err
 	}

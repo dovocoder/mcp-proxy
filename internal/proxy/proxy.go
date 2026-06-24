@@ -526,10 +526,18 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 	}
 	for _, setID := range memorySetIDs {
 		if srv, ok := m.memorySets[setID]; ok {
+			setSuffix := ""
+			if srv.Slug() != "" {
+				if ms, err := m.store.GetMemorySet(setID); err == nil && ms.Name != "" {
+					setSuffix = fmt.Sprintf(" [%s]", ms.Name)
+				} else {
+					setSuffix = fmt.Sprintf(" [%s]", srv.Slug())
+				}
+			}
 			for _, mt := range srv.Tools() {
 				tool := mcp.Tool{
 					Name:        srv.NamespacedName(mt.Name),
-					Description: fmt.Sprintf("[memory] %s", mt.Description),
+					Description: fmt.Sprintf("[memory%s] %s", setSuffix, mt.Description),
 				}
 				if len(mt.InputSchema) > 0 {
 					tool.InputSchema = mt.InputSchema

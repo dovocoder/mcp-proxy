@@ -432,34 +432,46 @@ func (s *Server) IsMemoryTool(name string) bool {
 	return s.ToolNames()[name]
 }
 
-// NamespacePrefix returns the prefix for this set's tools.
-// Default set (slug=""): "memory__"
-// Custom set (slug="project_a"): "memory_project_a__"
-func (s *Server) NamespacePrefix() string {
+// NamespaceSuffix returns the suffix for this set's tools.
+// Default set (slug=""): "" — tool name stays as-is (e.g. "memory_store")
+// Custom set (slug="project_a"): "__project_a" — tool name becomes "memory_store__project_a"
+func (s *Server) NamespaceSuffix() string {
 	if s.slug == "" {
-		return "memory__"
+		return ""
 	}
-	return "memory_" + s.slug + "__"
+	return "__" + s.slug
 }
 
-// NamespacedName returns the tool name with this set's namespace prefix.
+// NamespacedName returns the tool name with this set's suffix appended.
+// Default set: "memory_store" → "memory_store"
+// Custom set (slug="work"): "memory_store" → "memory_store__work"
 func (s *Server) NamespacedName(toolName string) string {
-	return s.NamespacePrefix() + toolName
+	return toolName + s.NamespaceSuffix()
 }
 
 // ParseNamespaced splits a memory-namespaced tool name.
 // Returns (setSlug, toolName, ok).
-// "memory__memory_store" → ("", "memory_store", true) — default set
-// "memory_projecta__memory_store" → ("projecta", "memory_store", true) — custom set
+// "memory_store" → ("", "memory_store", true) — default set (no suffix)
+// "memory_store__work" → ("work", "memory_store", true) — custom set
+// "memory_search__work" → ("work", "memory_search", true) — custom set
 func ParseNamespaced(namespaced string) (setSlug string, base string, ok bool) {
-	if strings.HasPrefix(namespaced, "memory__") {
-		return "", strings.TrimPrefix(namespaced, "memory__"), true
+	// All memory tools start with "memory_"
+	if !strings.HasPrefix(namespaced, "memory_") {
+		return "", "", false
 	}
-	if strings.HasPrefix(namespaced, "memory_") {
-		rest := strings.TrimPrefix(namespaced, "memory_")
-		idx := strings.Index(rest, "__")
-		if idx > 0 {
-			return rest[:idx], rest[idx+2:], true
+	// Check for __suffix pattern (custom set)
+	// We need to find "__" that comes AFTER the base tool name
+	// Base tool names: memory_store, memory_recall, memory_search, memory_update, memory_delete, memory_reflect
+	knownTools := []string{"memory_store", "memory_recall", "memory_search", "memory_update", "memory_delete", "memory_reflect"}
+	for _, kt := range knownTools {
+		if namespaced == kt {
+			return "", kt, true // default set, no suffix
+		}
+		if strings.HasPrefix(namespaced, kt+"__") {
+			slug := strings.TrimPrefix(namespaced, kt+"__")
+			if slug != "" {
+				return slug, kt, true
+			}
 		}
 	}
 	return "", "", false
@@ -468,9 +480,9 @@ func ParseNamespaced(namespaced string) (setSlug string, base string, ok bool) {
 // NamespacedNameFor creates a namespaced tool name for a given slug and tool name.
 func NamespacedNameFor(slug, toolName string) string {
 	if slug == "" {
-		return "memory__" + toolName
+		return toolName
 	}
-	return "memory_" + slug + "__" + toolName
+	return toolName + "__" + slug
 }
 
 // IsMemoryServerID returns true if the server ID refers to a builtin memory server.
