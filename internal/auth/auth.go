@@ -272,6 +272,8 @@ func (a *AuthService) APIKeyMiddleware(next http.Handler) http.Handler {
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
+				// Log the OIDC validation error for debugging
+				log.Printf("[MCP-Auth] OIDC token validation failed: %v (token_len=%d, path=%s)", err, len(bearerToken), r.URL.Path)
 			}
 		}
 

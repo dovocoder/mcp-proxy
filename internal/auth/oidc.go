@@ -2,10 +2,13 @@ package auth
 
 import (
 	"context"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"github.com/agentic/mcp-proxy/internal/models"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
 )
 
@@ -43,6 +47,13 @@ type OIDCProvider struct {
 	mu         sync.RWMutex
 	tokenCache map[string]cachedToken // access_token → user info (5-min TTL)
 	cacheMu    sync.RWMutex
+	jwksCache  *jwksKeySet // cached JWKS keys
+	jwksMu     sync.Mutex  // protects jwksCache refresh
+}
+
+type jwksKeySet struct {
+	keys    map[string]*rsa.PublicKey // kid → public key
+	expires time.Time
 }
 
 type cachedToken struct {
@@ -196,7 +207,207 @@ func (p *OIDCProvider) UserInfo(accessToken string) (map[string]interface{}, err
 	return info, nil
 }
 
+// fetchJWKS fetches and parses the JWKS from the discovery jwks_uri.
+// Results are cached for 1 hour.
+func (p *OIDCProvider) fetchJWKS() (map[string]*rsa.PublicKey, error) {
+	p.mu.RLock()
+	jwksURI := ""
+	if p.discovery != nil {
+		jwksURI = p.discovery.JwksURI
+	}
+	p.mu.RUnlock()
+
+	if jwksURI == "" {
+		return nil, fmt.Errorf("no jwks_uri in discovery")
+	}
+
+	// Check cache
+	p.jwksMu.Lock()
+	defer p.jwksMu.Unlock()
+	if p.jwksCache != nil && time.Now().Before(p.jwksCache.expires) {
+		return p.jwksCache.keys, nil
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(jwksURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("JWKS endpoint returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JWKS JSON
+	var jwks struct {
+		Keys []struct {
+			Kty string `json:"kty"`
+			Kid string `json:"kid"`
+			Use string `json:"use"`
+			N   string `json:"n"`
+			E   string `json:"e"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &jwks); err != nil {
+		return nil, fmt.Errorf("failed to parse JWKS: %w", err)
+	}
+
+	keys := make(map[string]*rsa.PublicKey)
+	for _, k := range jwks.Keys {
+		if k.Kty != "RSA" || k.Use != "sig" {
+			continue
+		}
+		// Decode RSA public key modulus (n) and exponent (e)
+		nBytes, err := base64.RawURLEncoding.DecodeString(k.N)
+		if err != nil {
+			continue
+		}
+		eBytes, err := base64.RawURLEncoding.DecodeString(k.E)
+		if err != nil {
+			continue
+		}
+		// Convert exponent bytes to int
+		e := 0
+		for _, b := range eBytes {
+			e = e<<8 + int(b)
+		}
+		pubKey := &rsa.PublicKey{
+			N: new(big.Int).SetBytes(nBytes),
+			E: e,
+		}
+		keys[k.Kid] = pubKey
+	}
+
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no RSA signing keys in JWKS")
+	}
+
+	p.jwksCache = &jwksKeySet{
+		keys:    keys,
+		expires: time.Now().Add(1 * time.Hour),
+	}
+
+	log.Printf("OIDC: fetched JWKS with %d keys from %s", len(keys), jwksURI)
+	return keys, nil
+}
+
+// ValidateJWT validates a JWT access token locally using the JWKS.
+// This avoids calling the userinfo endpoint, which may reject tokens
+// whose audience (RFC 8707 resource parameter) is the MCP server
+// rather than the OIDC provider's own audience.
+func (p *OIDCProvider) ValidateJWT(accessToken string) (ProviderUser, error) {
+	// Quick check: JWTs start with "eyJ" (base64-encoded header)
+	if !strings.HasPrefix(accessToken, "eyJ") {
+		return ProviderUser{}, fmt.Errorf("not a JWT")
+	}
+
+	keys, err := p.fetchJWKS()
+	if err != nil {
+		return ProviderUser{}, fmt.Errorf("JWKS fetch failed: %w", err)
+	}
+
+	// Parse token without verifying first to get the kid
+	var unverified struct {
+		Header map[string]interface{} `json:"-"`
+	}
+	// Extract header to find kid
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return ProviderUser{}, fmt.Errorf("invalid JWT format")
+	}
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return ProviderUser{}, fmt.Errorf("failed to decode JWT header: %w", err)
+	}
+	if err := json.Unmarshal(headerBytes, &unverified.Header); err != nil {
+		// unverified.Header is nil, re-parse
+		var header map[string]interface{}
+		if err2 := json.Unmarshal(headerBytes, &header); err2 != nil {
+			return ProviderUser{}, fmt.Errorf("failed to parse JWT header: %w", err2)
+		}
+		unverified.Header = header
+	}
+	_ = unverified // suppress unused
+
+	// Parse and verify the JWT
+	token, err := jwt.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
+		// Verify signing method is RSA
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		// Get kid from header
+		kid, ok := token.Header["kid"].(string)
+		if !ok {
+			return nil, fmt.Errorf("no kid in JWT header")
+		}
+		// Find matching key
+		key, ok := keys[kid]
+		if !ok {
+			return nil, fmt.Errorf("no key found for kid %s", kid)
+		}
+		return key, nil
+	})
+	if err != nil {
+		return ProviderUser{}, fmt.Errorf("JWT verification failed: %w", err)
+	}
+
+	if !token.Valid {
+		return ProviderUser{}, fmt.Errorf("token is not valid")
+	}
+
+	// Extract claims
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return ProviderUser{}, fmt.Errorf("failed to extract claims")
+	}
+
+	// Check issuer
+	issuer, _ := claims["iss"].(string)
+	expectedIssuer := p.Issuer()
+	if issuer != expectedIssuer {
+		return ProviderUser{}, fmt.Errorf("issuer mismatch: got %s, expected %s", issuer, expectedIssuer)
+	}
+
+	// Check expiration
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return ProviderUser{}, fmt.Errorf("no exp in token")
+	}
+	if time.Now().Unix() > int64(exp) {
+		return ProviderUser{}, fmt.Errorf("token expired")
+	}
+
+	// Extract user info from claims
+	user := ProviderUser{
+		Subject:  getStringClaim(claims, "sub"),
+		Email:    getStringClaim(claims, "email"),
+		Name:     getStringClaim(claims, "name"),
+		Username: getStringClaim(claims, "preferred_username"),
+	}
+	if user.Username == "" {
+		user.Username = getStringClaim(claims, "email")
+	}
+
+	return user, nil
+}
+
+// getStringClaim extracts a string claim from JWT claims.
+func getStringClaim(claims jwt.MapClaims, key string) string {
+	v, ok := claims[key].(string)
+	if ok {
+		return v
+	}
+	return ""
+}
+
 // ValidateAccessToken validates an OIDC access token and returns the user.
+// Tries JWT validation first (local, via JWKS), then falls back to userinfo.
 // Uses a 5-minute cache to avoid calling userinfo on every request.
 func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, error) {
 	// Check cache first
@@ -207,7 +418,28 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 	}
 	p.cacheMu.RUnlock()
 
-	// Call userinfo
+	// Try JWT validation first (local, no network call to userinfo)
+	// PocketID issues JWTs — validating locally avoids the userinfo endpoint
+	// rejecting tokens whose audience is the MCP server (RFC 8707 resource).
+	if user, err := p.ValidateJWT(accessToken); err == nil {
+		// Cache for 5 minutes
+		p.cacheMu.Lock()
+		p.tokenCache[accessToken] = cachedToken{
+			user:      user,
+			expiresAt: time.Now().Add(5 * time.Minute),
+		}
+		for k, v := range p.tokenCache {
+			if time.Now().After(v.expiresAt) {
+				delete(p.tokenCache, k)
+			}
+		}
+		p.cacheMu.Unlock()
+		return user, nil
+	} else {
+		log.Printf("[OIDC] JWT validation failed, trying userinfo: %v", err)
+	}
+
+	// Fall back to userinfo for opaque (non-JWT) tokens
 	info, err := p.UserInfo(accessToken)
 	if err != nil {
 		return ProviderUser{}, err
