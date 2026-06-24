@@ -315,6 +315,9 @@ func (s *Store) ListServers() ([]*models.Server, error) {
 		}
 		servers = append(servers, srv)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return servers, nil
 }
 
@@ -404,6 +407,9 @@ func (s *Store) ListAPIKeys() ([]*models.APIKey, error) {
 			return nil, err
 		}
 		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return keys, nil
 }
@@ -612,9 +618,15 @@ func (s *Store) scanServerImpl(sc rowScanner) (*models.Server, error) {
 	if lastSeen.Valid {
 		srv.LastSeen = &lastSeen.Time
 	}
-	json.Unmarshal([]byte(argsJSON), &srv.Args)
-	json.Unmarshal([]byte(headersJSON), &srv.Headers)
-	json.Unmarshal([]byte(envJSON), &srv.Env)
+	if err := json.Unmarshal([]byte(argsJSON), &srv.Args); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal server args: %w", err)
+	}
+	if err := json.Unmarshal([]byte(headersJSON), &srv.Headers); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal server headers: %w", err)
+	}
+	if err := json.Unmarshal([]byte(envJSON), &srv.Env); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal server env: %w", err)
+	}
 	srv.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 	srv.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
 
@@ -657,7 +669,9 @@ func scanAPIKeyImpl(s rowScanner) (*models.APIKey, error) {
 		cid := compoundID.String
 		key.CompoundID = &cid
 	}
-	json.Unmarshal([]byte(scopesJSON), &key.Scopes)
+	if err := json.Unmarshal([]byte(scopesJSON), &key.Scopes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal API key scopes: %w", err)
+	}
 	key.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 
 	return &key, nil
@@ -718,6 +732,9 @@ func (s *Store) ListCompounds() ([]*models.CompoundServer, error) {
 		c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 		compounds = append(compounds, &c)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return compounds, nil
 }
 
@@ -736,6 +753,9 @@ func (s *Store) GetCompoundMemberIDs(compoundID string) ([]string, error) {
 			return nil, err
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return ids, nil
 }
@@ -836,6 +856,9 @@ func (s *Store) ListMemorySets() ([]*models.MemorySet, error) {
 			return nil, err
 		}
 		result = append(result, ms)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -974,6 +997,9 @@ func (s *Store) ListPalaces(setID string) ([]map[string]interface{}, error) {
 		}
 		result = append(result, map[string]interface{}{"palace": palace, "count": cnt})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -1031,7 +1057,9 @@ func scanMemory(row *sql.Row) (*models.Memory, error) {
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(tagsJSON), &mem.Tags)
+	if err := json.Unmarshal([]byte(tagsJSON), &mem.Tags); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal memory tags: %w", err)
+	}
 	if mem.Tags == nil {
 		mem.Tags = []string{}
 	}
@@ -1050,7 +1078,9 @@ func scanMemories(rows *sql.Rows) ([]*models.Memory, error) {
 		if err := rows.Scan(&mem.ID, &mem.SetID, &mem.Palace, &mem.Room, &mem.Content, &tagsJSON, &mem.Importance, &mem.AccessCount, &lastAccessed, &mem.CreatedAt, &mem.UpdatedAt); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(tagsJSON), &mem.Tags)
+		if err := json.Unmarshal([]byte(tagsJSON), &mem.Tags); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal memory tags: %w", err)
+		}
 		if mem.Tags == nil {
 			mem.Tags = []string{}
 		}
@@ -1058,6 +1088,9 @@ func scanMemories(rows *sql.Rows) ([]*models.Memory, error) {
 			mem.LastAccessed = &lastAccessed.Time
 		}
 		result = append(result, &mem)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -1115,6 +1148,9 @@ func (s *Store) ListEnvVars(project, environment string) ([]*models.EnvVar, erro
 		}
 		result = append(result, ev)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -1159,6 +1195,9 @@ func (s *Store) ListEnvVarProjects() ([]string, error) {
 		}
 		projects = append(projects, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return projects, nil
 }
 
@@ -1177,6 +1216,9 @@ func (s *Store) ListEnvVarEnvironments(project string) ([]string, error) {
 			return nil, err
 		}
 		envs = append(envs, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return envs, nil
 }
@@ -1346,6 +1388,9 @@ func scanDisabledTools(rows *sql.Rows) ([]*models.DisabledTool, error) {
 			return nil, err
 		}
 		result = append(result, dt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
