@@ -63,7 +63,7 @@ func (sl *serverLog) clear() {
 // Manager manages all backend MCP server connections.
 type Manager struct {
 	store       *store.Store
-	memory      *memory.Server
+	memorySets  map[string]*memory.Server    // setID -> memory server
 	mu          sync.RWMutex
 	clients     map[string]*mcp.Client         // serverID -> client
 	errors      map[string]string              // serverID -> last error message
@@ -75,15 +75,65 @@ type Manager struct {
 
 // New creates a new proxy Manager.
 func New(s *store.Store) *Manager {
-	return &Manager{
+	m := &Manager{
 		store:       s,
-		memory:      memory.New(s),
+		memorySets:  make(map[string]*memory.Server),
 		clients:     make(map[string]*mcp.Client),
 		errors:      make(map[string]string),
 		authStates:  make(map[string]*mcp.AuthState),
 		deviceAuths: make(map[string]*DeviceAuthResult),
 		serverLogs:  make(map[string]*serverLog),
 	}
+	m.InitMemorySets()
+	return m
+}
+
+// InitMemorySets loads all memory sets from the store and creates a memory.Server for each.
+func (m *Manager) InitMemorySets() {
+	sets, err := m.store.ListMemorySets()
+	if err != nil {
+		log.Printf("Failed to list memory sets: %v", err)
+		return
+	}
+	for _, ms := range sets {
+		m.memorySets[ms.ID] = memory.New(m.store, ms.ID, ms.Slug)
+	}
+	// Ensure default set exists
+	if _, ok := m.memorySets["default"]; !ok {
+		defaultSet := &models.MemorySet{
+			ID:        "default",
+			Name:      "Default",
+			Slug:      "",
+			IsDefault: true,
+			CreatedAt: time.Now(),
+		}
+		_ = m.store.CreateMemorySet(defaultSet)
+		m.memorySets["default"] = memory.New(m.store, "default", "")
+	}
+}
+
+// MemoryServerID returns the virtual server ID for a memory set.
+// "default" → "builtin-memory", other sets → "builtin-memory:{set_id}".
+func memoryServerID(setID string) string {
+	if setID == "default" {
+		return models.BuiltinMemoryServerID
+	}
+	return models.BuiltinMemoryServerID + ":" + setID
+}
+
+// GetMemoryServer returns the memory server instance for a given set ID.
+func (m *Manager) GetMemoryServer(setID string) *memory.Server {
+	return m.memorySets[setID]
+}
+
+// findMemoryServerBySlug returns the memory server with the given slug.
+func (m *Manager) findMemoryServerBySlug(slug string) *memory.Server {
+	for _, srv := range m.memorySets {
+		if srv.Slug() == slug {
+			return srv
+		}
+	}
+	return nil
 }
 
 // StartAll connects to all enabled servers.
@@ -329,21 +379,23 @@ type Scope struct {
 // ListTools returns all tools from all connected servers plus built-in memory tools.
 func (m *Manager) ListTools() []models.Tool {
 	tools := m.listToolsFiltered(nil)
-	// Add memory tools as virtual "memory" server tools
-	for _, mt := range m.memory.Tools() {
-		tools = append(tools, models.Tool{
-			ServerID:    "builtin-memory",
-			ServerName:  "memory",
-			Name:        mt.Name,
-			Description: mt.Description,
-		})
+	// Add memory tools from all memory sets
+	for _, srv := range m.memorySets {
+		for _, mt := range srv.Tools() {
+			tools = append(tools, models.Tool{
+				ServerID:    memoryServerID(srv.SetID()),
+				ServerName:  "memory",
+				Name:        mt.Name,
+				Description: mt.Description,
+			})
+		}
 	}
 	return tools
 }
 
-// Memory returns the built-in memory server instance.
+// Memory returns the default memory server instance (backward compat).
 func (m *Manager) Memory() *memory.Server {
-	return m.memory
+	return m.memorySets["default"]
 }
 
 // ListToolsForServer returns tools from a single server.
@@ -438,14 +490,17 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 				Description: dictionaryDescription,
 				InputSchema: dictionarySchema,
 			}}
-			if m.isMemoryCompoundMember(scope.CompoundID) {
-				for _, mt := range m.memory.Tools() {
-					tools = append(tools, mcp.Tool{
-						Name:        memory.NamespacedName(mt.Name),
-						Description: fmt.Sprintf("[memory] %s", mt.Description),
-					})
-					if len(mt.InputSchema) > 0 {
-						tools[len(tools)-1].InputSchema = mt.InputSchema
+			// Add memory tools from sets that are compound members
+			for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
+				if srv, ok := m.memorySets[setID]; ok {
+					for _, mt := range srv.Tools() {
+						tools = append(tools, mcp.Tool{
+							Name:        srv.NamespacedName(mt.Name),
+							Description: fmt.Sprintf("[memory] %s", mt.Description),
+						})
+						if len(mt.InputSchema) > 0 {
+							tools[len(tools)-1].InputSchema = mt.InputSchema
+						}
 					}
 				}
 			}
@@ -471,23 +526,29 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 		mcpTools = append(mcpTools, tool)
 	}
 
-	// Add built-in memory tools
+	// Add built-in memory tools from all memory sets
 	// For global and server scope: always available
-	// For compound scope: only if the memory server is a compound member
-	addMemory := true
+	// For compound scope: only sets that are compound members
+	var memorySetIDs []string
 	if scope.CompoundID != "" {
-		addMemory = m.isMemoryCompoundMember(scope.CompoundID)
+		memorySetIDs = m.isMemoryCompoundMember(scope.CompoundID)
+	} else {
+		for setID := range m.memorySets {
+			memorySetIDs = append(memorySetIDs, setID)
+		}
 	}
-	if addMemory {
-		for _, mt := range m.memory.Tools() {
-			tool := mcp.Tool{
-				Name:        memory.NamespacedName(mt.Name),
-				Description: fmt.Sprintf("[memory] %s", mt.Description),
+	for _, setID := range memorySetIDs {
+		if srv, ok := m.memorySets[setID]; ok {
+			for _, mt := range srv.Tools() {
+				tool := mcp.Tool{
+					Name:        srv.NamespacedName(mt.Name),
+					Description: fmt.Sprintf("[memory] %s", mt.Description),
+				}
+				if len(mt.InputSchema) > 0 {
+					tool.InputSchema = mt.InputSchema
+				}
+				mcpTools = append(mcpTools, tool)
 			}
-			if len(mt.InputSchema) > 0 {
-				tool.InputSchema = mt.InputSchema
-			}
-			mcpTools = append(mcpTools, tool)
 		}
 	}
 
@@ -508,12 +569,28 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 	}
 
 	// Check if this is a built-in memory tool
-	// For compound scope, memory tools only work if memory is a compound member
-	if baseName, ok := memory.ParseNamespaced(params.Name); ok {
-		if scope.CompoundID != "" && !m.isMemoryCompoundMember(scope.CompoundID) {
-			return nil, fmt.Errorf("memory tools are not available in this compound — add the memory server as a member")
+	// ParseNamespaced returns (slug, toolName, ok)
+	if slug, baseName, ok := memory.ParseNamespaced(params.Name); ok {
+		// Find the memory server for this slug
+		memSrv := m.findMemoryServerBySlug(slug)
+		if memSrv == nil {
+			return nil, fmt.Errorf("memory set not found for slug: %s", slug)
 		}
-		return m.memory.HandleToolCall(baseName, params.Arguments)
+		// For compound scope, verify this memory set is a compound member
+		if scope.CompoundID != "" {
+			memberSetIDs := m.isMemoryCompoundMember(scope.CompoundID)
+			allowed := false
+			for _, sid := range memberSetIDs {
+				if sid == memSrv.SetID() {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf("memory tools are not available in this compound — add the memory server as a member")
+			}
+		}
+		return memSrv.HandleToolCall(baseName, params.Arguments)
 	}
 
 	// Check if this is a dictionary tool call (compound dictionary mode)
@@ -903,19 +980,24 @@ func (m *Manager) ClearServerLogs(serverID string) {
 
 // --- Compound Dictionary Mode ---
 
-// isMemoryCompoundMember returns true if the built-in memory server is a member
-// of the specified compound.
-func (m *Manager) isMemoryCompoundMember(compoundID string) bool {
+// isMemoryCompoundMember returns the set IDs of all memory sets that are
+// members of the specified compound. Checks for both "builtin-memory" (default)
+// and "builtin-memory:{set_id}" patterns.
+func (m *Manager) isMemoryCompoundMember(compoundID string) []string {
 	memberIDs, err := m.store.GetCompoundMemberIDs(compoundID)
 	if err != nil {
-		return false
+		return nil
 	}
+	var setIDs []string
 	for _, mid := range memberIDs {
 		if mid == models.BuiltinMemoryServerID {
-			return true
+			setIDs = append(setIDs, "default")
+		} else if strings.HasPrefix(mid, models.BuiltinMemoryServerID+":") {
+			setID := strings.TrimPrefix(mid, models.BuiltinMemoryServerID+":")
+			setIDs = append(setIDs, setID)
 		}
 	}
-	return false
+	return setIDs
 }
 
 const dictionaryDescription = `Dictionary tool for compound servers. Instead of receiving all tools upfront, use this tool to discover, inspect, and call tools from member servers lazily.
@@ -987,14 +1069,16 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 				"description": t.Description,
 			})
 		}
-		// Include memory tools only if memory is a compound member
-		if m.isMemoryCompoundMember(scope.CompoundID) {
-			for _, mt := range m.memory.Tools() {
-				catalog = append(catalog, map[string]string{
-					"name":        memory.NamespacedName(mt.Name),
-					"server":      "memory",
-					"description": mt.Description,
-				})
+		// Include memory tools from sets that are compound members
+		for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
+			if srv, ok := m.memorySets[setID]; ok {
+				for _, mt := range srv.Tools() {
+					catalog = append(catalog, map[string]string{
+						"name":        srv.NamespacedName(mt.Name),
+						"server":      "memory",
+						"description": mt.Description,
+					})
+				}
 			}
 		}
 		return wrapMCPContent(map[string]interface{}{
@@ -1006,17 +1090,19 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		if params.Tool == "" {
 			return nil, fmt.Errorf("tool parameter is required for describe action")
 		}
-		// Check memory tools first (only if memory is a compound member)
-		if m.isMemoryCompoundMember(scope.CompoundID) {
-			if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
-				for _, mt := range m.memory.Tools() {
-					if mt.Name == baseName {
-						return wrapMCPContent(map[string]interface{}{
-							"name":         params.Tool,
-							"server":      "memory",
-							"description": mt.Description,
-							"inputSchema": mt.InputSchema,
-						})
+		// Check memory tools first (only from sets that are compound members)
+		if slug, baseName, ok := memory.ParseNamespaced(params.Tool); ok {
+			for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
+				if srv, ok := m.memorySets[setID]; ok && srv.Slug() == slug {
+					for _, mt := range srv.Tools() {
+						if mt.Name == baseName {
+							return wrapMCPContent(map[string]interface{}{
+								"name":         params.Tool,
+								"server":      "memory",
+								"description": mt.Description,
+								"inputSchema": mt.InputSchema,
+							})
+						}
 					}
 				}
 			}
@@ -1040,9 +1126,11 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 			return nil, fmt.Errorf("tool parameter is required for call action")
 		}
 		// Check if it's a memory tool — route to memory handler (only if member)
-		if m.isMemoryCompoundMember(scope.CompoundID) {
-			if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
-				return m.memory.HandleToolCall(baseName, params.Arguments)
+		if slug, baseName, ok := memory.ParseNamespaced(params.Tool); ok {
+			for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
+				if srv, ok := m.memorySets[setID]; ok && srv.Slug() == slug {
+					return srv.HandleToolCall(baseName, params.Arguments)
+				}
 			}
 		}
 		// Route to the backend server — reuse the normal tool call path
@@ -1095,17 +1183,19 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 				})
 			}
 		}
-		// Search memory tools too (only if memory is a compound member)
-		if m.isMemoryCompoundMember(scope.CompoundID) {
-			for _, mt := range m.memory.Tools() {
-				name := memory.NamespacedName(mt.Name)
-				if strings.Contains(strings.ToLower(name), query) ||
-					strings.Contains(strings.ToLower(mt.Description), query) {
-					results = append(results, map[string]string{
-						"name":        name,
-						"server":      "memory",
-						"description": mt.Description,
-					})
+		// Search memory tools too (from sets that are compound members)
+		for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
+			if srv, ok := m.memorySets[setID]; ok {
+				for _, mt := range srv.Tools() {
+					name := srv.NamespacedName(mt.Name)
+					if strings.Contains(strings.ToLower(name), query) ||
+						strings.Contains(strings.ToLower(mt.Description), query) {
+						results = append(results, map[string]string{
+							"name":        name,
+							"server":      "memory",
+							"description": mt.Description,
+						})
+					}
 				}
 			}
 		}
@@ -1131,4 +1221,88 @@ func wrapMCPContent(result interface{}) (json.RawMessage, error) {
 			},
 		},
 	})
+}
+
+// --- Memory Set Management ---
+
+// makeSlug creates a URL-safe slug from a name: lowercase, replace spaces/special chars with underscores.
+func makeSlug(name string) string {
+	slug := strings.ToLower(name)
+	slug = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, slug)
+	// Collapse consecutive underscores and trim leading/trailing
+	for strings.Contains(slug, "__") {
+		slug = strings.ReplaceAll(slug, "__", "_")
+	}
+	return strings.Trim(slug, "_")
+}
+
+// CreateMemorySet creates a new memory set, adds it to the in-memory map, and returns it.
+func (m *Manager) CreateMemorySet(name, description string) (*models.MemorySet, error) {
+	slug := makeSlug(name)
+
+	// Check slug uniqueness
+	existing, err := m.store.GetMemorySetBySlug(slug)
+	if err == nil && existing != nil {
+		return nil, fmt.Errorf("a memory set with slug '%s' already exists", slug)
+	}
+
+	ms := &models.MemorySet{
+		ID:          uuid.NewString(),
+		Name:        name,
+		Slug:        slug,
+		Description: description,
+		IsDefault:   false,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := m.store.CreateMemorySet(ms); err != nil {
+		return nil, fmt.Errorf("failed to create memory set: %w", err)
+	}
+
+	m.memorySets[ms.ID] = memory.New(m.store, ms.ID, ms.Slug)
+	return ms, nil
+}
+
+// GetMemorySet returns a memory set by ID.
+func (m *Manager) GetMemorySet(id string) (*models.MemorySet, error) {
+	return m.store.GetMemorySet(id)
+}
+
+// ListMemorySets returns all memory sets.
+func (m *Manager) ListMemorySets() ([]*models.MemorySet, error) {
+	return m.store.ListMemorySets()
+}
+
+// UpdateMemorySet updates a memory set and refreshes the in-memory server.
+func (m *Manager) UpdateMemorySet(id string, req *models.UpdateMemorySetRequest) error {
+	if err := m.store.UpdateMemorySet(id, req); err != nil {
+		return err
+	}
+	// Refresh the in-memory server
+	ms, err := m.store.GetMemorySet(id)
+	if err == nil && ms != nil {
+		m.memorySets[ms.ID] = memory.New(m.store, ms.ID, ms.Slug)
+	}
+	return nil
+}
+
+// DeleteMemorySet removes a memory set, all its memories, and the in-memory server.
+func (m *Manager) DeleteMemorySet(id string) error {
+	if id == "default" {
+		return fmt.Errorf("cannot delete the default memory set")
+	}
+	// Delete all memories belonging to this set
+	if err := m.store.DeleteMemoriesBySet(id); err != nil {
+		return fmt.Errorf("failed to delete memories in set: %w", err)
+	}
+	if err := m.store.DeleteMemorySet(id); err != nil {
+		return err
+	}
+	delete(m.memorySets, id)
+	return nil
 }

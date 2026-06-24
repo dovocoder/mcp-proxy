@@ -20,11 +20,26 @@ import (
 //   - Chronical memory: time-based chronicle with timestamps
 type Server struct {
 	store *store.Store
+	setID string
+	slug  string
 }
 
-// New creates a new built-in memory server.
-func New(s *store.Store) *Server {
-	return &Server{store: s}
+// New creates a new built-in memory server bound to a specific memory set.
+func New(s *store.Store, setID, slug string) *Server {
+	if setID == "" {
+		setID = "default"
+	}
+	return &Server{store: s, setID: setID, slug: slug}
+}
+
+// SetID returns the memory set ID this server is bound to.
+func (s *Server) SetID() string {
+	return s.setID
+}
+
+// Slug returns the slug of the memory set this server is bound to.
+func (s *Server) Slug() string {
+	return s.slug
 }
 
 // Tools returns the MCP tool definitions exposed by the memory server.
@@ -231,6 +246,7 @@ func (s *Server) handleStore(args json.RawMessage) (interface{}, error) {
 	now := time.Now()
 	mem := &models.Memory{
 		ID:         "mem_" + uuid.NewString(),
+		SetID:      s.setID,
 		Palace:     params.Palace,
 		Room:       params.Room,
 		Content:    params.Content,
@@ -263,7 +279,7 @@ func (s *Server) handleRecall(args json.RawMessage) (interface{}, error) {
 	if params.Limit == 0 {
 		params.Limit = 20
 	}
-	memories, err := s.store.ListMemories(params.Palace)
+	memories, err := s.store.ListMemories(s.setID, params.Palace)
 	if err != nil {
 		return nil, fmt.Errorf("failed to recall memories: %w", err)
 	}
@@ -300,7 +316,7 @@ func (s *Server) handleSearch(args json.RawMessage) (interface{}, error) {
 	if params.Limit == 0 {
 		params.Limit = 20
 	}
-	memories, err := s.store.SearchMemories(params.Query)
+	memories, err := s.store.SearchMemories(s.setID, params.Query)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -352,11 +368,11 @@ func (s *Server) handleDelete(args json.RawMessage) (interface{}, error) {
 }
 
 func (s *Server) handleReflect(args json.RawMessage) (interface{}, error) {
-	palaces, err := s.store.ListPalaces()
+	palaces, err := s.store.ListPalaces(s.setID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list palaces: %w", err)
 	}
-	allMemories, err := s.store.ListMemories("")
+	allMemories, err := s.store.ListMemories(s.setID, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list memories: %w", err)
 	}
@@ -416,22 +432,66 @@ func (s *Server) IsMemoryTool(name string) bool {
 	return s.ToolNames()[name]
 }
 
-// NamespacePrefix is used to prefix memory tools in the global tool list
-// so they don't collide with backend server tools.
-const NamespacePrefix = "memory__"
-
-// NamespacedName returns the tool name with the memory namespace prefix.
-func NamespacedName(toolName string) string {
-	return NamespacePrefix + toolName
+// NamespacePrefix returns the prefix for this set's tools.
+// Default set (slug=""): "memory__"
+// Custom set (slug="project_a"): "memory_project_a__"
+func (s *Server) NamespacePrefix() string {
+	if s.slug == "" {
+		return "memory__"
+	}
+	return "memory_" + s.slug + "__"
 }
 
-// ParseNamespaced splits a memory-namespaced tool name back into its base name.
-// Returns ok=false if the name doesn't have the memory prefix.
-func ParseNamespaced(namespaced string) (base string, ok bool) {
-	if strings.HasPrefix(namespaced, NamespacePrefix) {
-		return strings.TrimPrefix(namespaced, NamespacePrefix), true
+// NamespacedName returns the tool name with this set's namespace prefix.
+func (s *Server) NamespacedName(toolName string) string {
+	return s.NamespacePrefix() + toolName
+}
+
+// ParseNamespaced splits a memory-namespaced tool name.
+// Returns (setSlug, toolName, ok).
+// "memory__memory_store" → ("", "memory_store", true) — default set
+// "memory_projecta__memory_store" → ("projecta", "memory_store", true) — custom set
+func ParseNamespaced(namespaced string) (setSlug string, base string, ok bool) {
+	if strings.HasPrefix(namespaced, "memory__") {
+		return "", strings.TrimPrefix(namespaced, "memory__"), true
 	}
-	return "", false
+	if strings.HasPrefix(namespaced, "memory_") {
+		rest := strings.TrimPrefix(namespaced, "memory_")
+		idx := strings.Index(rest, "__")
+		if idx > 0 {
+			return rest[:idx], rest[idx+2:], true
+		}
+	}
+	return "", "", false
+}
+
+// NamespacedNameFor creates a namespaced tool name for a given slug and tool name.
+func NamespacedNameFor(slug, toolName string) string {
+	if slug == "" {
+		return "memory__" + toolName
+	}
+	return "memory_" + slug + "__" + toolName
+}
+
+// IsMemoryServerID returns true if the server ID refers to a builtin memory server.
+// "builtin-memory" → true (default set)
+// "builtin-memory:xxx" → true (custom set)
+func IsMemoryServerID(serverID string) bool {
+	return serverID == models.BuiltinMemoryServerID ||
+		strings.HasPrefix(serverID, models.BuiltinMemoryServerID+":")
+}
+
+// MemorySetIDFromServerID extracts the set ID from a memory server ID.
+// "builtin-memory" → "default"
+// "builtin-memory:abc123" → "abc123"
+func MemorySetIDFromServerID(serverID string) string {
+	if serverID == models.BuiltinMemoryServerID {
+		return "default"
+	}
+	if strings.HasPrefix(serverID, models.BuiltinMemoryServerID+":") {
+		return strings.TrimPrefix(serverID, models.BuiltinMemoryServerID+":")
+	}
+	return "default"
 }
 
 func mustJSON(v interface{}) json.RawMessage {

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Search, Brain, Clock, Eye, Pencil, X, Check } from 'lucide-react';
-import { memories as memApi, type Memory } from '@/api/client';
+import { Plus, Trash2, Search, Brain, Clock, Eye, Pencil, X, Check, FolderPlus, Layers } from 'lucide-react';
+import { memories as memApi, memorySets as setsApi, type Memory, type MemorySet } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -23,27 +23,39 @@ import { cn } from '@/lib/utils';
 
 export default function Memories() {
   const queryClient = useQueryClient();
+  const [selectedSet, setSelectedSet] = useState<string>('default');
   const [selectedPalace, setSelectedPalace] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Memory[] | null>(null);
   const [editing, setEditing] = useState<Memory | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [newSetOpen, setNewSetOpen] = useState(false);
+
+  const { data: sets } = useQuery({ queryKey: ['memory-sets'], queryFn: setsApi.list });
 
   const { data: allMemories } = useQuery({
-    queryKey: ['memories', selectedPalace],
-    queryFn: () => memApi.list(selectedPalace || undefined),
+    queryKey: ['memories', selectedSet, selectedPalace],
+    queryFn: () => memApi.list(selectedSet, selectedPalace || undefined),
   });
 
   const { data: palaces } = useQuery({
-    queryKey: ['palaces'],
-    queryFn: memApi.palaces,
+    queryKey: ['palaces', selectedSet],
+    queryFn: () => memApi.palaces(selectedSet),
   });
 
   const deleteMutation = useMutation({
     mutationFn: memApi.delete,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['memories'] });
-      queryClient.invalidateQueries({ queryKey: ['palaces'] });
+      queryClient.invalidateQueries({ queryKey: ['memories', selectedSet] });
+      queryClient.invalidateQueries({ queryKey: ['palaces', selectedSet] });
+    },
+  });
+
+  const deleteSetMutation = useMutation({
+    mutationFn: setsApi.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memory-sets'] });
+      setSelectedSet('default');
     },
   });
 
@@ -52,15 +64,14 @@ export default function Memories() {
       setSearchResults(null);
       return;
     }
-    const results = await memApi.search(searchQuery);
+    const results = await memApi.search(selectedSet, searchQuery);
     setSearchResults(results);
   };
 
   const displayMemories = searchResults ?? allMemories ?? [];
-
-  // Group memories by palace for the palace sidebar
   const palaceList = palaces ?? [];
   const totalMemories = palaceList.reduce((sum, p) => sum + p.count, 0);
+  const currentSet = sets?.find((s) => s.id === selectedSet);
 
   return (
     <div className="space-y-6">
@@ -69,24 +80,61 @@ export default function Memories() {
         <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold text-foreground">Memories</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            Built-in memory server — palaces, rooms & chronicle
+            {currentSet?.description || `Memory set: ${currentSet?.name ?? 'Default'}`}
           </p>
         </div>
-        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger
-            render={
-              <Button size="sm" className="shrink-0">
-                <Plus className="size-4" />
-                <span className="hidden sm:inline">New Memory</span>
-                <span className="sm:hidden">New</span>
-              </Button>
-            }
-          />
-          <DialogContent className="sm:max-w-lg">
-            <MemoryForm onSaved={() => setCreateOpen(false)} />
-          </DialogContent>
-        </Dialog>
+        <div className="flex items-center gap-2">
+          <Dialog open={newSetOpen} onOpenChange={setNewSetOpen}>
+            <DialogTrigger
+              render={
+                <Button variant="outline" size="sm" className="shrink-0">
+                  <FolderPlus className="size-4" />
+                  <span className="hidden sm:inline">New Set</span>
+                </Button>
+              }
+            />
+            <DialogContent className="sm:max-w-md">
+              <NewSetForm onSaved={() => setNewSetOpen(false)} />
+            </DialogContent>
+          </Dialog>
+          <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+            <DialogTrigger
+              render={
+                <Button size="sm" className="shrink-0">
+                  <Plus className="size-4" />
+                  <span className="hidden sm:inline">New Memory</span>
+                  <span className="sm:hidden">New</span>
+                </Button>
+              }
+            />
+            <DialogContent className="sm:max-w-lg">
+              <MemoryForm setID={selectedSet} onSaved={() => setCreateOpen(false)} />
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
+
+      {/* Set selector */}
+      {sets && sets.length > 1 && (
+        <div className="flex flex-wrap gap-2 items-center">
+          <Layers className="size-4 text-muted-foreground shrink-0" />
+          {sets.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => { setSelectedSet(s.id); setSelectedPalace(''); setSearchResults(null); }}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px] flex items-center gap-1.5',
+                selectedSet === s.id
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
+              )}
+            >
+              {s.name}
+              {s.is_default && <Badge variant="outline" className="text-[10px] py-0 px-1">default</Badge>}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Search bar */}
       <div className="flex gap-2">
@@ -172,12 +220,28 @@ export default function Memories() {
       {editing && (
         <Dialog open onOpenChange={(open) => !open && setEditing(null)}>
           <DialogContent className="sm:max-w-lg">
-            <MemoryForm
-              memory={editing}
-              onSaved={() => setEditing(null)}
-            />
+            <MemoryForm memory={editing} setID={selectedSet} onSaved={() => setEditing(null)} />
           </DialogContent>
         </Dialog>
+      )}
+
+      {/* Delete set button (non-default only) */}
+      {currentSet && !currentSet.is_default && (
+        <div className="pt-4 border-t border-border">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-destructive hover:text-destructive"
+            onClick={() => {
+              if (confirm(`Delete memory set "${currentSet.name}"? All memories in this set will be permanently deleted.`)) {
+                deleteSetMutation.mutate(currentSet.id);
+              }
+            }}
+          >
+            <Trash2 className="size-4" />
+            Delete "{currentSet.name}" set
+          </Button>
+        </div>
       )}
     </div>
   );
@@ -273,9 +337,11 @@ function MemoryCard({
 
 function MemoryForm({
   memory,
+  setID,
   onSaved,
 }: {
   memory?: Memory;
+  setID: string;
   onSaved: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -298,6 +364,7 @@ function MemoryForm({
         });
       }
       return memApi.create({
+        set_id: setID,
         palace,
         room,
         content,
@@ -306,8 +373,8 @@ function MemoryForm({
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['memories'] });
-      queryClient.invalidateQueries({ queryKey: ['palaces'] });
+      queryClient.invalidateQueries({ queryKey: ['memories', setID] });
+      queryClient.invalidateQueries({ queryKey: ['palaces', setID] });
       onSaved();
     },
   });
@@ -389,6 +456,74 @@ function MemoryForm({
           </DialogClose>
           <Button type="submit" disabled={saveMutation.isPending}>
             {saveMutation.isPending ? 'Saving...' : memory ? 'Update' : 'Store'}
+          </Button>
+        </DialogFooter>
+      </form>
+    </>
+  );
+}
+
+function NewSetForm({ onSaved }: { onSaved: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [error, setError] = useState('');
+
+  const createMutation = useMutation({
+    mutationFn: () => setsApi.create({ name, description: description || undefined }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memory-sets'] });
+      queryClient.invalidateQueries({ queryKey: ['servers'] });
+      onSaved();
+    },
+    onError: (err: Error) => setError(err.message),
+  });
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>New Memory Set</DialogTitle>
+        <DialogDescription>
+          Create a separate memory collection for a specific project, org, or context.
+          Each set appears as its own builtin MCP server.
+        </DialogDescription>
+      </DialogHeader>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          setError('');
+          createMutation.mutate();
+        }}
+        className="flex flex-col gap-4"
+      >
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="set-name">Name</Label>
+          <Input
+            id="set-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Project Alpha, Work, Personal"
+            required
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="set-desc">Description (optional)</Label>
+          <Input
+            id="set-desc"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="What is this memory set for?"
+          />
+        </div>
+        {error && (
+          <p className="text-sm text-destructive">{error}</p>
+        )}
+        <DialogFooter>
+          <DialogClose render={<Button variant="outline" type="button" />}>
+            Cancel
+          </DialogClose>
+          <Button type="submit" disabled={createMutation.isPending || !name.trim()}>
+            {createMutation.isPending ? 'Creating...' : 'Create Set'}
           </Button>
         </DialogFooter>
       </form>

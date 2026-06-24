@@ -67,6 +67,29 @@ export interface Server {
   updated_at: string;
 }
 
+export interface MemorySet {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  is_default: boolean;
+  created_at: string;
+}
+
+export interface Memory {
+  id: string;
+  set_id: string;
+  palace: string;
+  room?: string;
+  content: string;
+  tags: string[];
+  importance: number;
+  access_count: number;
+  created_at: string;
+  updated_at: string;
+  last_accessed?: string;
+}
+
 export interface LogEntry {
   timestamp: string;
   line: string;
@@ -197,35 +220,34 @@ export const dashboard = {
 
 // --- Memories ---
 
-export interface Memory {
-  id: string;
-  palace: string;
-  room: string;
-  content: string;
-  tags: string[];
-  importance: number;
-  access_count: number;
-  created_at: string;
-  updated_at: string;
-  last_accessed?: string;
-}
-
 export interface Palace {
   palace: string;
   count: number;
 }
 
 export const memories = {
-  list: (palace?: string) =>
-    request<Memory[]>(`/memories${palace ? `?palace=${encodeURIComponent(palace)}` : ''}`),
+  list: (setID: string, palace?: string) =>
+    request<Memory[]>(`/memories?set_id=${setID}${palace ? `&palace=${encodeURIComponent(palace)}` : ''}`),
   get: (id: string) => request<Memory>(`/memories/${id}`),
-  create: (data: { palace?: string; room?: string; content: string; tags?: string[]; importance?: number }) =>
+  create: (data: { set_id?: string; palace?: string; room?: string; content: string; tags?: string[]; importance?: number }) =>
     request<Memory>('/memories', { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: Partial<{ palace: string; room: string; content: string; tags: string[]; importance: number }>) =>
     request<Memory>(`/memories/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: string) =>
     request<{ status: string }>(`/memories/${id}`, { method: 'DELETE' }),
-  palaces: () => request<Palace[]>('/memories/palaces'),
-  search: (query: string) =>
-    request<Memory[]>(`/memories/search?q=${encodeURIComponent(query)}`),
+  palaces: (setID: string) => request<Palace[]>(`/memories/palaces?set_id=${setID}`),
+  search: (setID: string, query: string) =>
+    request<Memory[]>(`/memories/search?set_id=${setID}&q=${encodeURIComponent(query)}`),
+};
+
+// --- Memory Sets ---
+
+export const memorySets = {
+  list: () => request<MemorySet[]>('/memory-sets'),
+  create: (data: { name: string; description?: string }) =>
+    request<MemorySet>('/memory-sets', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: { name?: string; description?: string }) =>
+    request<MemorySet>(`/memory-sets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/memory-sets/${id}`, { method: 'DELETE' }),
 };

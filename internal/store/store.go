@@ -118,6 +118,15 @@ func migrate(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_memories_palace ON memories(palace);
 	CREATE INDEX IF NOT EXISTS idx_memories_content ON memories(content);
+
+	CREATE TABLE IF NOT EXISTS memory_sets (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		slug TEXT UNIQUE,
+		description TEXT,
+		is_default INTEGER DEFAULT 0,
+		created_at TEXT
+	);
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -141,6 +150,15 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		// Column already exists
 	}
+
+	// Migration: add set_id column to memories
+	_, err = db.Exec(`ALTER TABLE memories ADD COLUMN set_id TEXT DEFAULT 'default'`)
+	if err != nil {
+		// Column already exists
+	}
+
+	// Create default memory set if it doesn't exist
+	_, _ = db.Exec(`INSERT OR IGNORE INTO memory_sets (id, name, slug, description, is_default, created_at) VALUES ('default', 'Default', '', '', 1, datetime('now'))`)
 
 	return nil
 }
@@ -595,16 +613,113 @@ func (s *Store) DeleteCompound(id string) error {
 	return tx.Commit()
 }
 
+// --- Memory Sets ---
+
+// CreateMemorySet inserts a new memory set.
+func (s *Store) CreateMemorySet(ms *models.MemorySet) error {
+	isDefault := 0
+	if ms.IsDefault {
+		isDefault = 1
+	}
+	_, err := s.db.Exec(`INSERT INTO memory_sets (id, name, slug, description, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		ms.ID, ms.Name, ms.Slug, ms.Description, isDefault, ms.CreatedAt.Format("2006-01-02 15:04:05"))
+	return err
+}
+
+// GetMemorySet retrieves a memory set by ID.
+func (s *Store) GetMemorySet(id string) (*models.MemorySet, error) {
+	row := s.db.QueryRow(`SELECT id, name, slug, description, is_default, created_at FROM memory_sets WHERE id = ?`, id)
+	return scanMemorySet(row)
+}
+
+// ListMemorySets returns all memory sets.
+func (s *Store) ListMemorySets() ([]*models.MemorySet, error) {
+	rows, err := s.db.Query(`SELECT id, name, slug, description, is_default, created_at FROM memory_sets ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.MemorySet
+	for rows.Next() {
+		ms, err := scanMemorySetRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, ms)
+	}
+	return result, nil
+}
+
+// GetMemorySetBySlug retrieves a memory set by slug.
+func (s *Store) GetMemorySetBySlug(slug string) (*models.MemorySet, error) {
+	row := s.db.QueryRow(`SELECT id, name, slug, description, is_default, created_at FROM memory_sets WHERE slug = ?`, slug)
+	return scanMemorySet(row)
+}
+
+// UpdateMemorySet updates a memory set's name and description.
+func (s *Store) UpdateMemorySet(id string, req *models.UpdateMemorySetRequest) error {
+	if req.Name != nil {
+		if _, err := s.db.Exec(`UPDATE memory_sets SET name = ? WHERE id = ?`, *req.Name, id); err != nil {
+			return err
+		}
+	}
+	if req.Description != nil {
+		if _, err := s.db.Exec(`UPDATE memory_sets SET description = ? WHERE id = ?`, *req.Description, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteMemorySet removes a memory set. The default set can't be deleted.
+func (s *Store) DeleteMemorySet(id string) error {
+	if id == "default" {
+		return fmt.Errorf("cannot delete the default memory set")
+	}
+	_, err := s.db.Exec(`DELETE FROM memory_sets WHERE id = ?`, id)
+	return err
+}
+
+// DeleteMemoriesBySet removes all memories belonging to a given set.
+func (s *Store) DeleteMemoriesBySet(setID string) error {
+	_, err := s.db.Exec(`DELETE FROM memories WHERE set_id = ?`, setID)
+	return err
+}
+
+func scanMemorySet(row *sql.Row) (*models.MemorySet, error) {
+	return scanMemorySetImpl(row)
+}
+
+func scanMemorySetRows(rows *sql.Rows) (*models.MemorySet, error) {
+	return scanMemorySetImpl(rows)
+}
+
+func scanMemorySetImpl(s rowScanner) (*models.MemorySet, error) {
+	var ms models.MemorySet
+	var isDefault int
+	var createdAt string
+	err := s.Scan(&ms.ID, &ms.Name, &ms.Slug, &ms.Description, &isDefault, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+	ms.IsDefault = isDefault == 1
+	ms.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return &ms, nil
+}
+
 // --- Memories ---
 
 // CreateMemory inserts a new memory.
 func (s *Store) CreateMemory(mem *models.Memory) error {
+	if mem.SetID == "" {
+		mem.SetID = "default"
+	}
 	tagsJSON, _ := json.Marshal(mem.Tags)
 	_, err := s.db.Exec(`
-		INSERT INTO memories (id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO memories (id, set_id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		mem.ID, mem.Palace, mem.Room, mem.Content, string(tagsJSON),
+		mem.ID, mem.SetID, mem.Palace, mem.Room, mem.Content, string(tagsJSON),
 		mem.Importance, mem.AccessCount, mem.LastAccessed,
 		mem.CreatedAt, mem.UpdatedAt,
 	)
@@ -613,18 +728,21 @@ func (s *Store) CreateMemory(mem *models.Memory) error {
 
 // GetMemory retrieves a memory by ID.
 func (s *Store) GetMemory(id string) (*models.Memory, error) {
-	row := s.db.QueryRow(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, set_id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE id = ?`, id)
 	return scanMemory(row)
 }
 
-// ListMemories retrieves memories, optionally filtered by palace.
-func (s *Store) ListMemories(palace string) ([]*models.Memory, error) {
+// ListMemories retrieves memories, optionally filtered by set and palace.
+func (s *Store) ListMemories(setID, palace string) ([]*models.Memory, error) {
+	if setID == "" {
+		setID = "default"
+	}
 	var rows *sql.Rows
 	var err error
 	if palace != "" {
-		rows, err = s.db.Query(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE palace = ? ORDER BY importance DESC, updated_at DESC`, palace)
+		rows, err = s.db.Query(`SELECT id, set_id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE set_id = ? AND palace = ? ORDER BY importance DESC, updated_at DESC`, setID, palace)
 	} else {
-		rows, err = s.db.Query(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories ORDER BY importance DESC, updated_at DESC`)
+		rows, err = s.db.Query(`SELECT id, set_id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE set_id = ? ORDER BY importance DESC, updated_at DESC`, setID)
 	}
 	if err != nil {
 		return nil, err
@@ -634,9 +752,12 @@ func (s *Store) ListMemories(palace string) ([]*models.Memory, error) {
 }
 
 // SearchMemories performs a full-text search on memory content and tags.
-func (s *Store) SearchMemories(query string) ([]*models.Memory, error) {
+func (s *Store) SearchMemories(setID, query string) ([]*models.Memory, error) {
+	if setID == "" {
+		setID = "default"
+	}
 	likeQuery := "%" + query + "%"
-	rows, err := s.db.Query(`SELECT id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE content LIKE ? OR tags LIKE ? ORDER BY importance DESC, updated_at DESC`, likeQuery, likeQuery)
+	rows, err := s.db.Query(`SELECT id, set_id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE set_id = ? AND (content LIKE ? OR tags LIKE ?) ORDER BY importance DESC, updated_at DESC`, setID, likeQuery, likeQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -644,9 +765,12 @@ func (s *Store) SearchMemories(query string) ([]*models.Memory, error) {
 	return scanMemories(rows)
 }
 
-// ListPalaces returns distinct palace names with memory counts.
-func (s *Store) ListPalaces() ([]map[string]interface{}, error) {
-	rows, err := s.db.Query(`SELECT palace, COUNT(*) as cnt FROM memories GROUP BY palace ORDER BY palace`)
+// ListPalaces returns distinct palace names with memory counts for a given set.
+func (s *Store) ListPalaces(setID string) ([]map[string]interface{}, error) {
+	if setID == "" {
+		setID = "default"
+	}
+	rows, err := s.db.Query(`SELECT palace, COUNT(*) as cnt FROM memories WHERE set_id = ? GROUP BY palace ORDER BY palace`, setID)
 	if err != nil {
 		return nil, err
 	}
@@ -713,7 +837,7 @@ func scanMemory(row *sql.Row) (*models.Memory, error) {
 	var mem models.Memory
 	var tagsJSON string
 	var lastAccessed sql.NullTime
-	err := row.Scan(&mem.ID, &mem.Palace, &mem.Room, &mem.Content, &tagsJSON, &mem.Importance, &mem.AccessCount, &lastAccessed, &mem.CreatedAt, &mem.UpdatedAt)
+	err := row.Scan(&mem.ID, &mem.SetID, &mem.Palace, &mem.Room, &mem.Content, &tagsJSON, &mem.Importance, &mem.AccessCount, &lastAccessed, &mem.CreatedAt, &mem.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -733,7 +857,7 @@ func scanMemories(rows *sql.Rows) ([]*models.Memory, error) {
 		var mem models.Memory
 		var tagsJSON string
 		var lastAccessed sql.NullTime
-		if err := rows.Scan(&mem.ID, &mem.Palace, &mem.Room, &mem.Content, &tagsJSON, &mem.Importance, &mem.AccessCount, &lastAccessed, &mem.CreatedAt, &mem.UpdatedAt); err != nil {
+		if err := rows.Scan(&mem.ID, &mem.SetID, &mem.Palace, &mem.Room, &mem.Content, &tagsJSON, &mem.Importance, &mem.AccessCount, &lastAccessed, &mem.CreatedAt, &mem.UpdatedAt); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(tagsJSON), &mem.Tags)

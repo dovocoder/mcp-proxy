@@ -178,16 +178,39 @@ type DashboardStats struct {
 // Hindsight (importance scoring, access tracking), and Chronical
 // memory (time-based chronicle with created/updated timestamps).
 type Memory struct {
-	ID          string     `json:"id"`
-	Palace      string     `json:"palace"`            // top-level category (MemPalace)
-	Room        string     `json:"room"`             // sub-category within a palace
-	Content     string     `json:"content"`          // the memory text
-	Tags        []string   `json:"tags"`             // searchable tags
-	Importance  int        `json:"importance"`        // 0-100, hindsight-style scoring
-	AccessCount int        `json:"access_count"`      // times recalled (hindsight)
-	CreatedAt   time.Time  `json:"created_at"`        // chronicle start
-	UpdatedAt   time.Time  `json:"updated_at"`        // last modified
+	ID           string     `json:"id"`
+	SetID        string     `json:"set_id"`            // which memory set this belongs to
+	Palace       string     `json:"palace"`            // top-level category (MemPalace)
+	Room         string     `json:"room"`              // sub-category within a palace
+	Content      string     `json:"content"`           // the memory text
+	Tags         []string   `json:"tags"`              // searchable tags
+	Importance   int        `json:"importance"`        // 0-100, hindsight-style scoring
+	AccessCount  int        `json:"access_count"`      // times recalled (hindsight)
+	CreatedAt    time.Time  `json:"created_at"`        // chronicle start
+	UpdatedAt    time.Time  `json:"updated_at"`        // last modified
 	LastAccessed *time.Time `json:"last_accessed,omitempty"` // last recalled (hindsight)
+}
+
+// MemorySet represents a named collection of memories for a specific project/org/context.
+type MemorySet struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"` // URL-safe name used in tool namespace prefix
+	Description string    `json:"description,omitempty"`
+	IsDefault   bool      `json:"is_default"` // default set can't be deleted
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// CreateMemorySetRequest is the payload for creating a memory set.
+type CreateMemorySetRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// UpdateMemorySetRequest is the payload for updating a memory set.
+type UpdateMemorySetRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
 }
 
 // CreateMemoryRequest is the payload for creating a memory.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/agentic/mcp-proxy/internal/auth"
+	"github.com/agentic/mcp-proxy/internal/memory"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/proxy"
 	"github.com/agentic/mcp-proxy/internal/store"
@@ -113,6 +114,12 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("GET /api/memories/palaces", h.handleListPalaces)
 	adminMux.HandleFunc("GET /api/memories/search", h.handleSearchMemories)
 
+	// Memory set routes
+	adminMux.HandleFunc("GET /api/memory-sets", h.handleListMemorySets)
+	adminMux.HandleFunc("POST /api/memory-sets", h.handleCreateMemorySet)
+	adminMux.HandleFunc("PATCH /api/memory-sets/{id}", h.handleUpdateMemorySet)
+	adminMux.HandleFunc("DELETE /api/memory-sets/{id}", h.handleDeleteMemorySet)
+
 	mux.Handle("/api/", h.auth.JWTMiddleware(adminMux))
 }
 
@@ -204,13 +211,32 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 
 	var result []serverWithStatus
 
-	// Prepend the built-in memory server
-	builtin := models.BuiltinMemoryServer()
-	memTools := h.proxy.Memory().Tools()
-	result = append(result, serverWithStatus{
-		Server:     &builtin,
-		ToolsCount: len(memTools),
-	})
+	// Prepend all memory set servers as virtual builtin servers
+	memSets, _ := h.proxy.ListMemorySets()
+	for _, ms := range memSets {
+		sid := ms.ID
+		if sid == "default" {
+			sid = models.BuiltinMemoryServerID
+		} else {
+			sid = models.BuiltinMemoryServerID + ":" + ms.ID
+		}
+		srv := &models.Server{
+			ID:        sid,
+			Name:      ms.Name,
+			Transport: "builtin",
+			Enabled:   true,
+			IsBuiltin: true,
+			Status:    "connected",
+		}
+		toolsCount := 0
+		if memSrv := h.proxy.GetMemoryServer(ms.ID); memSrv != nil {
+			toolsCount = len(memSrv.Tools())
+		}
+		result = append(result, serverWithStatus{
+			Server:     srv,
+			ToolsCount: toolsCount,
+		})
+	}
 
 	for _, srv := range servers {
 		status, toolCount, lastErr := h.proxy.GetServerStatus(srv.ID)
@@ -508,10 +534,24 @@ func (h *Handlers) handleGetCompound(w http.ResponseWriter, r *http.Request) {
 	memberIDs, _ := h.store.GetCompoundMemberIDs(id)
 	var members []models.Server
 	for _, mid := range memberIDs {
-		if mid == models.BuiltinMemoryServerID {
-			// Virtual builtin server — not in the database
-			builtin := models.BuiltinMemoryServer()
-			members = append(members, builtin)
+		if memory.IsMemoryServerID(mid) {
+			// Virtual builtin memory server — not in the database
+			setID := memory.MemorySetIDFromServerID(mid)
+			ms, err := h.store.GetMemorySet(setID)
+			if err == nil && ms != nil {
+				members = append(members, models.Server{
+					ID:        mid,
+					Name:      ms.Name,
+					Transport: "builtin",
+					Enabled:   true,
+					IsBuiltin: true,
+					Status:    "connected",
+				})
+			} else {
+				// Fallback for default set
+				builtin := models.BuiltinMemoryServer()
+				members = append(members, builtin)
+			}
 			continue
 		}
 		srv, err := h.store.GetServer(mid)
@@ -570,8 +610,8 @@ func (h *Handlers) handleAddCompoundMember(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "Compound server not found")
 		return
 	}
-	// Allow builtin servers without DB lookup
-	if serverID != models.BuiltinMemoryServerID {
+	// Allow builtin memory servers without DB lookup
+	if !memory.IsMemoryServerID(serverID) {
 		if _, err := h.store.GetServer(serverID); err != nil {
 			writeError(w, http.StatusNotFound, "Server not found")
 			return
@@ -709,8 +749,12 @@ func SplitPath(path string) []string {
 // --- Memories ---
 
 func (h *Handlers) handleListMemories(w http.ResponseWriter, r *http.Request) {
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
 	palace := r.URL.Query().Get("palace")
-	memories, err := h.store.ListMemories(palace)
+	memories, err := h.store.ListMemories(setID, palace)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to list memories")
 		return
@@ -742,8 +786,13 @@ func (h *Handlers) handleCreateMemory(w http.ResponseWriter, r *http.Request) {
 		req.Tags = []string{}
 	}
 	now := time.Now()
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
 	mem := &models.Memory{
 		ID:         "mem_" + uuid.NewString(),
+		SetID:      setID,
 		Palace:     req.Palace,
 		Room:       req.Room,
 		Content:    req.Content,
@@ -794,7 +843,11 @@ func (h *Handlers) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) handleListPalaces(w http.ResponseWriter, r *http.Request) {
-	palaces, err := h.store.ListPalaces()
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
+	palaces, err := h.store.ListPalaces(setID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to list palaces")
 		return
@@ -806,12 +859,16 @@ func (h *Handlers) handleListPalaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) handleSearchMemories(w http.ResponseWriter, r *http.Request) {
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		writeError(w, http.StatusBadRequest, "Query parameter 'q' is required")
 		return
 	}
-	memories, err := h.store.SearchMemories(query)
+	memories, err := h.store.SearchMemories(setID, query)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Search failed")
 		return
@@ -820,4 +877,60 @@ func (h *Handlers) handleSearchMemories(w http.ResponseWriter, r *http.Request) 
 		memories = []*models.Memory{}
 	}
 	writeJSON(w, http.StatusOK, memories)
+}
+
+// --- Memory Sets ---
+
+func (h *Handlers) handleListMemorySets(w http.ResponseWriter, r *http.Request) {
+	sets, err := h.proxy.ListMemorySets()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list memory sets")
+		return
+	}
+	if sets == nil {
+		sets = []*models.MemorySet{}
+	}
+	writeJSON(w, http.StatusOK, sets)
+}
+
+func (h *Handlers) handleCreateMemorySet(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateMemorySetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+	ms, err := h.proxy.CreateMemorySet(req.Name, req.Description)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create memory set: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, ms)
+}
+
+func (h *Handlers) handleUpdateMemorySet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req models.UpdateMemorySetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if err := h.proxy.UpdateMemorySet(id, &req); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update memory set: %v", err))
+		return
+	}
+	ms, _ := h.store.GetMemorySet(id)
+	writeJSON(w, http.StatusOK, ms)
+}
+
+func (h *Handlers) handleDeleteMemorySet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.proxy.DeleteMemorySet(id); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete memory set: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
