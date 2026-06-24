@@ -90,14 +90,15 @@ func (sl *serverLog) clear() {
 // Manager manages all backend MCP server connections.
 type Manager struct {
 	store          *store.Store
-	memorySets     map[string]*memory.Server    // setID -> memory server
+	memorySets     map[string]*memory.Server // setID -> memory server
+	memoryMu       sync.RWMutex              // protects memorySets
 	mu             sync.RWMutex
-	clients        map[string]*mcp.Client         // serverID -> client
-	errors         map[string]string              // serverID -> last error message
-	authStates     map[string]*mcp.AuthState     // state -> pending OAuth flow
-	deviceAuths    map[string]*DeviceAuthResult   // serverID -> pending device code flow
+	clients        map[string]*mcp.Client       // serverID -> client
+	errors         map[string]string            // serverID -> last error message
+	authStates     map[string]*mcp.AuthState    // state -> pending OAuth flow
+	deviceAuths    map[string]*DeviceAuthResult // serverID -> pending device code flow
 	logMu          sync.RWMutex
-	serverLogs     map[string]*serverLog          // serverID -> stderr log ring buffer
+	serverLogs     map[string]*serverLog               // serverID -> stderr log ring buffer
 	oauthMetaCache map[string]*mcp.OAuthServerMetadata // serverID -> cached discovery result
 	oauthMetaMu    sync.RWMutex
 }
@@ -125,6 +126,7 @@ func (m *Manager) InitMemorySets() {
 		log.Printf("Failed to list memory sets: %v", err)
 		return
 	}
+	m.memoryMu.Lock()
 	for _, ms := range sets {
 		m.memorySets[ms.ID] = memory.New(m.store, ms.ID, ms.Slug)
 	}
@@ -137,9 +139,12 @@ func (m *Manager) InitMemorySets() {
 			IsDefault: true,
 			CreatedAt: time.Now(),
 		}
-		_ = m.store.CreateMemorySet(defaultSet)
+		if err := m.store.CreateMemorySet(defaultSet); err != nil {
+			log.Printf("Failed to create default memory set: %v", err)
+		}
 		m.memorySets["default"] = memory.New(m.store, "default", "")
 	}
+	m.memoryMu.Unlock()
 }
 
 // MemoryServerID returns the virtual server ID for a memory set.
@@ -153,11 +158,15 @@ func memoryServerID(setID string) string {
 
 // GetMemoryServer returns the memory server instance for a given set ID.
 func (m *Manager) GetMemoryServer(setID string) *memory.Server {
+	m.memoryMu.RLock()
+	defer m.memoryMu.RUnlock()
 	return m.memorySets[setID]
 }
 
 // findMemoryServerBySlug returns the memory server with the given slug.
 func (m *Manager) findMemoryServerBySlug(slug string) *memory.Server {
+	m.memoryMu.RLock()
+	defer m.memoryMu.RUnlock()
 	for _, srv := range m.memorySets {
 		if srv.Slug() == slug {
 			return srv
@@ -222,7 +231,9 @@ func (m *Manager) connectServer(srv *models.Server) {
 						refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
 						if err == nil {
 							tokens = refreshed
-							_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
+							if err := m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec); err != nil {
+								log.Printf("Server %s: warning — failed to persist refreshed OAuth token: %v", srv.Name, err)
+							}
 							log.Printf("Server %s: OAuth token refreshed successfully (%d chars)", srv.Name, len(tokens.AccessToken))
 						} else {
 							log.Printf("Server %s: failed to refresh OAuth token: %v", srv.Name, err)
@@ -327,7 +338,9 @@ func (m *Manager) connectServer(srv *models.Server) {
 		m.mu.Lock()
 		m.errors[srv.ID] = err.Error()
 		m.mu.Unlock()
-		_ = m.store.UpdateServerStatus(srv.ID, "error")
+		if err := m.store.UpdateServerStatus(srv.ID, "error"); err != nil {
+			log.Printf("[Proxy] Warning: failed to update server status to 'error' for %s: %v", srv.ID, err)
+		}
 		return
 	}
 
@@ -336,7 +349,9 @@ func (m *Manager) connectServer(srv *models.Server) {
 	delete(m.errors, srv.ID)
 	m.mu.Unlock()
 
-	_ = m.store.UpdateServerStatus(srv.ID, "connected")
+	if err := m.store.UpdateServerStatus(srv.ID, "connected"); err != nil {
+		log.Printf("[Proxy] Warning: failed to update server status to 'connected' for %s: %v", srv.ID, err)
+	}
 	log.Printf("Connected to MCP server: %s (%d tools)", srv.Name, len(client.Tools()))
 }
 
@@ -476,7 +491,9 @@ func (m *Manager) DisconnectServer(id string) {
 	if ok {
 		client.Disconnect()
 	}
-	_ = m.store.UpdateServerStatus(id, "disconnected")
+	if err := m.store.UpdateServerStatus(id, "disconnected"); err != nil {
+		log.Printf("[Proxy] Warning: failed to update server status to 'disconnected' for %s: %v", id, err)
+	}
 }
 
 // ReconnectServer disconnects and reconnects a server.
@@ -524,6 +541,7 @@ type Scope struct {
 func (m *Manager) ListTools() []models.Tool {
 	tools := m.listToolsFiltered(nil)
 	// Add memory tools from all memory sets
+	m.memoryMu.RLock()
 	for _, srv := range m.memorySets {
 		for _, mt := range srv.Tools() {
 			tools = append(tools, models.Tool{
@@ -534,11 +552,14 @@ func (m *Manager) ListTools() []models.Tool {
 			})
 		}
 	}
+	m.memoryMu.RUnlock()
 	return tools
 }
 
 // Memory returns the default memory server instance (backward compat).
 func (m *Manager) Memory() *memory.Server {
+	m.memoryMu.RLock()
+	defer m.memoryMu.RUnlock()
 	return m.memorySets["default"]
 }
 
@@ -687,12 +708,15 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 	if scope.CompoundID != "" {
 		memorySetIDs = m.isMemoryCompoundMember(scope.CompoundID)
 	} else {
+		m.memoryMu.RLock()
 		for setID := range m.memorySets {
 			memorySetIDs = append(memorySetIDs, setID)
 		}
+		m.memoryMu.RUnlock()
 	}
 	for _, setID := range memorySetIDs {
-		if srv, ok := m.memorySets[setID]; ok {
+		srv := m.GetMemoryServer(setID)
+		if srv != nil {
 			setSuffix := ""
 			if srv.Slug() != "" {
 				if ms, err := m.store.GetMemorySet(setID); err == nil && ms.Name != "" {
@@ -1348,17 +1372,13 @@ const maxLogLines = 500
 
 // addServerLog appends a stderr line to the server's log buffer.
 func (m *Manager) addServerLog(serverID, line string) {
-	m.logMu.RLock()
+	m.logMu.Lock()
 	sl, ok := m.serverLogs[serverID]
-	m.logMu.RUnlock()
-
 	if !ok {
 		sl = newServerLog(maxLogLines)
-		m.logMu.Lock()
 		m.serverLogs[serverID] = sl
-		m.logMu.Unlock()
 	}
-
+	m.logMu.Unlock()
 	sl.add(line)
 }
 
@@ -1498,7 +1518,8 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		}
 		// Include memory tools from sets that are compound members
 		for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
-			if srv, ok := m.memorySets[setID]; ok {
+			srv := m.GetMemoryServer(setID)
+			if srv != nil {
 				memSetName := "memory"
 				if ms, err := m.store.GetMemorySet(setID); err == nil && ms.Name != "" {
 					memSetName = ms.Name
@@ -1539,13 +1560,14 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		// Check memory tools first (only from sets that are compound members)
 		if slug, baseName, ok := memory.ParseNamespaced(params.Tool); ok {
 			for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
-				if srv, ok := m.memorySets[setID]; ok && srv.Slug() == slug {
+				srv := m.GetMemoryServer(setID)
+				if srv != nil && srv.Slug() == slug {
 					for _, mt := range srv.Tools() {
 						if mt.Name == baseName {
 							return wrapMCPContent(map[string]interface{}{
-								"name":         params.Tool,
+								"name":        params.Tool,
 								"server":      "memory",
-								"type":         "memory",
+								"type":        "memory",
 								"description": mt.Description,
 								"inputSchema": mt.InputSchema,
 							})
@@ -1559,9 +1581,9 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 			name := fmt.Sprintf("%s__%s", t.ServerName, t.Name)
 			if name == params.Tool {
 				return wrapMCPContent(map[string]interface{}{
-					"name":         name,
+					"name":        name,
 					"server":      t.ServerName,
-					"type":         "server",
+					"type":        "server",
 					"description": t.Description,
 					"inputSchema": t.InputSchema,
 				})
@@ -1576,7 +1598,8 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		// Check if it's a memory tool — route to memory handler (only if member)
 		if slug, baseName, ok := memory.ParseNamespaced(params.Tool); ok {
 			for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
-				if srv, ok := m.memorySets[setID]; ok && srv.Slug() == slug {
+				srv := m.GetMemoryServer(setID)
+				if srv != nil && srv.Slug() == slug {
 					return srv.HandleToolCall(baseName, params.Arguments)
 				}
 			}
@@ -1634,7 +1657,8 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		}
 		// Search memory tools too (from sets that are compound members)
 		for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
-			if srv, ok := m.memorySets[setID]; ok {
+			srv := m.GetMemoryServer(setID)
+			if srv != nil {
 				for _, mt := range srv.Tools() {
 					name := srv.NamespacedName(mt.Name)
 					if strings.Contains(strings.ToLower(name), query) ||
@@ -1714,7 +1738,9 @@ func (m *Manager) CreateMemorySet(name, description string) (*models.MemorySet, 
 		return nil, fmt.Errorf("failed to create memory set: %w", err)
 	}
 
+	m.memoryMu.Lock()
 	m.memorySets[ms.ID] = memory.New(m.store, ms.ID, ms.Slug)
+	m.memoryMu.Unlock()
 	return ms, nil
 }
 
@@ -1736,7 +1762,9 @@ func (m *Manager) UpdateMemorySet(id string, req *models.UpdateMemorySetRequest)
 	// Refresh the in-memory server
 	ms, err := m.store.GetMemorySet(id)
 	if err == nil && ms != nil {
+		m.memoryMu.Lock()
 		m.memorySets[ms.ID] = memory.New(m.store, ms.ID, ms.Slug)
+		m.memoryMu.Unlock()
 	}
 	return nil
 }
@@ -1753,6 +1781,8 @@ func (m *Manager) DeleteMemorySet(id string) error {
 	if err := m.store.DeleteMemorySet(id); err != nil {
 		return err
 	}
+	m.memoryMu.Lock()
 	delete(m.memorySets, id)
+	m.memoryMu.Unlock()
 	return nil
 }

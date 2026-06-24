@@ -238,7 +238,14 @@ function KeyForm({
         expires_in_days?: number;
       } = { name, scopes };
       if (compoundId) data.compound_id = compoundId;
-      if (expiresIn) data.expires_in_days = parseInt(expiresIn);
+      if (expiresIn) {
+        const days = parseInt(expiresIn, 10);
+        if (!Number.isFinite(days) || days <= 0) {
+          setError('Expiry must be a positive number of days');
+          return;
+        }
+        data.expires_in_days = days;
+      }
       const key = await apiKeysApi.create(data);
       onSuccess(key);
     } catch (err) {

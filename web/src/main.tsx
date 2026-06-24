@@ -10,8 +10,14 @@ import './index.css'
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      refetchInterval: 5000,
+      refetchInterval: 10000,
       retry: 1,
+      refetchOnWindowFocus: true,
+    },
+    mutations: {
+      onError: (error: Error) => {
+        console.error('[Mutation error]', error.message);
+      },
     },
   },
 })

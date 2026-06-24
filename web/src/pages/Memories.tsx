@@ -67,8 +67,13 @@ export default function Memories() {
       setSearchResults(null);
       return;
     }
-    const results = await memApi.search(selectedSet, searchQuery);
-    setSearchResults(results);
+    try {
+      const results = await memApi.search(selectedSet, searchQuery);
+      setSearchResults(results);
+    } catch (err) {
+      console.error('[Memory search]', err);
+      setSearchResults([]);
+    }
   };
 
   const displayMemories = searchResults ?? allMemories ?? [];

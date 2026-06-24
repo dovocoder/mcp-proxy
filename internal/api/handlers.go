@@ -16,8 +16,8 @@ import (
 
 	"github.com/agentic/mcp-proxy/internal/auth"
 	"github.com/agentic/mcp-proxy/internal/crypto"
-	"github.com/agentic/mcp-proxy/internal/memory"
 	"github.com/agentic/mcp-proxy/internal/mcp"
+	"github.com/agentic/mcp-proxy/internal/memory"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/proxy"
 	"github.com/agentic/mcp-proxy/internal/store"
@@ -26,12 +26,12 @@ import (
 
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
-	store            *store.Store
-	proxy            *proxy.Manager
-	auth             *auth.AuthService
-	sseManager       *sseSessionManager
-	streamManager    *streamSessionManager
-	masterKey        [32]byte
+	store             *store.Store
+	proxy             *proxy.Manager
+	auth              *auth.AuthService
+	sseManager        *sseSessionManager
+	streamManager     *streamSessionManager
+	masterKey         [32]byte
 	adminLoginEnabled bool
 }
 
@@ -44,12 +44,12 @@ func New(s *store.Store, p *proxy.Manager, a *auth.AuthService, adminLoginEnable
 		encKey = a.JWTSecret()
 	}
 	return &Handlers{
-		store:            s,
-		proxy:            p,
-		auth:             a,
-		sseManager:       newSSESessionManager(),
-		streamManager:    newStreamSessionManager(),
-		masterKey:        crypto.DeriveKey(encKey),
+		store:             s,
+		proxy:             p,
+		auth:              a,
+		sseManager:        newSSESessionManager(),
+		streamManager:     newStreamSessionManager(),
+		masterKey:         crypto.DeriveKey(encKey),
 		adminLoginEnabled: adminLoginEnabled,
 	}
 }
@@ -620,6 +620,36 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// validateRedirectURI checks that a client redirect_uri is safe.
+// Allowed: http(s)://localhost:*, http(s)://127.0.0.1:*, http(s)://[::1]:*,
+// or custom app schemes (e.g. com.example.app://callback).
+// Rejects: external HTTP(S) hosts, file://, data:, javascript:.
+func validateRedirectURI(rawURI string) error {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+
+	// Custom app schemes (e.g. com.raycast://) — allow but must have a path or host
+	if scheme != "http" && scheme != "https" {
+		if scheme == "" || scheme == "file" || scheme == "data" || scheme == "javascript" {
+			return fmt.Errorf("scheme %q is not allowed", scheme)
+		}
+		// App scheme — allow (MCP clients use deep links)
+		return nil
+	}
+
+	// HTTP(S) — only allow localhost / loopback
+	host := parsed.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" {
+		return nil
+	}
+
+	return fmt.Errorf("external host %q is not allowed — only localhost is accepted", host)
+}
+
 // --- Compound Servers ---
 
 func (h *Handlers) handleListCompounds(w http.ResponseWriter, r *http.Request) {
@@ -716,11 +746,11 @@ func (h *Handlers) handleGetCompound(w http.ResponseWriter, r *http.Request) {
 	totalToolCount := toolCount + memoryToolCount
 
 	writeJSON(w, http.StatusOK, models.CompoundServerWithMembers{
-		CompoundServer:   *compound,
-		Members:           members,
-		ToolCount:         totalToolCount,
-		ServerToolCount:   toolCount,
-		MemoryToolCount:   memoryToolCount,
+		CompoundServer:  *compound,
+		Members:         members,
+		ToolCount:       totalToolCount,
+		ServerToolCount: toolCount,
+		MemoryToolCount: memoryToolCount,
 	})
 }
 
@@ -837,6 +867,13 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 
 	if clientRedirectURI == "" {
 		writeError(w, http.StatusBadRequest, "Missing redirect_uri parameter")
+		return
+	}
+
+	// Validate redirect_uri to prevent open redirect / auth code interception.
+	// Allowed: http(s)://localhost:*, http(s)://127.0.0.1:*, or custom app schemes (e.g. com.example://).
+	if err := validateRedirectURI(clientRedirectURI); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid redirect_uri: %v", err))
 		return
 	}
 
@@ -998,9 +1035,9 @@ func (h *Handlers) handleSetBearerToken(w http.ResponseWriter, r *http.Request) 
 	id := r.PathValue("id")
 
 	var body struct {
-		BearerToken string `json:"bearer_token"`
+		BearerToken    string `json:"bearer_token"`
 		BearerTokenEnv string `json:"bearer_token_env"`
-		Method     string `json:"method"` // "bearer" or "env_bearer"
+		Method         string `json:"method"` // "bearer" or "env_bearer"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -1058,8 +1095,8 @@ func (h *Handlers) handlePollDeviceAuth(w http.ResponseWriter, r *http.Request) 
 	// Check if auth completed
 	hasTokens, expired := h.proxy.GetAuthStatus(id)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"completed":  hasTokens,
-		"expired":    expired,
+		"completed": hasTokens,
+		"expired":   expired,
 	})
 }
 
@@ -1510,8 +1547,8 @@ func (h *Handlers) handleExportEnvVars(w http.ResponseWriter, r *http.Request) {
 // handleOIDCStatus returns auth configuration (OIDC + password login).
 func (h *Handlers) handleOIDCStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{
-		"enabled":         h.auth.HasOIDC(),
-		"password_login":  h.adminLoginEnabled,
+		"enabled":        h.auth.HasOIDC(),
+		"password_login": h.adminLoginEnabled,
 	})
 }
 
@@ -1715,15 +1752,15 @@ func (h *Handlers) handleAuthorizationServerMetadata(w http.ResponseWriter, r *h
 
 	// All endpoints are on the proxy's domain — the proxy forwards to PocketID
 	resp := map[string]interface{}{
-		"issuer":                               proxyURL,
-		"authorization_endpoint":               fmt.Sprintf("%s/api/oauth/authorize", proxyURL),
-		"token_endpoint":                       fmt.Sprintf("%s/api/oauth/token", proxyURL),
-		"registration_endpoint":                fmt.Sprintf("%s/api/oauth/register", proxyURL),
+		"issuer":                                proxyURL,
+		"authorization_endpoint":                fmt.Sprintf("%s/api/oauth/authorize", proxyURL),
+		"token_endpoint":                        fmt.Sprintf("%s/api/oauth/token", proxyURL),
+		"registration_endpoint":                 fmt.Sprintf("%s/api/oauth/register", proxyURL),
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                []string{"authorization_code", "refresh_token"},
-		"token_endpoint_auth_method_supported": []string{"none", "client_secret_post"},
-		"scopes_supported":                     []string{"openid", "profile", "email"},
-		"code_challenge_methods_supported":     []string{"S256"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"token_endpoint_auth_method_supported":  []string{"none", "client_secret_post"},
+		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"code_challenge_methods_supported":      []string{"S256"},
 		"client_id_metadata_document_supported": true,
 	}
 
@@ -1794,11 +1831,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"client_id":                   clientID,
-		"client_id_issued_at":         time.Now().Unix(),
-		"grant_types":                 []string{"authorization_code", "refresh_token"},
-		"response_types":              []string{"code"},
-		"token_endpoint_auth_method":  "none",
+		"client_id":                  clientID,
+		"client_id_issued_at":        time.Now().Unix(),
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"token_endpoint_auth_method": "none",
 	}
 
 	// Echo the client's redirect_uris, or use a sensible default
@@ -1969,14 +2006,24 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		// Log whether token exchange succeeded (don't log token values)
 		hasToken := strings.Contains(respBodyStr, "\"access_token\"")
 		if resp.StatusCode != 200 {
-			log.Printf("[OAuth-Proxy] Token exchange FAILED: upstream=%s, status=%d, body=%s",
-				upstreamURL, resp.StatusCode, respBodyStr)
+			log.Printf("[OAuth-Proxy] Token exchange FAILED: upstream=%s, status=%d, body_len=%d",
+				upstreamURL, resp.StatusCode, len(respBodyStr))
 		} else {
 			log.Printf("[OAuth-Proxy] Token exchange OK: upstream=%s, status=%d, has_token=%v, body_len=%d",
 				upstreamURL, resp.StatusCode, hasToken, len(respBodyStr))
 		}
-		// Write the response body back to the client
+		// Write the response body back to the client — filter upstream headers
+		tokenSafeHeaders := map[string]bool{
+			"Content-Type":           true,
+			"Cache-Control":          true,
+			"Pragma":                 true,
+			"Expires":                true,
+			"X-Content-Type-Options": true,
+		}
 		for k, vs := range resp.Header {
+			if !tokenSafeHeaders[k] {
+				continue
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
@@ -1986,8 +2033,18 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy response headers
+	// Copy response headers — filter out potentially sensitive upstream headers
+	safeHeaders := map[string]bool{
+		"Content-Type":           true,
+		"Cache-Control":          true,
+		"Pragma":                 true,
+		"Expires":                true,
+		"X-Content-Type-Options": true,
+	}
 	for k, vs := range resp.Header {
+		if !safeHeaders[k] {
+			continue
+		}
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
@@ -2009,12 +2066,12 @@ func (h *Handlers) handleClientMetadata(w http.ResponseWriter, r *http.Request) 
 	redirectURI := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"client_id":                clientID,
-		"client_name":             "MCP Proxy",
-		"client_uri":              fmt.Sprintf("%s://%s", scheme, r.Host),
-		"redirect_uris":           []string{redirectURI},
-		"grant_types":             []string{"authorization_code", "refresh_token"},
-		"response_types":          []string{"code"},
+		"client_id":                  clientID,
+		"client_name":                "MCP Proxy",
+		"client_uri":                 fmt.Sprintf("%s://%s", scheme, r.Host),
+		"redirect_uris":              []string{redirectURI},
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": "none",
 	})
 }
@@ -2032,11 +2089,11 @@ func (h *Handlers) handleGetRegistration(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := map[string]interface{}{
-		"status":                                   "none",
-		"issuer":                                   meta.Issuer,
-		"authorization_endpoint":                   meta.AuthorizationEndpoint,
-		"registration_endpoint":                    meta.RegistrationEndpoint,
-		"client_id_metadata_document_supported":    meta.ClientIDMetadataDocumentSupported,
+		"status":                                "none",
+		"issuer":                                meta.Issuer,
+		"authorization_endpoint":                meta.AuthorizationEndpoint,
+		"registration_endpoint":                 meta.RegistrationEndpoint,
+		"client_id_metadata_document_supported": meta.ClientIDMetadataDocumentSupported,
 	}
 
 	// Check for persisted dynamic registration

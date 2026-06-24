@@ -36,7 +36,9 @@ export default function Login() {
         setOidcEnabled(res.enabled);
         setPasswordLoginEnabled(res.password_login);
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.error('[Login] Failed to check OIDC status:', err);
+      });
   }, [navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {

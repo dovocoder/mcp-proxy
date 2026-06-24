@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -489,9 +489,10 @@ function ServerForm({
   const [loading, setLoading] = useState(false);
 
   // Listen for registry pick events
-  useState(() => {
+  useEffect(() => {
     const handler = (e: Event) => {
-      const srv = (e as CustomEvent).detail as RegistryServer;
+      if (!(e instanceof CustomEvent) || !e.detail) return;
+      const srv = e.detail as RegistryServer;
       const pkg = srv.packages?.[0];
       if (pkg) {
         setName(srv.name);
@@ -510,7 +511,7 @@ function ServerForm({
     };
     window.addEventListener('registry-pick', handler);
     return () => window.removeEventListener('registry-pick', handler);
-  });
+  }, []);
 
   const isHTTP = transport === 'http' || transport === 'streamable-http';
 

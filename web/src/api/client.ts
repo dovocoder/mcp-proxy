@@ -315,7 +315,7 @@ export interface RegistryServer {
 export const registry = {
   search: (query?: string) => {
     const qs = query ? `?q=${encodeURIComponent(query)}` : '';
-    return fetch(`/api/registry/search${qs}`).then((r) => r.json());
+    return request<RegistryServer[] | { servers: RegistryServer[] }>(`/registry/search${qs}`);
   },
 };
 
