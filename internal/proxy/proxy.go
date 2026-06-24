@@ -484,26 +484,13 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 		// Check if compound has dictionary mode enabled
 		compound, err := m.store.GetCompound(scope.CompoundID)
 		if err == nil && compound != nil && compound.DictionaryMode {
-			// Dictionary mode: return the dictionary tool + memory tools (if memory is a member)
+			// Dictionary mode: return ONLY the dictionary tool.
+			// All member tools (including memory) are discovered lazily via the dictionary.
 			tools := []mcp.Tool{{
 				Name:        "dictionary",
 				Description: dictionaryDescription,
 				InputSchema: dictionarySchema,
 			}}
-			// Add memory tools from sets that are compound members
-			for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
-				if srv, ok := m.memorySets[setID]; ok {
-					for _, mt := range srv.Tools() {
-						tools = append(tools, mcp.Tool{
-							Name:        srv.NamespacedName(mt.Name),
-							Description: fmt.Sprintf("[memory] %s", mt.Description),
-						})
-						if len(mt.InputSchema) > 0 {
-							tools[len(tools)-1].InputSchema = mt.InputSchema
-						}
-					}
-				}
-			}
 			result := mcp.ToolListResult{Tools: tools}
 			return json.Marshal(result)
 		}
@@ -1000,23 +987,36 @@ func (m *Manager) isMemoryCompoundMember(compoundID string) []string {
 	return setIDs
 }
 
-const dictionaryDescription = `Dictionary tool for compound servers. Instead of receiving all tools upfront, use this tool to discover, inspect, and call tools from member servers lazily.
+const dictionaryDescription = `Lazy tool discovery for compound servers. Instead of receiving all tools upfront, use this single tool to discover, inspect, and call any tool from member servers — including built-in memory tools.
 
-Actions (pass as "action" parameter):
+HOW TO USE (recommended workflow):
 
-— list: List all available tools with names and descriptions (no schemas). Returns a lightweight catalog.
-  No additional parameters needed.
+1. Call with action "list" to get a lightweight catalog of all available tools (name + description + server). No schemas — just enough to decide what's relevant.
 
-— describe: Get the full input schema for a specific tool.
-  Required: tool (the tool name from list).
+2. Call with action "describe" and pass a tool name to get its full input schema before calling it. This avoids guessing parameter formats.
 
-— call: Execute a specific tool.
-  Required: tool (the tool name), arguments (JSON object of tool parameters).
+3. Call with action "call" with the tool name and arguments to execute it. Arguments must match the schema from "describe".
 
-— search: Search tool names and descriptions by keyword.
+4. Use action "search" with a keyword to find tools by name or description when you're not sure what's available.
+
+ACTIONS (pass as "action" parameter):
+
+— list: List all available tools. Returns {tools: [{name, server, description}], count}.
+  No additional parameters.
+
+— describe: Get full input schema for a tool. Returns {name, server, description, inputSchema}.
+  Required: tool (tool name from list/search).
+
+— call: Execute a tool. Returns the tool's raw response.
+  Required: tool (tool name), arguments (JSON object matching the tool's inputSchema).
+
+— search: Search tools by keyword. Returns {results: [{name, server, description}], count, query}.
   Required: query (search term).
 
-Tool names are in "serverName__toolName" format. Use list or search to discover them, describe to inspect schemas, and call to execute.`
+TOOL NAMING:
+Tool names use "serverName__toolName" format. Memory tools use "memory__toolName" (default set) or "memory_slug__toolName" (custom sets). Server tools use the server's name as prefix.
+
+TIP: Start with "list" to see everything available, then "describe" before "call" to avoid parameter errors. Use "search" when looking for something specific.`
 
 var dictionarySchema = json.RawMessage(`{
 	"type": "object",
@@ -1059,23 +1059,29 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 
 	switch params.Action {
 	case "list":
-		// Return lightweight catalog: name + description only
+		// Return lightweight catalog: name + description + type
 		var catalog []map[string]string
 		for _, t := range allTools {
 			name := fmt.Sprintf("%s__%s", t.ServerName, t.Name)
 			catalog = append(catalog, map[string]string{
 				"name":        name,
 				"server":      t.ServerName,
+				"type":        "server",
 				"description": t.Description,
 			})
 		}
 		// Include memory tools from sets that are compound members
 		for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
 			if srv, ok := m.memorySets[setID]; ok {
+				memSetName := "memory"
+				if ms, err := m.store.GetMemorySet(setID); err == nil && ms.Name != "" {
+					memSetName = ms.Name
+				}
 				for _, mt := range srv.Tools() {
 					catalog = append(catalog, map[string]string{
 						"name":        srv.NamespacedName(mt.Name),
-						"server":      "memory",
+						"server":      memSetName,
+						"type":        "memory",
 						"description": mt.Description,
 					})
 				}
@@ -1099,6 +1105,7 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 							return wrapMCPContent(map[string]interface{}{
 								"name":         params.Tool,
 								"server":      "memory",
+								"type":         "memory",
 								"description": mt.Description,
 								"inputSchema": mt.InputSchema,
 							})
@@ -1114,6 +1121,7 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 				return wrapMCPContent(map[string]interface{}{
 					"name":         name,
 					"server":      t.ServerName,
+					"type":         "server",
 					"description": t.Description,
 					"inputSchema": t.InputSchema,
 				})
@@ -1179,6 +1187,7 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 				results = append(results, map[string]string{
 					"name":        name,
 					"server":      t.ServerName,
+					"type":        "server",
 					"description": t.Description,
 				})
 			}
@@ -1193,6 +1202,7 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 						results = append(results, map[string]string{
 							"name":        name,
 							"server":      "memory",
+							"type":        "memory",
 							"description": mt.Description,
 						})
 					}
