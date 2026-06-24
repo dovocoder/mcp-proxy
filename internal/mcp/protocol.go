@@ -267,14 +267,17 @@ func (c *Client) sendInitialized() error {
 		}
 		body, _ := json.Marshal(notif)
 
-		httpReq, err := http.NewRequest("POST", c.httpURL, strings.NewReader(string(body)))
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.httpURL, strings.NewReader(string(body)))
 		if err != nil {
 			return err
 		}
 		c.setHeaders(httpReq)
 		c.setSessionHeader(httpReq)
 
-		client := &http.Client{Timeout: c.timeout}
+		client := &http.Client{}
 		resp, err := client.Do(httpReq)
 		if err != nil {
 			return err
@@ -344,13 +347,16 @@ func (c *Client) closeSession() {
 	if c.httpURL == "" || c.sessionID == "" {
 		return
 	}
-	req, err := http.NewRequest("DELETE", c.httpURL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", c.httpURL, nil)
 	if err != nil {
 		return
 	}
 	c.setHeaders(req)
 	c.setSessionHeader(req)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err == nil {
 		resp.Body.Close()
