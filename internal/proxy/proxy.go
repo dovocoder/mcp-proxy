@@ -777,7 +777,8 @@ func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string,
 
 	// Build authorization URL
 	scopes := metadata.ScopesSupported
-	authURL, err := mcp.BuildAuthURL(metadata, clientID, redirectURI, pkce, scopes, state)
+	resource := srv.URL
+	authURL, err := mcp.BuildAuthURL(metadata, clientID, redirectURI, pkce, scopes, state, resource)
 	if err != nil {
 		return "", fmt.Errorf("failed to build auth URL: %w", err)
 	}
@@ -792,6 +793,7 @@ func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string,
 		ClientSecret:          clientSecret,
 		TokenEndpoint:         metadata.TokenEndpoint,
 		AuthorizationEndpoint: metadata.AuthorizationEndpoint,
+		Resource:              resource,
 		Metadata:              metadata,
 		CreatedAt:             time.Now(),
 	}
@@ -825,6 +827,7 @@ func (m *Manager) HandleAuthCallback(state, code string) error {
 		code,
 		authState.RedirectURI,
 		authState.PKCE.Verifier,
+		authState.Resource,
 	)
 	if err != nil {
 		return fmt.Errorf("token exchange failed: %w", err)
@@ -905,10 +908,12 @@ type DeviceAuthResult struct {
 	ServerID        string `json:"-"`
 	ClientID        string `json:"-"`
 	TokenEndpoint   string `json:"-"`
+	Resource        string `json:"-"`
 }
 
 // InitiateDeviceAuth starts a device code flow for a server. This is the preferred
 // method for Entra ID because it doesn't require a redirect URI — works from any deployment.
+// Only works when the auth server metadata has a device_authorization_endpoint.
 func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error) {
 	srv, err := m.store.GetServer(serverID)
 	if err != nil {
@@ -923,6 +928,11 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 	metadata, err := mcp.DiscoverOAuthMetadata(srv.URL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover OAuth metadata: %w", err)
+	}
+
+	// Check if device code flow is supported
+	if metadata.DeviceAuthorizationEndpoint == "" && !mcp.IsEntraID(metadata.Issuer) && !mcp.IsEntraID(metadata.AuthorizationEndpoint) && !mcp.IsEntraID(metadata.TokenEndpoint) {
+		return nil, fmt.Errorf("device code flow not supported by this server — no device_authorization_endpoint in metadata")
 	}
 
 	// Determine client ID using MCP spec priority order:
@@ -941,8 +951,6 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 	// Priority 2: CIMD — device code doesn't need redirect_uri but auth server
 	// may still fetch the metadata document to validate the client
 	if clientID == "" && metadata.ClientIDMetadataDocumentSupported {
-		// For device code, we can't use a URL client_id without the auth server
-		// being able to reach our CIMD endpoint. Fall through to DCR/Entra.
 		log.Printf("CIMD supported but device code flow — skipping for server %s", srv.Name)
 	}
 
@@ -976,14 +984,17 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 		return nil, fmt.Errorf("no client ID available — configure a client_id in the server's Auth Token field")
 	}
 
-	// Build scope from metadata
+	// Build scope from metadata (spec: use all scopes_supported if no scope in WWW-Authenticate)
 	scope := ""
 	if len(metadata.ScopesSupported) > 0 {
 		scope = strings.Join(metadata.ScopesSupported, " ")
 	}
 
+	// resource parameter (RFC 8707) — the MCP server URL
+	resource := srv.URL
+
 	// Request device code
-	dcResp, err := mcp.RequestDeviceCode(metadata, clientID, scope)
+	dcResp, err := mcp.RequestDeviceCode(metadata, clientID, scope, resource)
 	if err != nil {
 		return nil, fmt.Errorf("device code request failed: %w", err)
 	}
@@ -998,6 +1009,7 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 		ServerID:        serverID,
 		ClientID:        clientID,
 		TokenEndpoint:   metadata.TokenEndpoint,
+		Resource:        resource,
 	}
 
 	// Store for polling
@@ -1018,7 +1030,7 @@ func (m *Manager) PollDeviceAuth(serverID string) error {
 		return fmt.Errorf("no pending device auth for server %s", serverID)
 	}
 
-	tokens, err := mcp.PollDeviceToken(auth.TokenEndpoint, auth.ClientID, auth.DeviceCode)
+	tokens, err := mcp.PollDeviceToken(auth.TokenEndpoint, auth.ClientID, auth.DeviceCode, auth.Resource)
 	if err != nil {
 		if errors.Is(err, mcp.ErrAuthorizationPending) {
 			return nil // Still pending — frontend should keep polling

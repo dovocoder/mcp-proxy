@@ -17,6 +17,7 @@ import (
 	"github.com/agentic/mcp-proxy/internal/auth"
 	"github.com/agentic/mcp-proxy/internal/crypto"
 	"github.com/agentic/mcp-proxy/internal/memory"
+	"github.com/agentic/mcp-proxy/internal/mcp"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/proxy"
 	"github.com/agentic/mcp-proxy/internal/store"
@@ -833,6 +834,8 @@ func (h *Handlers) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	if meta := h.proxy.GetOAuthMetadata(id); meta != nil {
 		resp["issuer"] = meta.Issuer
 		resp["authorization_endpoint"] = meta.AuthorizationEndpoint
+		resp["device_auth_supported"] = meta.DeviceAuthorizationEndpoint != "" ||
+			mcp.IsEntraID(meta.Issuer) || mcp.IsEntraID(meta.AuthorizationEndpoint) || mcp.IsEntraID(meta.TokenEndpoint)
 	}
 
 	writeJSON(w, http.StatusOK, resp)

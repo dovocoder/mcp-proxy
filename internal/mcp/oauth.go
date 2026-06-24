@@ -21,12 +21,13 @@ type OAuthServerMetadata struct {
 	RegistrationEndpoint   string   `json:"registration_endpoint,omitempty"`
 	RevocationEndpoint     string   `json:"revocation_endpoint,omitempty"`
 	IntrospectionEndpoint  string   `json:"introspection_endpoint,omitempty"`
+	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint,omitempty"`
 	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	ResponseTypesSupported []string `json:"response_types_supported,omitempty"`
 	GrantTypesSupported    []string `json:"grant_types_supported,omitempty"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	CodeChallengeMethodsSupported      []string `json:"code_challenge_methods_supported,omitempty"`
-	ClientIDMetadataDocumentSupported   bool     `json:"client_id_metadata_document_supported,omitempty"`
+	ClientIDMetadataDocumentSupported   bool   `json:"client_id_metadata_document_supported,omitempty"`
 }
 
 // OAuthTokens represents stored OAuth tokens.
@@ -96,6 +97,7 @@ type AuthState struct {
 	ClientSecret     string
 	TokenEndpoint    string
 	AuthorizationEndpoint string
+	Resource         string
 	Metadata         *OAuthServerMetadata
 	CreatedAt        time.Time
 }
@@ -405,7 +407,9 @@ func RegisterClient(registrationEndpoint string, redirectURIs []string) (*Client
 }
 
 // BuildAuthURL constructs the authorization URL for the OAuth flow.
-func BuildAuthURL(metadata *OAuthServerMetadata, clientID, redirectURI string, pkce *PKCEParams, scopes []string, state string) (string, error) {
+// BuildAuthURL constructs the authorization endpoint URL with PKCE and resource parameter.
+// resource is the MCP server URL (RFC 8707 resource indicator).
+func BuildAuthURL(metadata *OAuthServerMetadata, clientID, redirectURI string, pkce *PKCEParams, scopes []string, state, resource string) (string, error) {
 	params := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {clientID},
@@ -413,6 +417,9 @@ func BuildAuthURL(metadata *OAuthServerMetadata, clientID, redirectURI string, p
 		"code_challenge":        {pkce.Challenge},
 		"code_challenge_method": {pkce.ChallengeMethod},
 		"state":                 {state},
+	}
+	if resource != "" {
+		params.Set("resource", resource)
 	}
 	if len(scopes) > 0 {
 		params.Set("scope", strings.Join(scopes, " "))
@@ -422,13 +429,17 @@ func BuildAuthURL(metadata *OAuthServerMetadata, clientID, redirectURI string, p
 }
 
 // ExchangeCodeForToken exchanges an authorization code for access and refresh tokens.
-func ExchangeCodeForToken(tokenEndpoint, clientID, clientSecret, code, redirectURI, codeVerifier string) (*OAuthTokens, error) {
+// resource is the MCP server URL (RFC 8707 resource indicator).
+func ExchangeCodeForToken(tokenEndpoint, clientID, clientSecret, code, redirectURI, codeVerifier, resource string) (*OAuthTokens, error) {
 	params := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {clientID},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {codeVerifier},
+	}
+	if resource != "" {
+		params.Set("resource", resource)
 	}
 	if clientSecret != "" {
 		params.Set("client_secret", clientSecret)
@@ -591,38 +602,31 @@ type DeviceCodeResponse struct {
 
 // RequestDeviceCode initiates the device code flow by requesting a device code
 // from the authorization server's device authorization endpoint.
-func RequestDeviceCode(metadata *OAuthServerMetadata, clientID, scope string) (*DeviceCodeResponse, error) {
-	// Construct the device authorization endpoint.
-	// Entra ID: https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode
-	// The issuer is typically https://login.microsoftonline.com/{tenant}/v2.0
-	// so we need to insert /oauth2 before /v2.0/devicecode
-	deviceEndpoint := ""
+// resource is the MCP server URL (RFC 8707 resource indicator).
+func RequestDeviceCode(metadata *OAuthServerMetadata, clientID, scope, resource string) (*DeviceCodeResponse, error) {
+	// Use device_authorization_endpoint from metadata if available (RFC 8628)
+	deviceEndpoint := metadata.DeviceAuthorizationEndpoint
 
-	if isEntraIDURL(metadata.Issuer) || isEntraIDURL(metadata.TokenEndpoint) {
-		// Entra ID device code endpoint: {base}/{tenant}/oauth2/v2.0/devicecode
-		// Derive from token endpoint which is {base}/{tenant}/oauth2/v2.0/token
-		if metadata.TokenEndpoint != "" {
-			// Replace /token with /devicecode
-			deviceEndpoint = strings.Replace(metadata.TokenEndpoint, "/token", "/devicecode", 1)
-		}
-		if deviceEndpoint == "" && metadata.Issuer != "" {
-			// Issuer is like https://login.microsoftonline.com/{tenant}/v2.0
-			// Need: https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode
-			deviceEndpoint = strings.Replace(metadata.Issuer, "/v2.0", "/oauth2/v2.0/devicecode", 1)
-		}
-	} else if metadata.Issuer != "" {
-		// Generic OAuth: try {issuer}/devicecode
-		deviceEndpoint = strings.TrimSuffix(metadata.Issuer, "/") + "/devicecode"
-	} else if metadata.TokenEndpoint != "" {
-		// Derive from token endpoint: replace /token with /devicecode
-		idx := strings.LastIndex(metadata.TokenEndpoint, "/")
-		if idx > 0 {
-			base := metadata.TokenEndpoint[:idx]
-			deviceEndpoint = base + "/devicecode"
+	if deviceEndpoint == "" {
+		// Fallback: derive from token endpoint or issuer
+		if isEntraIDURL(metadata.Issuer) || isEntraIDURL(metadata.TokenEndpoint) {
+			// Entra ID device code endpoint: {base}/{tenant}/oauth2/v2.0/devicecode
+			if metadata.TokenEndpoint != "" {
+				deviceEndpoint = strings.Replace(metadata.TokenEndpoint, "/token", "/devicecode", 1)
+			}
+			if deviceEndpoint == "" && metadata.Issuer != "" {
+				deviceEndpoint = strings.Replace(metadata.Issuer, "/v2.0", "/oauth2/v2.0/devicecode", 1)
+			}
+		} else if metadata.TokenEndpoint != "" {
+			// Generic: derive from token endpoint
+			idx := strings.LastIndex(metadata.TokenEndpoint, "/")
+			if idx > 0 {
+				deviceEndpoint = metadata.TokenEndpoint[:idx] + "/devicecode"
+			}
 		}
 	}
 	if deviceEndpoint == "" {
-		return nil, fmt.Errorf("cannot determine device authorization endpoint")
+		return nil, fmt.Errorf("no device_authorization_endpoint in metadata")
 	}
 
 	params := url.Values{
@@ -630,6 +634,9 @@ func RequestDeviceCode(metadata *OAuthServerMetadata, clientID, scope string) (*
 	}
 	if scope != "" {
 		params.Set("scope", scope)
+	}
+	if resource != "" {
+		params.Set("resource", resource)
 	}
 
 	req, err := http.NewRequest("POST", deviceEndpoint, strings.NewReader(params.Encode()))
@@ -667,11 +674,15 @@ func RequestDeviceCode(metadata *OAuthServerMetadata, clientID, scope string) (*
 
 // PollDeviceToken polls the token endpoint for a device code flow.
 // Returns tokens when the user completes authentication, or an error if expired/declined.
-func PollDeviceToken(tokenEndpoint, clientID, deviceCode string) (*OAuthTokens, error) {
+// resource is the MCP server URL (RFC 8707 resource indicator).
+func PollDeviceToken(tokenEndpoint, clientID, deviceCode, resource string) (*OAuthTokens, error) {
 	params := url.Values{
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		"client_id":   {clientID},
 		"device_code": {deviceCode},
+	}
+	if resource != "" {
+		params.Set("resource", resource)
 	}
 
 	req, err := http.NewRequest("POST", tokenEndpoint, strings.NewReader(params.Encode()))

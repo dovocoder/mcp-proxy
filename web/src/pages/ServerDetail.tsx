@@ -333,9 +333,9 @@ export default function ServerDetail() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              {authStatus?.issuer
-                ? `Authorization server: ${authStatus.issuer}`
-                : 'Discovering OAuth provider…'}
+              {authStatus?.device_auth_supported === false
+                ? `Authorization code flow with PKCE. A client_id is required — configure it in the server's Auth Token field.`
+                : `Device code flow — no redirect URI needed. Just sign in with your ${oauthProviderName} account.`}
             </p>
 
             {deviceError && (

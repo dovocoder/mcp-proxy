@@ -128,7 +128,7 @@ export const servers = {
   initiateAuth: (id: string) =>
     request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
   authStatus: (id: string) =>
-    request<{ status: string; has_tokens: boolean; expired: boolean; issuer?: string; authorization_endpoint?: string }>(`/servers/${id}/auth-status`),
+    request<{ status: string; has_tokens: boolean; expired: boolean; issuer?: string; authorization_endpoint?: string; device_auth_supported?: boolean }>(`/servers/${id}/auth-status`),
   registration: (id: string) =>
     request<RegistrationInfo>(`/servers/${id}/registration`),
   deleteRegistration: (id: string) =>
