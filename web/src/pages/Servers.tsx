@@ -14,6 +14,11 @@ import {
   Terminal,
   ArrowLeft,
   ExternalLink,
+  ScrollText,
+  Zap,
+  Settings2,
+  Shield,
+  KeyRound,
 } from 'lucide-react';
 import { servers as serversApi, type Server, registry as registryApi, type RegistryServer } from '../api/client';
 import { cn } from '../lib/utils';
@@ -31,13 +36,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
-import {
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
-} from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import {
   Dialog,
   DialogTrigger,
@@ -48,6 +47,7 @@ import {
   DialogFooter,
   DialogClose,
 } from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 type Transport = 'stdio' | 'streamable-http' | 'http';
 
@@ -63,10 +63,14 @@ export default function Servers() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editServer, setEditServer] = useState<Server | null>(null);
   const [dialogView, setDialogView] = useState<'form' | 'registry'>('form');
+  const [deleteTarget, setDeleteTarget] = useState<Server | null>(null);
 
   const deleteMutation = useMutation({
     mutationFn: serversApi.delete,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['servers'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['servers'] });
+      setDeleteTarget(null);
+    },
   });
 
   const reconnectMutation = useMutation({
@@ -105,7 +109,7 @@ export default function Servers() {
               </Button>
             }
           />
-          <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogContent className="sm:max-w-xl max-h-[90vh] overflow-y-auto">
             {editServer ? (
               <ServerForm
                 server={editServer}
@@ -228,7 +232,7 @@ export default function Servers() {
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() => deleteMutation.mutate(srv.id)}
+                      onClick={() => setDeleteTarget(srv)}
                       title="Delete"
                       className="text-destructive hover:text-destructive"
                     >
@@ -242,6 +246,15 @@ export default function Servers() {
               <span className="uppercase tracking-wide">{srv.transport}</span>
               <Separator orientation="vertical" className="h-3" />
               <span>{srv.tools_count ?? 0} tools</span>
+              {srv.logs_enabled && (
+                <>
+                  <Separator orientation="vertical" className="h-3" />
+                  <span className="inline-flex items-center gap-0.5" title="Log capture enabled">
+                    <ScrollText className="size-3" />
+                    logs
+                  </span>
+                </>
+              )}
               <Link
                 to={`/servers/${srv.id}`}
                 className="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline"
@@ -259,6 +272,18 @@ export default function Servers() {
           </Card>
         ))}
       </div>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete Server"
+        description="Are you sure you want to delete"
+        itemName={deleteTarget?.name}
+        loading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
+        }}
+      />
     </div>
   );
 }
@@ -388,6 +413,27 @@ function RegistrySearch({ onPick }: { onPick: (srv: RegistryServer) => void }) {
 
 // --- Server Form Component ---
 
+const TRANSPORT_OPTIONS = [
+  {
+    value: 'stdio' as Transport,
+    label: 'Local Process',
+    icon: Terminal,
+    desc: 'Run a local stdio MCP server',
+  },
+  {
+    value: 'streamable-http' as Transport,
+    label: 'Remote HTTP',
+    icon: Cloud,
+    desc: 'Connect to a remote MCP server',
+  },
+  {
+    value: 'http' as Transport,
+    label: 'Legacy SSE',
+    icon: Zap,
+    desc: 'Older HTTP+SSE transport',
+  },
+];
+
 function ServerForm({
   server,
   onClose,
@@ -400,31 +446,28 @@ function ServerForm({
   const queryClient = useQueryClient();
   const isEdit = !!server;
 
-  // Listen for registry picks
   const [name, setName] = useState(server?.name || '');
   const [transport, setTransport] = useState<Transport>(
     (server?.transport as Transport) || 'stdio',
   );
   const [command, setCommand] = useState(server?.command || '');
-  const [args, setArgs] = useState(
-    server?.args?.join(' ') || '',
-  );
+  const [args, setArgs] = useState(server?.args?.join(' ') || '');
   const [url, setUrl] = useState(server?.url || '');
   const [headers, setHeaders] = useState(
     server?.headers
-      ? Object.entries(server.headers)
-          .map(([k, v]) => `${k}: ${v}`)
-          .join('\n')
+      ? Object.entries(server.headers).map(([k, v]) => `${k}: ${v}`).join('\n')
       : '',
   );
   const [env, setEnv] = useState(
     server?.env
-      ? Object.entries(server.env)
-          .map(([k, v]) => `${k}=${v}`)
-          .join('\n')
+      ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n')
       : '',
   );
   const [authToken, setAuthToken] = useState(server?.auth_token || '');
+  const [timeout, setTimeout] = useState(server?.timeout ?? 120);
+  const [connectTimeout, setConnectTimeout] = useState(server?.connect_timeout ?? 60);
+  const [enabled, setEnabled] = useState(server?.enabled ?? true);
+  const [logsEnabled, setLogsEnabled] = useState(server?.logs_enabled ?? true);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -463,42 +506,37 @@ function ServerForm({
       const data: Partial<Server> = {
         name,
         transport,
-        enabled: server?.enabled ?? true,
-        timeout: server?.timeout ?? 120,
-        connect_timeout: server?.connect_timeout ?? 60,
+        enabled,
+        logs_enabled: logsEnabled,
+        timeout,
+        connect_timeout: connectTimeout,
       };
 
       if (transport === 'stdio') {
         data.command = command;
-        data.args = args.split(' ').filter(Boolean);
+        data.args = args.split(/\s+/).filter(Boolean);
       } else {
         data.url = url;
+        const hdrs: Record<string, string> = {};
         if (headers) {
-          const hdrs: Record<string, string> = {};
           headers.split('\n').forEach((line) => {
             const idx = line.indexOf(':');
             if (idx > 0) hdrs[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
           });
-          data.headers = hdrs;
-        } else {
-          data.headers = {};
         }
+        data.headers = hdrs;
       }
 
-      if (authToken) {
-        data.auth_token = authToken;
-      }
+      if (authToken) data.auth_token = authToken;
 
+      const envVars: Record<string, string> = {};
       if (env) {
-        const envVars: Record<string, string> = {};
         env.split('\n').forEach((line) => {
           const idx = line.indexOf('=');
           if (idx > 0) envVars[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
         });
-        data.env = envVars;
-      } else {
-        data.env = {};
       }
+      data.env = envVars;
 
       if (isEdit && server) {
         await serversApi.update(server.id, data);
@@ -515,49 +553,76 @@ function ServerForm({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+    <form onSubmit={handleSubmit} className="flex flex-col gap-5">
       {!isEdit && (
         <DialogDescription>
           Configure a server manually, or search the MCP registry.
         </DialogDescription>
       )}
-
       {isEdit && (
         <DialogDescription>
           Update configuration for <span className="font-medium text-foreground">{server!.name}</span>
         </DialogDescription>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="grid gap-1.5">
-          <Label htmlFor="srv-name">Name</Label>
-          <Input
-            id="srv-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="my-server"
-            required
-          />
-        </div>
-        <div className="grid gap-1.5">
-          <Label htmlFor="srv-transport">Transport</Label>
-          <Select value={transport} onValueChange={(v) => setTransport(v as Transport)}>
-            <SelectTrigger id="srv-transport" className="w-full">
-              <SelectValue placeholder="Select transport" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="stdio">stdio (local process)</SelectItem>
-              <SelectItem value="streamable-http">streamable-http (remote)</SelectItem>
-              <SelectItem value="http">http (legacy SSE)</SelectItem>
-            </SelectContent>
-          </Select>
+      {/* Transport Type — visual card picker */}
+      <div className="grid gap-2">
+        <Label className="flex items-center gap-1.5">
+          <Settings2 className="size-3.5 text-muted-foreground" />
+          Transport Type
+        </Label>
+        <div className="grid grid-cols-3 gap-2">
+          {TRANSPORT_OPTIONS.map((opt) => {
+            const isSelected = transport === opt.value;
+            const Icon = opt.icon;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setTransport(opt.value)}
+                className={cn(
+                  'flex flex-col items-center gap-1.5 rounded-lg border p-3 text-center transition-all',
+                  isSelected
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border bg-card text-muted-foreground hover:bg-accent/50',
+                )}
+              >
+                <Icon className={cn('size-5', isSelected && 'text-primary')} />
+                <span className={cn('text-xs font-medium', isSelected && 'text-primary')}>
+                  {opt.label}
+                </span>
+                <span className="text-[10px] leading-tight text-muted-foreground line-clamp-2">
+                  {opt.desc}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
+      {/* Server Name */}
+      <div className="grid gap-1.5">
+        <Label htmlFor="srv-name">Server Name</Label>
+        <Input
+          id="srv-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="my-server"
+          required
+          className="font-mono"
+        />
+      </div>
+
+      <Separator />
+
+      {/* Connection details — varies by transport */}
       {transport === 'stdio' ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="grid gap-1.5">
-            <Label htmlFor="srv-command">Command</Label>
+            <Label htmlFor="srv-command" className="flex items-center gap-1.5">
+              <Terminal className="size-3.5 text-muted-foreground" />
+              Command
+            </Label>
             <Input
               id="srv-command"
               value={command}
@@ -568,7 +633,7 @@ function ServerForm({
             />
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="srv-args">Args (space-separated)</Label>
+            <Label htmlFor="srv-args">Arguments</Label>
             <Input
               id="srv-args"
               value={args}
@@ -577,10 +642,23 @@ function ServerForm({
               placeholder="-y @modelcontextprotocol/server-github"
             />
           </div>
+          {/* Live preview */}
+          {command && (
+            <div className="sm:col-span-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Preview</span>
+              <code className="block mt-1 text-xs font-mono text-foreground break-all">
+                {command}
+                {args && ` ${args}`}
+              </code>
+            </div>
+          )}
         </div>
       ) : (
         <div className="grid gap-1.5">
-          <Label htmlFor="srv-url">URL</Label>
+          <Label htmlFor="srv-url" className="flex items-center gap-1.5">
+            <Cloud className="size-3.5 text-muted-foreground" />
+            Server URL
+          </Label>
           <Input
             id="srv-url"
             value={url}
@@ -592,48 +670,124 @@ function ServerForm({
         </div>
       )}
 
+      {/* Authentication (HTTP only) */}
       {isHTTP && (
-        <div className="grid gap-1.5">
-          <Label htmlFor="srv-token">Auth Token</Label>
-          <Input
-            id="srv-token"
-            type="password"
-            value={authToken}
-            onChange={(e) => setAuthToken(e.target.value)}
-            className="font-mono"
-            placeholder="Leave empty for Entra ID (auto-detected)"
-          />
-          <p className="text-xs text-muted-foreground">
-            Optional — used as client_id for OAuth. For Entra ID / Azure DevOps: leave empty and
-            OAuth will use a built-in public client.
-          </p>
+        <div className="grid gap-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="srv-token" className="flex items-center gap-1.5">
+              <KeyRound className="size-3.5 text-muted-foreground" />
+              Auth Token
+              <span className="text-[10px] text-muted-foreground font-normal">(optional)</span>
+            </Label>
+            <Input
+              id="srv-token"
+              type="password"
+              value={authToken}
+              onChange={(e) => setAuthToken(e.target.value)}
+              className="font-mono"
+              placeholder="Leave empty for Entra ID device code flow"
+            />
+            <p className="text-xs text-muted-foreground">
+              Used as OAuth client_id. For Entra ID / Azure DevOps: leave empty to use
+              a built-in public client with device code authentication.
+            </p>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="srv-headers" className="flex items-center gap-1.5">
+              <Shield className="size-3.5 text-muted-foreground" />
+              Additional Headers
+              <span className="text-[10px] text-muted-foreground font-normal">(one per line)</span>
+            </Label>
+            <Textarea
+              id="srv-headers"
+              value={headers}
+              onChange={(e) => setHeaders(e.target.value)}
+              rows={2}
+              className="font-mono text-xs"
+              placeholder="X-Custom-Header: value"
+            />
+          </div>
         </div>
       )}
 
-      {isHTTP && (
-        <div className="grid gap-1.5">
-          <Label htmlFor="srv-headers">Additional Headers (one per line, key: value)</Label>
-          <Textarea
-            id="srv-headers"
-            value={headers}
-            onChange={(e) => setHeaders(e.target.value)}
-            rows={3}
-            className="font-mono"
-            placeholder="X-Custom-Header: value"
-          />
-        </div>
-      )}
-
+      {/* Environment Variables */}
       <div className="grid gap-1.5">
-        <Label htmlFor="srv-env">Environment Variables (one per line, KEY=value)</Label>
+        <Label htmlFor="srv-env" className="flex items-center gap-1.5">
+          <Settings2 className="size-3.5 text-muted-foreground" />
+          Environment Variables
+          <span className="text-[10px] text-muted-foreground font-normal">(one per line, KEY=value)</span>
+        </Label>
         <Textarea
           id="srv-env"
           value={env}
           onChange={(e) => setEnv(e.target.value)}
           rows={3}
-          className="font-mono"
+          className="font-mono text-xs"
           placeholder="GITHUB_PERSONAL_ACCESS_TOKEN=ghp_..."
         />
+      </div>
+
+      <Separator />
+
+      {/* Advanced Settings */}
+      <div className="grid gap-4">
+        <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          <Settings2 className="size-3" />
+          Advanced
+        </span>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="grid gap-1.5">
+            <Label htmlFor="srv-timeout">Request Timeout (s)</Label>
+            <Input
+              id="srv-timeout"
+              type="number"
+              value={timeout}
+              onChange={(e) => setTimeout(Number(e.target.value) || 120)}
+              min={1}
+              className="font-mono"
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="srv-conn-timeout">Connect Timeout (s)</Label>
+            <Input
+              id="srv-conn-timeout"
+              type="number"
+              value={connectTimeout}
+              onChange={(e) => setConnectTimeout(Number(e.target.value) || 60)}
+              min={1}
+              className="font-mono"
+            />
+          </div>
+        </div>
+
+        {/* Toggle switches */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+            <div className="min-w-0 pr-3">
+              <Label className="text-sm">Enabled</Label>
+              <p className="text-xs text-muted-foreground">Connect on startup</p>
+            </div>
+            <Switch
+              checked={enabled}
+              onCheckedChange={setEnabled}
+              className="shrink-0"
+            />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+            <div className="min-w-0 pr-3">
+              <Label className="text-sm flex items-center gap-1">
+                <ScrollText className="size-3.5" />
+                Log Capture
+              </Label>
+              <p className="text-xs text-muted-foreground">Capture stderr output</p>
+            </div>
+            <Switch
+              checked={logsEnabled}
+              onCheckedChange={setLogsEnabled}
+              className="shrink-0"
+            />
+          </div>
+        </div>
       </div>
 
       {error && (

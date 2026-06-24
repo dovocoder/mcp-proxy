@@ -185,6 +185,12 @@ func migrate(db *sql.DB) error {
 		// Column already exists
 	}
 
+	// Migration: add logs_enabled column to servers
+	_, err = db.Exec(`ALTER TABLE servers ADD COLUMN logs_enabled INTEGER NOT NULL DEFAULT 1`)
+	if err != nil {
+		// Column already exists
+	}
+
 	// Create default memory set if it doesn't exist
 	_, _ = db.Exec(`INSERT OR IGNORE INTO memory_sets (id, name, slug, description, is_default, created_at) VALUES ('default', 'Default', '', '', 1, datetime('now'))`)
 
@@ -202,14 +208,18 @@ func (s *Store) CreateServer(srv *models.Server) error {
 	if srv.Enabled {
 		enabled = 1
 	}
+	logsEnabled := 0
+	if srv.LogsEnabled {
+		logsEnabled = 1
+	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO servers (id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO servers (id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, logs_enabled, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		srv.ID, srv.Name, srv.Transport, srv.Command, string(argsJSON),
 		srv.URL, string(headersJSON), string(envJSON), srv.AuthToken,
-		srv.Timeout, srv.ConnectTimeout, enabled, srv.Status,
+		srv.Timeout, srv.ConnectTimeout, enabled, logsEnabled, srv.Status,
 		srv.CreatedAt, srv.UpdatedAt,
 	)
 	return err
@@ -217,19 +227,19 @@ func (s *Store) CreateServer(srv *models.Server) error {
 
 // GetServer retrieves a server by ID.
 func (s *Store) GetServer(id string) (*models.Server, error) {
-	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers WHERE id = ?`, id)
 	return scanServer(row)
 }
 
 // GetServerByName retrieves a server by name.
 func (s *Store) GetServerByName(name string) (*models.Server, error) {
-	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers WHERE name = ?`, name)
+	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers WHERE name = ?`, name)
 	return scanServer(row)
 }
 
 // ListServers returns all servers.
 func (s *Store) ListServers() ([]*models.Server, error) {
-	rows, err := s.db.Query(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, status, last_seen, created_at, updated_at FROM servers ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, transport, command, args, url, headers, env, auth_token, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -255,17 +265,21 @@ func (s *Store) UpdateServer(srv *models.Server) error {
 	if srv.Enabled {
 		enabled = 1
 	}
+	logsEnabled := 0
+	if srv.LogsEnabled {
+		logsEnabled = 1
+	}
 
 	_, err := s.db.Exec(`
 		UPDATE servers SET
 			name = ?, transport = ?, command = ?, args = ?, url = ?,
 			headers = ?, env = ?, auth_token = ?, timeout = ?, connect_timeout = ?,
-			enabled = ?, updated_at = ?
+			enabled = ?, logs_enabled = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		srv.Name, srv.Transport, srv.Command, string(argsJSON),
 		srv.URL, string(headersJSON), string(envJSON), srv.AuthToken,
-		srv.Timeout, srv.ConnectTimeout, enabled,
+		srv.Timeout, srv.ConnectTimeout, enabled, logsEnabled,
 		time.Now(), srv.ID,
 	)
 	return err
@@ -473,14 +487,14 @@ func scanServerRows(rows *sql.Rows) (*models.Server, error) {
 func scanServerImpl(s rowScanner) (*models.Server, error) {
 	var srv models.Server
 	var argsJSON, headersJSON, envJSON string
-	var enabled int
+	var enabled, logsEnabled int
 	var lastSeen sql.NullTime
 	var createdAt, updatedAt string
 
 	err := s.Scan(
 		&srv.ID, &srv.Name, &srv.Transport, &srv.Command, &argsJSON,
 		&srv.URL, &headersJSON, &envJSON, &srv.AuthToken,
-		&srv.Timeout, &srv.ConnectTimeout, &enabled, &srv.Status,
+		&srv.Timeout, &srv.ConnectTimeout, &enabled, &logsEnabled, &srv.Status,
 		&lastSeen, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -488,6 +502,7 @@ func scanServerImpl(s rowScanner) (*models.Server, error) {
 	}
 
 	srv.Enabled = enabled == 1
+	srv.LogsEnabled = logsEnabled == 1
 	if lastSeen.Valid {
 		srv.LastSeen = &lastSeen.Time
 	}

@@ -18,7 +18,8 @@ type Server struct {
 	Timeout        int               `json:"timeout"`
 	ConnectTimeout int               `json:"connect_timeout"`
 	Enabled        bool              `json:"enabled"`
-	IsBuiltin      bool              `json:"is_builtin"` // builtin servers can't be edited/deleted
+	LogsEnabled    bool              `json:"logs_enabled"` // capture stderr logs for this server
+	IsBuiltin      bool              `json:"is_builtin"`   // builtin servers can't be edited/deleted
 	Status         string            `json:"status"` // "connected", "disconnected", "error"
 	LastSeen       *time.Time        `json:"last_seen,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
@@ -103,6 +104,7 @@ type CreateServerRequest struct {
 	Timeout        int                 `json:"timeout,omitempty"`
 	ConnectTimeout int                 `json:"connect_timeout,omitempty"`
 	Enabled        *bool               `json:"enabled,omitempty"`
+	LogsEnabled    *bool               `json:"logs_enabled,omitempty"`
 }
 
 // UpdateServerRequest is the payload for updating a server.
@@ -118,6 +120,7 @@ type UpdateServerRequest struct {
 	Timeout        *int                `json:"timeout,omitempty"`
 	ConnectTimeout *int                `json:"connect_timeout,omitempty"`
 	Enabled        *bool               `json:"enabled,omitempty"`
+	LogsEnabled    *bool               `json:"logs_enabled,omitempty"`
 }
 
 // CreateAPIKeyRequest is the payload for creating a new API key.

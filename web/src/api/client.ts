@@ -66,6 +66,7 @@ export interface Server {
   env?: Record<string, string>;
   auth_token?: string;
   enabled: boolean;
+  logs_enabled: boolean;
   is_builtin?: boolean;
   timeout: number;
   connect_timeout: number;
@@ -119,6 +120,11 @@ export const servers = {
     request<{ logs: LogEntry[]; count: number }>(`/servers/${id}/logs`),
   clearLogs: (id: string) =>
     request<{ status: string }>(`/servers/${id}/logs`, { method: 'DELETE' }),
+  toggleLogs: (id: string, enabled: boolean) =>
+    request<{ logs_enabled: boolean }>(`/servers/${id}/logs-enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ logs_enabled: enabled }),
+    }),
   initiateAuth: (id: string) =>
     request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
   authStatus: (id: string) =>

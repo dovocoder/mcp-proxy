@@ -112,6 +112,7 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("POST /api/servers/{id}/reconnect", h.handleReconnectServer)
 	adminMux.HandleFunc("GET /api/servers/{id}/logs", h.handleGetServerLogs)
 	adminMux.HandleFunc("DELETE /api/servers/{id}/logs", h.handleClearServerLogs)
+	adminMux.HandleFunc("PATCH /api/servers/{id}/logs-enabled", h.handleToggleLogsEnabled)
 	adminMux.HandleFunc("POST /api/servers/{id}/auth", h.handleInitiateAuth)
 	adminMux.HandleFunc("GET /api/servers/{id}/auth-status", h.handleAuthStatus)
 	adminMux.HandleFunc("POST /api/servers/{id}/device-auth", h.handleInitiateDeviceAuth)
@@ -436,6 +437,30 @@ func (h *Handlers) handleClearServerLogs(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	h.proxy.ClearServerLogs(id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+}
+
+func (h *Handlers) handleToggleLogsEnabled(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		LogsEnabled bool `json:"logs_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	enabled := req.LogsEnabled
+	_, err := h.proxy.UpdateServer(id, &models.UpdateServerRequest{
+		LogsEnabled: &enabled,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to toggle logs: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"logs_enabled": enabled,
+	})
 }
 
 // --- API Keys ---

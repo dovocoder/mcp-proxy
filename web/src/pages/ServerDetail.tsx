@@ -33,6 +33,8 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
+import { Switch } from '@/components/ui/switch';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 function statusBadge(status: string) {
   if (status === 'connected') return <Badge variant="default">{status}</Badge>;
@@ -63,6 +65,7 @@ export default function ServerDetail() {
   const [deviceAuth, setDeviceAuth] = useState<DeviceAuthResult | null>(null);
   const [devicePolling, setDevicePolling] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -108,13 +111,21 @@ export default function ServerDetail() {
   const { data: logsData } = useQuery({
     queryKey: ['server-logs', id],
     queryFn: () => serversApi.logs(id!),
-    enabled: !!id && isStdio,
+    enabled: !!id && isStdio && !!data?.server.logs_enabled,
     refetchInterval: 3000,
   });
 
   const clearLogsMutation = useMutation({
     mutationFn: () => serversApi.clearLogs(id!),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['server-logs', id] }),
+  });
+
+  const toggleLogsMutation = useMutation({
+    mutationFn: (enabled: boolean) => serversApi.toggleLogs(id!, enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['server', id] });
+      queryClient.invalidateQueries({ queryKey: ['servers'] });
+    },
   });
 
   const reconnectMutation = useMutation({
@@ -126,6 +137,7 @@ export default function ServerDetail() {
     mutationFn: () => serversApi.delete(id!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
+      setDeleteOpen(false);
       window.history.back();
     },
   });
@@ -355,46 +367,61 @@ export default function ServerDetail() {
               <div>
                 <CardTitle>Debug Logs</CardTitle>
                 <CardDescription>
-                  stderr output from the stdio subprocess. Auto-refreshes every 3s.
+                  {srv.logs_enabled
+                    ? 'stderr output from the stdio subprocess. Auto-refreshes every 3s.'
+                    : 'Log capture is disabled. Enable to start capturing stderr output.'}
                   {logsData && logsData.count > 0 && ` ${logsData.count} lines captured.`}
                 </CardDescription>
               </div>
             </div>
-            <CardAction>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => clearLogsMutation.mutate()}
-                disabled={clearLogsMutation.isPending || !logsData?.count}
-              >
-                <Eraser className="size-4" />
-                <span className="hidden sm:inline">Clear</span>
-              </Button>
+            <CardAction className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                <Label className="text-xs text-muted-foreground">Capture</Label>
+                <Switch
+                  checked={srv.logs_enabled}
+                  onCheckedChange={(v) => toggleLogsMutation.mutate(v)}
+                  disabled={toggleLogsMutation.isPending}
+                  size="sm"
+                />
+              </div>
+              {srv.logs_enabled && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => clearLogsMutation.mutate()}
+                  disabled={clearLogsMutation.isPending || !logsData?.count}
+                >
+                  <Eraser className="size-4" />
+                  <span className="hidden sm:inline">Clear</span>
+                </Button>
+              )}
             </CardAction>
           </CardHeader>
-          <CardContent>
-            <div className="rounded-lg bg-black/60 border border-border overflow-hidden">
-              {logsData && logsData.logs && logsData.logs.length > 0 ? (
-                <div className="max-h-80 overflow-y-auto p-3 font-mono text-xs space-y-0.5">
-                  {logsData.logs.map((entry, i) => (
-                    <div key={i} className="flex gap-3 hover:bg-white/5 px-1 py-0.5 rounded">
-                      <span className="text-muted-foreground/60 shrink-0">
-                        {new Date(entry.timestamp).toLocaleTimeString()}
-                      </span>
-                      <span className="text-green-400/90 break-all whitespace-pre-wrap min-w-0">
-                        {entry.line}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-                  <Terminal className="size-5 mr-2 opacity-50" />
-                  No stderr output yet
-                </div>
-              )}
-            </div>
-          </CardContent>
+          {srv.logs_enabled && (
+            <CardContent>
+              <div className="rounded-lg bg-black/60 border border-border overflow-hidden">
+                {logsData && logsData.logs && logsData.logs.length > 0 ? (
+                  <div className="max-h-80 overflow-y-auto p-3 font-mono text-xs space-y-0.5">
+                    {logsData.logs.map((entry, i) => (
+                      <div key={i} className="flex gap-3 hover:bg-white/5 px-1 py-0.5 rounded">
+                        <span className="text-muted-foreground/60 shrink-0">
+                          {new Date(entry.timestamp).toLocaleTimeString()}
+                        </span>
+                        <span className="text-green-400/90 break-all whitespace-pre-wrap min-w-0">
+                          {entry.line}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+                    <Terminal className="size-5 mr-2 opacity-50" />
+                    No stderr output yet
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          )}
         </Card>
       )}
 
@@ -425,6 +452,7 @@ export default function ServerDetail() {
               <ConfigRow label="Timeout" value={`${srv.timeout}s`} />
               <ConfigRow label="Connect Timeout" value={`${srv.connect_timeout}s`} />
               <ConfigRow label="Enabled" value={srv.enabled ? 'Yes' : 'No'} />
+              <ConfigRow label="Log Capture" value={srv.logs_enabled ? 'Yes' : 'No'} />
               {srv.env && Object.keys(srv.env).length > 0 && (
                 <div className="grid gap-1">
                   <dt className="text-sm text-muted-foreground">Environment</dt>
@@ -446,8 +474,7 @@ export default function ServerDetail() {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => deleteMutation.mutate()}
-              disabled={deleteMutation.isPending}
+              onClick={() => setDeleteOpen(true)}
             >
               <Trash2 className="size-4" />
               Delete
@@ -522,6 +549,16 @@ export default function ServerDetail() {
           </CardContent>
         </Card>
       </div>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title="Delete Server"
+        description="Are you sure you want to delete"
+        itemName={srv.name}
+        loading={deleteMutation.isPending}
+        onConfirm={() => deleteMutation.mutate()}
+      />
     </div>
   );
 }

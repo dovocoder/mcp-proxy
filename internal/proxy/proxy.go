@@ -189,9 +189,11 @@ func (m *Manager) connectServer(srv *models.Server) {
 		AuthToken:      authToken,
 		Timeout:        srv.Timeout,
 		ConnectTimeout: srv.ConnectTimeout,
-		OnStderr: func(line string) {
+	}
+	if srv.LogsEnabled {
+		cfg.OnStderr = func(line string) {
 			m.addServerLog(srv.ID, line)
-		},
+		}
 	}
 
 	client := mcp.NewClient(cfg)
@@ -220,6 +222,11 @@ func (m *Manager) AddServer(req *models.CreateServerRequest) (*models.Server, er
 		enabled = *req.Enabled
 	}
 
+	logsEnabled := true
+	if req.LogsEnabled != nil {
+		logsEnabled = *req.LogsEnabled
+	}
+
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = 120
@@ -242,9 +249,10 @@ func (m *Manager) AddServer(req *models.CreateServerRequest) (*models.Server, er
 		Timeout:        timeout,
 		ConnectTimeout: connTimeout,
 		Enabled:        enabled,
+		LogsEnabled:    logsEnabled,
 		Status:         "disconnected",
 		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 
 	if err := m.store.CreateServer(srv); err != nil {
@@ -297,6 +305,9 @@ func (m *Manager) UpdateServer(id string, req *models.UpdateServerRequest) (*mod
 	}
 	if req.Enabled != nil {
 		srv.Enabled = *req.Enabled
+	}
+	if req.LogsEnabled != nil {
+		srv.LogsEnabled = *req.LogsEnabled
 	}
 	srv.UpdatedAt = time.Now()
 
