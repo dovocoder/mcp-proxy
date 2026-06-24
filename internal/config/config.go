@@ -15,11 +15,13 @@ type Config struct {
 	AdminPassword  string
 	WebDistPath    string
 	AllowedOrigins []string
+	EncryptionKey  string // global encryption key for env vars at rest
 	// OIDC (e.g. PocketID)
+	OIDCEnabled     bool
 	OIDCIssuer       string
 	OIDCClientID     string
-	OIDCClientSecret  string
-	OIDCRedirectURL   string // optional override; auto-detected from request if empty
+	OIDCClientSecret string
+	OIDCRedirectURL  string // optional override; auto-detected from request if empty
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -33,10 +35,13 @@ func Load() (*Config, error) {
 		WebDistPath:    envOrDefault("MCP_PROXY_WEB_DIST", "web/dist"),
 		AllowedOrigins: []string{"http://localhost:5173", "http://localhost:8080"},
 		// OIDC
+		OIDCEnabled:     envOrDefault("OIDC_ENABLED", "") == "true" || envOrDefault("OIDC_ENABLED", "") == "1",
 		OIDCIssuer:      envOrDefault("OIDC_ISSUER", ""),
 		OIDCClientID:    envOrDefault("OIDC_CLIENT_ID", ""),
 		OIDCClientSecret: envOrDefault("OIDC_CLIENT_SECRET", ""),
 		OIDCRedirectURL:  envOrDefault("OIDC_REDIRECT_URL", ""),
+		// Encryption
+		EncryptionKey:   envOrDefault("ENCRYPTION_KEY", ""),
 	}
 
 	if cfg.JWTSecret == "" {
@@ -60,9 +65,9 @@ func (c *Config) IsProduction() bool {
 	return os.Getenv("MCP_PROXY_ENV") == "production"
 }
 
-// OIDCEnabled returns true if OIDC is configured.
-func (c *Config) OIDCEnabled() bool {
-	return c.OIDCIssuer != "" && c.OIDCClientID != ""
+// OIDCEnabled returns true if OIDC is explicitly enabled and configured.
+func (c *Config) IsOIDCEnabled() bool {
+	return c.OIDCEnabled && c.OIDCIssuer != "" && c.OIDCClientID != ""
 }
 
 func envOrDefault(key, defaultVal string) string {

@@ -45,7 +45,7 @@ func main() {
 	}
 
 	// Initialize OIDC if configured
-	if cfg.OIDCEnabled() {
+	if cfg.IsOIDCEnabled() {
 		provider, err := auth.NewOIDCProvider(auth.OIDCConfig{
 			Issuer:       cfg.OIDCIssuer,
 			ClientID:     cfg.OIDCClientID,

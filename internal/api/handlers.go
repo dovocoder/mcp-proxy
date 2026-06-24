@@ -32,8 +32,8 @@ type Handlers struct {
 // New creates a new API Handlers instance.
 func New(s *store.Store, p *proxy.Manager, a *auth.AuthService) *Handlers {
 	// Derive master key for at-rest env var encryption.
-	// Prefer MCP_PROXY_ENC_KEY, fall back to the JWT secret.
-	encKey := os.Getenv("MCP_PROXY_ENC_KEY")
+	// Prefer ENCRYPTION_KEY, fall back to the JWT secret.
+	encKey := os.Getenv("ENCRYPTION_KEY")
 	if encKey == "" {
 		encKey = a.JWTSecret()
 	}
