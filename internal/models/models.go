@@ -75,8 +75,10 @@ type CompoundServer struct {
 // CompoundServerWithMembers includes the member server IDs.
 type CompoundServerWithMembers struct {
 	CompoundServer
-	Members     []Server `json:"members"`
-	ToolCount   int       `json:"tool_count"`
+	Members         []Server `json:"members"`
+	ToolCount       int       `json:"tool_count"`         // total tools (server + memory)
+	ServerToolCount int       `json:"server_tool_count"`  // tools from real MCP servers
+	MemoryToolCount int       `json:"memory_tool_count"`  // tools from built-in memory sets
 }
 
 // Tool represents a discovered MCP tool from a backend server.
@@ -224,9 +226,41 @@ type CreateMemoryRequest struct {
 
 // UpdateMemoryRequest is the payload for updating a memory.
 type UpdateMemoryRequest struct {
-	Palace     *string  `json:"palace,omitempty"`
-	Room       *string  `json:"room,omitempty"`
-	Content    *string  `json:"content,omitempty"`
+	Palace     *string   `json:"palace,omitempty"`
+	Room       *string   `json:"room,omitempty"`
+	Content    *string   `json:"content,omitempty"`
 	Tags       *[]string `json:"tags,omitempty"`
-	Importance *int     `json:"importance,omitempty"`
+	Importance *int      `json:"importance,omitempty"`
+}
+
+// EnvVar represents an environment variable stored per project/environment.
+type EnvVar struct {
+	ID          string    `json:"id"`
+	Project     string    `json:"project"`
+	Environment string    `json:"environment"` // e.g. "dev", "staging", "prod"
+	Key         string    `json:"key"`
+	Value       string    `json:"value"` // plaintext (only in API responses)
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// CreateEnvVarRequest creates a new env var.
+type CreateEnvVarRequest struct {
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+}
+
+// UpdateEnvVarRequest updates an env var.
+type UpdateEnvVarRequest struct {
+	Value *string `json:"value,omitempty"`
+}
+
+// EnvVarExport is the encrypted response for API key auth.
+type EnvVarExport struct {
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	Encrypted   string `json:"encrypted"`   // base64(nonce + ciphertext) — decrypt locally with API key
+	Nonce       string `json:"nonce_hint"`  // first 8 chars of nonce for identification
 }

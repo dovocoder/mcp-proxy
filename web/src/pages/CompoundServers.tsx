@@ -261,18 +261,61 @@ export default function CompoundServers() {
               member tools upfront. Clients discover and call tools lazily via the dictionary.
             </CardDescription>
           </CardHeader>
-          <CardContent className="flex items-center justify-between gap-4">
-            <div className="text-sm text-muted-foreground">
-              {detail.dictionary_mode
-                ? 'Dictionary mode is ON — clients see 1 tool instead of ' + detail.tool_count + '.'
-                : 'Dictionary mode is OFF — all ' + detail.tool_count + ' tools are listed directly.'}
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="text-sm text-muted-foreground">
+                {detail.dictionary_mode ? (
+                  <span>
+                    <Badge variant="default" className="mr-1.5 text-[10px]">ON</Badge>
+                    Clients see <strong className="text-foreground">1 tool</strong> (dictionary) instead of{' '}
+                    <strong className="text-foreground">{detail.tool_count}</strong> tools directly.
+                  </span>
+                ) : (
+                  <span>
+                    <Badge variant="outline" className="mr-1.5 text-[10px]">OFF</Badge>
+                    All <strong className="text-foreground">{detail.tool_count}</strong> tools are listed directly.
+                  </span>
+                )}
+              </div>
+              <Switch
+                checked={detail.dictionary_mode}
+                onCheckedChange={(checked) =>
+                  updateMutation.mutate({ compoundId: selectedId, data: { dictionary_mode: checked } })
+                }
+              />
             </div>
-            <Switch
-              checked={detail.dictionary_mode}
-              onCheckedChange={(checked) =>
-                updateMutation.mutate({ compoundId: selectedId, data: { dictionary_mode: checked } })
-              }
-            />
+
+            {/* Tool breakdown */}
+            <div className="flex flex-wrap gap-2 text-xs">
+              <Badge variant="secondary">
+                {detail.server_tool_count} server tool{detail.server_tool_count !== 1 ? 's' : ''}
+              </Badge>
+              {detail.memory_tool_count > 0 && (
+                <Badge variant="secondary">
+                  {detail.memory_tool_count} memory tool{detail.memory_tool_count !== 1 ? 's' : ''}
+                </Badge>
+              )}
+              <Badge variant="outline">
+                {detail.members.length} member{detail.members.length !== 1 ? 's' : ''}
+              </Badge>
+            </div>
+
+            {/* How it works */}
+            {detail.dictionary_mode && (
+              <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
+                <p className="text-xs font-medium text-foreground">How agents use the dictionary:</p>
+                <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
+                  <li><code className="text-foreground">list</code> — get a lightweight catalog of all available tools (name + description + type)</li>
+                  <li><code className="text-foreground">describe</code> — get the full input schema for a specific tool before calling it</li>
+                  <li><code className="text-foreground">call</code> — execute a tool with arguments matching its schema</li>
+                  <li><code className="text-foreground">search</code> — find tools by keyword when unsure what's available</li>
+                </ol>
+                <p className="text-xs text-muted-foreground pt-1 border-t border-border">
+                  Tool names use <code className="text-foreground">serverName__toolName</code> format.
+                  Memory tools use <code className="text-foreground">memory__toolName</code>.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/agentic/mcp-proxy/internal/mcp"
@@ -127,7 +128,18 @@ func migrate(db *sql.DB) error {
 		is_default INTEGER DEFAULT 0,
 		created_at TEXT
 	);
-	`
+
+	CREATE TABLE IF NOT EXISTS env_vars (
+		id TEXT PRIMARY KEY,
+		project TEXT NOT NULL,
+		environment TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		UNIQUE(project, environment, key)
+	);
+`
 	_, err := db.Exec(schema)
 	if err != nil {
 		return err
@@ -870,4 +882,141 @@ func scanMemories(rows *sql.Rows) ([]*models.Memory, error) {
 		result = append(result, &mem)
 	}
 	return result, nil
+}
+
+// --- Env Vars ---
+
+// CreateEnvVar inserts a new env var. The value field should already be
+// encrypted by the handler before calling this method.
+func (s *Store) CreateEnvVar(ev *models.EnvVar) error {
+	_, err := s.db.Exec(`
+		INSERT INTO env_vars (id, project, environment, key, value, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`,
+		ev.ID, ev.Project, ev.Environment, ev.Key, ev.Value,
+		ev.CreatedAt.Format(time.RFC3339), ev.UpdatedAt.Format(time.RFC3339),
+	)
+	return err
+}
+
+// GetEnvVar retrieves an env var by ID. The value field is encrypted at rest.
+func (s *Store) GetEnvVar(id string) (*models.EnvVar, error) {
+	row := s.db.QueryRow(`SELECT id, project, environment, key, value, created_at, updated_at FROM env_vars WHERE id = ?`, id)
+	return scanEnvVar(row)
+}
+
+// ListEnvVars returns env vars, optionally filtered by project and/or environment.
+func (s *Store) ListEnvVars(project, environment string) ([]*models.EnvVar, error) {
+	query := `SELECT id, project, environment, key, value, created_at, updated_at FROM env_vars`
+	var args []interface{}
+	var conditions []string
+	if project != "" {
+		conditions = append(conditions, "project = ?")
+		args = append(args, project)
+	}
+	if environment != "" {
+		conditions = append(conditions, "environment = ?")
+		args = append(args, environment)
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY project, environment, key"
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*models.EnvVar
+	for rows.Next() {
+		ev, err := scanEnvVarRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, ev)
+	}
+	return result, nil
+}
+
+// ListEnvVarProjects returns distinct project names from env_vars.
+func (s *Store) ListEnvVarProjects() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT project FROM env_vars ORDER BY project`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var projects []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, nil
+}
+
+// ListEnvVarEnvironments returns distinct environments for a given project.
+func (s *Store) ListEnvVarEnvironments(project string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT environment FROM env_vars WHERE project = ? ORDER BY environment`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var envs []string
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		envs = append(envs, e)
+	}
+	return envs, nil
+}
+
+// UpdateEnvVar updates an env var's value. The value should already be
+// encrypted by the handler before calling this method.
+func (s *Store) UpdateEnvVar(id string, req *models.UpdateEnvVarRequest) error {
+	if req.Value == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE env_vars SET value = ?, updated_at = ? WHERE id = ?`,
+		*req.Value, time.Now().Format(time.RFC3339), id)
+	return err
+}
+
+// DeleteEnvVar removes an env var by ID.
+func (s *Store) DeleteEnvVar(id string) error {
+	_, err := s.db.Exec(`DELETE FROM env_vars WHERE id = ?`, id)
+	return err
+}
+
+// DeleteEnvVarsByProject removes all env vars for a given project.
+func (s *Store) DeleteEnvVarsByProject(project string) error {
+	_, err := s.db.Exec(`DELETE FROM env_vars WHERE project = ?`, project)
+	return err
+}
+
+func scanEnvVar(row *sql.Row) (*models.EnvVar, error) {
+	return scanEnvVarImpl(row)
+}
+
+func scanEnvVarRows(rows *sql.Rows) (*models.EnvVar, error) {
+	return scanEnvVarImpl(rows)
+}
+
+func scanEnvVarImpl(s rowScanner) (*models.EnvVar, error) {
+	var ev models.EnvVar
+	var createdAt, updatedAt string
+	err := s.Scan(&ev.ID, &ev.Project, &ev.Environment, &ev.Key, &ev.Value, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	ev.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	ev.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	return &ev, nil
 }

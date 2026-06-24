@@ -1,13 +1,17 @@
 package api
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/agentic/mcp-proxy/internal/auth"
+	"github.com/agentic/mcp-proxy/internal/crypto"
 	"github.com/agentic/mcp-proxy/internal/memory"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/proxy"
@@ -22,16 +26,24 @@ type Handlers struct {
 	auth          *auth.AuthService
 	sseManager    *sseSessionManager
 	streamManager *streamSessionManager
+	masterKey     [32]byte
 }
 
 // New creates a new API Handlers instance.
 func New(s *store.Store, p *proxy.Manager, a *auth.AuthService) *Handlers {
+	// Derive master key for at-rest env var encryption.
+	// Prefer MCP_PROXY_ENC_KEY, fall back to the JWT secret.
+	encKey := os.Getenv("MCP_PROXY_ENC_KEY")
+	if encKey == "" {
+		encKey = a.JWTSecret()
+	}
 	return &Handlers{
 		store:         s,
 		proxy:         p,
 		auth:          a,
 		sseManager:    newSSESessionManager(),
 		streamManager: newStreamSessionManager(),
+		masterKey:     crypto.DeriveKey(encKey),
 	}
 }
 
@@ -119,6 +131,18 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("POST /api/memory-sets", h.handleCreateMemorySet)
 	adminMux.HandleFunc("PATCH /api/memory-sets/{id}", h.handleUpdateMemorySet)
 	adminMux.HandleFunc("DELETE /api/memory-sets/{id}", h.handleDeleteMemorySet)
+
+	// Env var routes (admin — JWT auth)
+	// Register more specific paths first for safety.
+	adminMux.HandleFunc("GET /api/env-vars/projects", h.handleListEnvVarProjects)
+	adminMux.HandleFunc("GET /api/env-vars/environments", h.handleListEnvVarEnvironments)
+	adminMux.HandleFunc("GET /api/env-vars", h.handleListEnvVars)
+	adminMux.HandleFunc("POST /api/env-vars", h.handleCreateEnvVar)
+	adminMux.HandleFunc("PUT /api/env-vars/{id}", h.handleUpdateEnvVar)
+	adminMux.HandleFunc("DELETE /api/env-vars/{id}", h.handleDeleteEnvVar)
+
+	// Env var export (API key auth)
+	mux.Handle("GET /api/env-vars/export", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleExportEnvVars)))
 
 	mux.Handle("/api/", h.auth.JWTMiddleware(adminMux))
 }
@@ -567,11 +591,22 @@ func (h *Handlers) handleGetCompound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	toolCount := len(h.proxy.ListToolsForCompound(id))
+	// Also count memory tools from compound members
+	memorySetIDs := h.proxy.IsMemoryCompoundMember(id)
+	memoryToolCount := 0
+	for _, setID := range memorySetIDs {
+		if srv := h.proxy.GetMemoryServer(setID); srv != nil {
+			memoryToolCount += len(srv.Tools())
+		}
+	}
+	totalToolCount := toolCount + memoryToolCount
 
 	writeJSON(w, http.StatusOK, models.CompoundServerWithMembers{
-		CompoundServer: *compound,
-		Members:         members,
-		ToolCount:       toolCount,
+		CompoundServer:   *compound,
+		Members:           members,
+		ToolCount:         totalToolCount,
+		ServerToolCount:   toolCount,
+		MemoryToolCount:   memoryToolCount,
 	})
 }
 
@@ -933,4 +968,202 @@ func (h *Handlers) handleDeleteMemorySet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Env Vars (admin) ---
+
+func (h *Handlers) handleListEnvVars(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	environment := r.URL.Query().Get("environment")
+
+	envVars, err := h.store.ListEnvVars(project, environment)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list env vars")
+		return
+	}
+
+	// Decrypt values for admin response
+	for _, ev := range envVars {
+		decrypted, err := crypto.Decrypt(h.masterKey, ev.Value)
+		if err != nil {
+			// If decryption fails, return the raw value (shouldn't happen normally)
+			continue
+		}
+		ev.Value = decrypted
+	}
+
+	if envVars == nil {
+		envVars = []*models.EnvVar{}
+	}
+	writeJSON(w, http.StatusOK, envVars)
+}
+
+func (h *Handlers) handleCreateEnvVar(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateEnvVarRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Project == "" {
+		writeError(w, http.StatusBadRequest, "project is required")
+		return
+	}
+	if req.Environment == "" {
+		writeError(w, http.StatusBadRequest, "environment is required")
+		return
+	}
+	if req.Key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	// Encrypt the value at rest with the master key
+	encryptedValue, err := crypto.Encrypt(h.masterKey, req.Value)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to encrypt env var value")
+		return
+	}
+
+	now := time.Now()
+	ev := &models.EnvVar{
+		ID:          uuid.NewString(),
+		Project:     req.Project,
+		Environment: req.Environment,
+		Key:         req.Key,
+		Value:       encryptedValue,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := h.store.CreateEnvVar(ev); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create env var: %v", err))
+		return
+	}
+
+	// Return with the decrypted value
+	ev.Value = req.Value
+	writeJSON(w, http.StatusCreated, ev)
+}
+
+func (h *Handlers) handleUpdateEnvVar(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req models.UpdateEnvVarRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Encrypt the new value before storing
+	if req.Value != nil {
+		encryptedValue, err := crypto.Encrypt(h.masterKey, *req.Value)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to encrypt env var value")
+			return
+		}
+		req.Value = &encryptedValue
+	}
+
+	if err := h.store.UpdateEnvVar(id, &req); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update env var: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (h *Handlers) handleDeleteEnvVar(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteEnvVar(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to delete env var")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handlers) handleListEnvVarProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := h.store.ListEnvVarProjects()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list env var projects")
+		return
+	}
+	if projects == nil {
+		projects = []string{}
+	}
+	writeJSON(w, http.StatusOK, projects)
+}
+
+func (h *Handlers) handleListEnvVarEnvironments(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		writeError(w, http.StatusBadRequest, "project query parameter is required")
+		return
+	}
+
+	envs, err := h.store.ListEnvVarEnvironments(project)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list env var environments")
+		return
+	}
+	if envs == nil {
+		envs = []string{}
+	}
+	writeJSON(w, http.StatusOK, envs)
+}
+
+// --- Env Vars export (API key auth) ---
+
+func (h *Handlers) handleExportEnvVars(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	environment := r.URL.Query().Get("environment")
+
+	envVars, err := h.store.ListEnvVars(project, environment)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to load env vars")
+		return
+	}
+
+	// Build a JSON object of key-value pairs (decrypted with master key)
+	envMap := make(map[string]string)
+	for _, ev := range envVars {
+		decrypted, err := crypto.Decrypt(h.masterKey, ev.Value)
+		if err != nil {
+			continue
+		}
+		envMap[ev.Key] = decrypted
+	}
+
+	jsonData, err := json.Marshal(envMap)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to marshal env vars")
+		return
+	}
+
+	// Derive a NaCl key from the raw API key string
+	rawAPIKey := auth.ExtractAPIKey(r)
+	if rawAPIKey == "" {
+		writeError(w, http.StatusUnauthorized, "Missing API key")
+		return
+	}
+	apiKeyDerived := crypto.DeriveKey(rawAPIKey)
+
+	// Encrypt the JSON blob with the API key
+	encrypted, err := crypto.Encrypt(apiKeyDerived, string(jsonData))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to encrypt env vars")
+		return
+	}
+
+	// Extract nonce hint (first 4 bytes of nonce, hex-encoded = 8 chars)
+	nonceHint := ""
+	if raw, err := base64.StdEncoding.DecodeString(encrypted); err == nil && len(raw) >= 4 {
+		nonceHint = hex.EncodeToString(raw[:4])
+	}
+
+	writeJSON(w, http.StatusOK, models.EnvVarExport{
+		Project:     project,
+		Environment: environment,
+		Encrypted:   encrypted,
+		Nonce:       nonceHint,
+	})
 }

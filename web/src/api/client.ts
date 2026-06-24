@@ -186,6 +186,8 @@ export interface CompoundServer {
 export interface CompoundServerWithMembers extends CompoundServer {
   members: Server[];
   tool_count: number;
+  server_tool_count: number;
+  memory_tool_count: number;
 }
 
 export const compounds = {
@@ -250,4 +252,42 @@ export const memorySets = {
     request<MemorySet>(`/memory-sets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) =>
     request<{ status: string }>(`/memory-sets/${id}`, { method: 'DELETE' }),
+};
+
+// --- Env Variables ---
+
+export interface EnvVar {
+  id: string;
+  project: string;
+  environment: string;
+  key: string;
+  value: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EnvVarExport {
+  project: string;
+  environment: string;
+  encrypted: string;
+  nonce_hint: string;
+}
+
+export const envVars = {
+  list: (project?: string, environment?: string) => {
+    const params = new URLSearchParams();
+    if (project) params.set('project', project);
+    if (environment) params.set('environment', environment);
+    const qs = params.toString();
+    return request<EnvVar[]>(`/env-vars${qs ? `?${qs}` : ''}`);
+  },
+  create: (data: { project: string; environment: string; key: string; value: string }) =>
+    request<EnvVar>('/env-vars', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: { value: string }) =>
+    request<EnvVar>(`/env-vars/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/env-vars/${id}`, { method: 'DELETE' }),
+  projects: () => request<string[]>('/env-vars/projects'),
+  environments: (project: string) =>
+    request<string[]>(`/env-vars/environments?project=${encodeURIComponent(project)}`),
 };

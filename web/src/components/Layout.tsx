@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useNavigate, Outlet } from 'react-router-dom';
-import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, Brain } from 'lucide-react';
+import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, Brain, Lock } from 'lucide-react';
 import { clearToken } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger, SheetClose } from '@/components/ui/sheet';
@@ -24,6 +24,7 @@ const navItems = [
   { to: '/keys', label: 'API Keys', icon: KeyRound, end: false },
   { to: '/tools', label: 'Tools', icon: Wrench, end: false },
   { to: '/memories', label: 'Memories', icon: Brain, end: false },
+  { to: '/env-vars', label: 'Env Vars', icon: Lock, end: false },
 ];
 
 export default function Layout({ stats }: LayoutProps) {

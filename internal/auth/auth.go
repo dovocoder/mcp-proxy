@@ -32,6 +32,11 @@ func New(s *store.Store, jwtSecret string) *AuthService {
 	}
 }
 
+// JWTSecret returns the JWT secret as a string.
+func (a *AuthService) JWTSecret() string {
+	return string(a.jwtSecret)
+}
+
 // HashPassword hashes a password using bcrypt.
 func HashPassword(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)

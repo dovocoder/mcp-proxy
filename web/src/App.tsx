@@ -9,6 +9,7 @@ import CompoundServersPage from './pages/CompoundServers';
 import APIKeysPage from './pages/APIKeys';
 import ToolsPage from './pages/Tools';
 import MemoriesPage from './pages/Memories';
+import EnvVarsPage from './pages/EnvVars';
 import { isAuthenticated, dashboard as dashboardApi } from './api/client';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="keys" element={<APIKeysPage />} />
         <Route path="tools" element={<ToolsPage />} />
         <Route path="memories" element={<MemoriesPage />} />
+        <Route path="env-vars" element={<EnvVarsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

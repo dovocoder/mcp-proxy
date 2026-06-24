@@ -970,6 +970,12 @@ func (m *Manager) ClearServerLogs(serverID string) {
 // isMemoryCompoundMember returns the set IDs of all memory sets that are
 // members of the specified compound. Checks for both "builtin-memory" (default)
 // and "builtin-memory:{set_id}" patterns.
+// IsMemoryCompoundMember returns the set IDs of all memory sets that are
+// members of the specified compound. Exported wrapper for API handlers.
+func (m *Manager) IsMemoryCompoundMember(compoundID string) []string {
+	return m.isMemoryCompoundMember(compoundID)
+}
+
 func (m *Manager) isMemoryCompoundMember(compoundID string) []string {
 	memberIDs, err := m.store.GetCompoundMemberIDs(compoundID)
 	if err != nil {
