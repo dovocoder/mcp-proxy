@@ -165,34 +165,51 @@ func (m *Manager) connectServer(srv *models.Server) {
 	case "bearer":
 		// Manual bearer token stored in auth_token field
 		authToken = srv.AuthToken
+		if authToken == "" {
+			log.Printf("Server %s: auth_method=bearer but auth_token is empty", srv.Name)
+		} else {
+			log.Printf("Server %s: using manual bearer token (%d chars)", srv.Name, len(authToken))
+		}
 	case "env_bearer":
 		// Bearer token read from an environment variable
 		if srv.BearerTokenEnv != "" {
 			authToken = os.Getenv(srv.BearerTokenEnv)
 			if authToken == "" {
-				log.Printf("Warning: env var %s is empty for server %s", srv.BearerTokenEnv, srv.Name)
+				log.Printf("Server %s: env var %s is empty — token not available", srv.Name, srv.BearerTokenEnv)
+			} else {
+				log.Printf("Server %s: using env var bearer token from %s (%d chars)", srv.Name, srv.BearerTokenEnv, len(authToken))
 			}
+		} else {
+			log.Printf("Server %s: auth_method=env_bearer but bearer_token_env is not set", srv.Name)
 		}
 	case "oauth":
 		// OAuth flow — check for stored tokens (with auto-refresh)
+		log.Printf("Server %s: using OAuth auth method", srv.Name)
 		if srv.Transport == "http" || srv.Transport == "streamable-http" {
 			tokens, cid, csec, err := m.store.GetOAuthTokens(srv.ID)
 			if err == nil && tokens != nil {
 				// Check if token needs refresh
 				if tokens.IsExpired() && tokens.HasRefreshToken() {
+					log.Printf("Server %s: OAuth token expired, attempting refresh", srv.Name)
 					meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
 					if meta != nil && meta.TokenEndpoint != "" {
 						refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
 						if err == nil {
 							tokens = refreshed
 							_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
-							log.Printf("Refreshed OAuth token for server %s", srv.Name)
+							log.Printf("Server %s: OAuth token refreshed successfully (%d chars)", srv.Name, len(tokens.AccessToken))
 						} else {
-							log.Printf("Failed to refresh OAuth token for %s: %v", srv.Name, err)
+							log.Printf("Server %s: failed to refresh OAuth token: %v", srv.Name, err)
 						}
+					} else {
+						log.Printf("Server %s: cannot refresh — no OAuth metadata or token endpoint found", srv.Name)
 					}
+				} else {
+					log.Printf("Server %s: using stored OAuth access token (%d chars, expires=%v)", srv.Name, len(tokens.AccessToken), tokens.ExpiresAt)
 				}
 				authToken = tokens.AccessToken
+			} else {
+				log.Printf("Server %s: no stored OAuth tokens — connection will likely fail with 401", srv.Name)
 			}
 		}
 	default:
@@ -204,16 +221,18 @@ func (m *Manager) connectServer(srv *models.Server) {
 			tokens, cid, csec, err := m.store.GetOAuthTokens(srv.ID)
 			if err == nil && tokens != nil {
 				// We have stored OAuth tokens — use OAuth flow
+				log.Printf("Server %s: auth_method=%q but found stored OAuth tokens — using OAuth (backward compat)", srv.Name, srv.AuthMethod)
 				if tokens.IsExpired() && tokens.HasRefreshToken() {
+					log.Printf("Server %s: OAuth token expired, attempting refresh", srv.Name)
 					meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
 					if meta != nil && meta.TokenEndpoint != "" {
 						refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
 						if err == nil {
 							tokens = refreshed
 							_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
-							log.Printf("Refreshed OAuth token for server %s", srv.Name)
+							log.Printf("Server %s: OAuth token refreshed successfully (%d chars)", srv.Name, len(tokens.AccessToken))
 						} else {
-							log.Printf("Failed to refresh OAuth token for %s: %v", srv.Name, err)
+							log.Printf("Server %s: failed to refresh OAuth token: %v", srv.Name, err)
 						}
 					}
 				}
@@ -221,10 +240,18 @@ func (m *Manager) connectServer(srv *models.Server) {
 			} else {
 				// No OAuth tokens — fall back to auth_token as a static bearer token
 				authToken = srv.AuthToken
+				if authToken != "" {
+					log.Printf("Server %s: no auth_method set, using auth_token as static bearer (%d chars)", srv.Name, len(authToken))
+				} else {
+					log.Printf("Server %s: no auth configured (auth_method=%q, no tokens, no auth_token)", srv.Name, srv.AuthMethod)
+				}
 			}
 		} else {
 			// Non-HTTP transports: use auth_token directly
 			authToken = srv.AuthToken
+			if authToken != "" {
+				log.Printf("Server %s: using auth_token for non-HTTP transport (%d chars)", srv.Name, len(authToken))
+			}
 		}
 	}
 
@@ -246,7 +273,7 @@ func (m *Manager) connectServer(srv *models.Server) {
 	}
 
 	client := mcp.NewClient(cfg)
-	log.Printf("Connecting to %s (transport=%s, auth_method=%s, has_token=%v)", srv.URL, srv.Transport, srv.AuthMethod, authToken != "")
+	log.Printf("Connecting to %s (transport=%s, auth_method=%s, has_token=%v, token_len=%d)", srv.URL, srv.Transport, srv.AuthMethod, authToken != "", len(authToken))
 	if err := client.Connect(); err != nil {
 		log.Printf("Failed to connect to server %s: %v", srv.Name, err)
 		m.mu.Lock()
@@ -980,8 +1007,10 @@ func (m *Manager) SetBearerToken(serverID, token string) error {
 	if err != nil {
 		return fmt.Errorf("server not found: %w", err)
 	}
+	log.Printf("Server %s: switching to bearer auth (token len=%d)", srv.Name, len(token))
 	srv.AuthToken = token
 	srv.AuthMethod = "bearer"
+	srv.BearerTokenEnv = ""
 	if err := m.store.UpdateServer(srv); err != nil {
 		return fmt.Errorf("failed to update server: %w", err)
 	}
@@ -997,8 +1026,10 @@ func (m *Manager) SetEnvBearerToken(serverID, envVar string) error {
 	if err != nil {
 		return fmt.Errorf("server not found: %w", err)
 	}
+	log.Printf("Server %s: switching to env_bearer auth (env var=%s)", srv.Name, envVar)
 	srv.BearerTokenEnv = envVar
 	srv.AuthMethod = "env_bearer"
+	srv.AuthToken = ""
 	if err := m.store.UpdateServer(srv); err != nil {
 		return fmt.Errorf("failed to update server: %w", err)
 	}
@@ -1013,6 +1044,7 @@ func (m *Manager) ClearAuth(serverID string) error {
 	if err != nil {
 		return fmt.Errorf("server not found: %w", err)
 	}
+	log.Printf("Server %s: clearing auth (was method=%s)", srv.Name, srv.AuthMethod)
 	srv.AuthMethod = "none"
 	srv.AuthToken = ""
 	srv.BearerTokenEnv = ""
