@@ -70,10 +70,7 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Registry search (no auth — public catalog)
 	mux.HandleFunc("GET /api/registry/search", h.handleRegistrySearch)
 
-	// OAuth callback (no auth — browser redirect)
-	mux.HandleFunc("GET /api/oauth/callback", h.handleOAuthCallback)
-
-	// OIDC routes (no auth — browser redirect flow)
+	// OIDC routes (no auth — browser redirect flow for admin UI)
 	mux.HandleFunc("GET /api/auth/oidc/status", h.handleOIDCStatus)
 	mux.HandleFunc("GET /api/auth/oidc/login", h.handleOIDCLogin)
 	mux.HandleFunc("GET /api/auth/oidc/callback", h.handleOIDCCallback)
@@ -85,7 +82,7 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", h.handleProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/", h.handleProtectedResourceMetadata)
 
-	// Authorization Server Metadata (RFC 8414) — wraps OIDC provider endpoints + adds DCR/CIMD
+	// Authorization Server Metadata (RFC 8414) — ALL endpoints proxied through the proxy
 	// Also serve path-insertion variant for clients that try it.
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", h.handleAuthorizationServerMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server/", h.handleAuthorizationServerMetadata)
@@ -99,9 +96,17 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Dynamic Client Registration (RFC 7591) — returns pre-registered OIDC credentials
 	mux.HandleFunc("POST /api/oauth/register", h.handleOAuthRegister)
 
-	// OAuth authorize endpoint — proxy forwards to upstream OIDC provider
-	// and stores the client's redirect_uri in a signed state JWT
+	// OAuth proxy endpoints — all on the proxy's domain so issuer matches endpoints.
+	// These forward requests to the upstream OIDC provider (PocketID).
 	mux.HandleFunc("GET /api/oauth/authorize", h.handleOAuthAuthorize)
+	mux.HandleFunc("GET /api/oauth/callback", h.handleOAuthCallback)
+	mux.HandleFunc("POST /api/oauth/callback", h.handleOAuthCallback)
+	mux.HandleFunc("POST /api/oauth/token", h.handleOAuthProxy)
+	mux.HandleFunc("GET /api/oauth/jwks", h.handleOAuthProxy)
+	mux.HandleFunc("GET /api/oauth/userinfo", h.handleOAuthProxy)
+	mux.HandleFunc("POST /api/oauth/userinfo", h.handleOAuthProxy)
+	mux.HandleFunc("POST /api/oauth/revoke", h.handleOAuthProxy)
+	mux.HandleFunc("POST /api/oauth/introspect", h.handleOAuthProxy)
 
 	// --- MCP client endpoints (API key auth) ---
 	// Global (all servers)
@@ -1682,10 +1687,9 @@ func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *htt
 }
 
 // handleAuthorizationServerMetadata returns RFC 8414 Authorization Server Metadata.
-// This wraps the upstream OIDC provider's endpoints and adds:
-// - registration_endpoint (DCR) — so clients like Raycast that require DCR can connect
-// - client_id_metadata_document_supported — for clients that prefer CIMD
-// The issuer is the proxy itself, not the upstream OIDC provider.
+// ALL endpoints are proxied through the proxy itself so that the issuer URL
+// matches all endpoint URLs. This is required because some MCP clients
+// validate that endpoints are on the same domain as the issuer.
 func (h *Handlers) handleAuthorizationServerMetadata(w http.ResponseWriter, r *http.Request) {
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
@@ -1701,43 +1705,40 @@ func (h *Handlers) handleAuthorizationServerMetadata(w http.ResponseWriter, r *h
 	oidc := h.auth.OIDC()
 	discovery := oidc.Discovery()
 
+	// All endpoints are on the proxy's domain — the proxy forwards to PocketID
 	resp := map[string]interface{}{
-		"issuer":                                proxyURL,
+		"issuer":                               proxyURL,
+		"authorization_endpoint":               fmt.Sprintf("%s/api/oauth/authorize", proxyURL),
+		"token_endpoint":                       fmt.Sprintf("%s/api/oauth/token", proxyURL),
+		"registration_endpoint":                fmt.Sprintf("%s/api/oauth/register", proxyURL),
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-		"token_endpoint_auth_method_supported":  []string{"none", "client_secret_post"},
-		"scopes_supported":                      []string{"openid", "profile", "email"},
-		"code_challenge_methods_supported":      []string{"S256"},
-		// DCR support — returns pre-registered OIDC credentials
-		"registration_endpoint":                 fmt.Sprintf("%s/api/oauth/register", proxyURL),
-		// CIMD support — the proxy serves a client metadata document
+		"grant_types_supported":                []string{"authorization_code", "refresh_token"},
+		"token_endpoint_auth_method_supported": []string{"none", "client_secret_post"},
+		"scopes_supported":                     []string{"openid", "profile", "email"},
+		"code_challenge_methods_supported":     []string{"S256"},
 		"client_id_metadata_document_supported": true,
 	}
 
-	// Authorization endpoint is the PROXY itself — the proxy forwards to
-	// the upstream OIDC provider and passes the callback through to the
-	// MCP client's actual redirect_uri (stored in a signed state JWT).
-	resp["authorization_endpoint"] = fmt.Sprintf("%s/api/oauth/authorize", proxyURL)
-
-	// Wrap upstream OIDC provider endpoints
-	// NOTE: authorization_endpoint stays as the proxy — the proxy handles
-	// the auth request, stores the client's redirect_uri in a signed state,
-	// then redirects to the upstream OIDC provider. token_endpoint and
-	// jwks_uri point upstream since the client exchanges the code directly.
+	// Proxy these endpoints through the proxy too
 	if discovery != nil {
-		// Don't override authorization_endpoint — it's the proxy
-		resp["token_endpoint"] = discovery.TokenEndpoint
 		if discovery.JwksURI != "" {
-			resp["jwks_uri"] = discovery.JwksURI
+			resp["jwks_uri"] = fmt.Sprintf("%s/api/oauth/jwks", proxyURL)
 		}
 		if discovery.UserinfoEndpoint != "" {
-			resp["userinfo_endpoint"] = discovery.UserinfoEndpoint
+			resp["userinfo_endpoint"] = fmt.Sprintf("%s/api/oauth/userinfo", proxyURL)
 		}
 		if discovery.RevocationEndpoint != "" {
-			resp["revocation_endpoint"] = discovery.RevocationEndpoint
+			resp["revocation_endpoint"] = fmt.Sprintf("%s/api/oauth/revoke", proxyURL)
 		}
 		if discovery.IntrospectionEndpoint != "" {
-			resp["introspection_endpoint"] = discovery.IntrospectionEndpoint
+			resp["introspection_endpoint"] = fmt.Sprintf("%s/api/oauth/introspect", proxyURL)
+		}
+		// OIDC-specific fields
+		if len(discovery.IDTokenSigningAlgValuesSupported) > 0 {
+			resp["id_token_signing_alg_values_supported"] = discovery.IDTokenSigningAlgValuesSupported
+		}
+		if len(discovery.SubjectTypesSupported) > 0 {
+			resp["subject_types_supported"] = discovery.SubjectTypesSupported
 		}
 	}
 
@@ -1792,6 +1793,82 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleOAuthProxy forwards OAuth requests to the upstream OIDC provider (PocketID).
+// This ensures all endpoints in the auth server metadata are on the proxy's domain,
+// matching the issuer URL. Routes: /api/oauth/token, /jwks, /userinfo, /revoke, /introspect.
+func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
+	if !h.auth.HasOIDC() {
+		writeError(w, http.StatusBadRequest, "OAuth not configured")
+		return
+	}
+
+	oidc := h.auth.OIDC()
+	discovery := oidc.Discovery()
+	if discovery == nil {
+		writeError(w, http.StatusInternalServerError, "OIDC provider not discovered")
+		return
+	}
+
+	// Map the proxy path to the upstream OIDC provider endpoint
+	var upstreamURL string
+	switch r.URL.Path {
+	case "/api/oauth/token":
+		upstreamURL = discovery.TokenEndpoint
+	case "/api/oauth/jwks":
+		upstreamURL = discovery.JwksURI
+	case "/api/oauth/userinfo":
+		upstreamURL = discovery.UserinfoEndpoint
+	case "/api/oauth/revoke":
+		upstreamURL = discovery.RevocationEndpoint
+	case "/api/oauth/introspect":
+		upstreamURL = discovery.IntrospectionEndpoint
+	default:
+		writeError(w, http.StatusNotFound, "Unknown OAuth endpoint")
+		return
+	}
+
+	if upstreamURL == "" {
+		writeError(w, http.StatusNotFound, "Endpoint not supported by upstream provider")
+		return
+	}
+
+	// Forward the request to the upstream provider
+	client := &http.Client{Timeout: 30 * time.Second}
+	var bodyReader io.Reader
+	if r.Body != nil {
+		bodyReader = r.Body
+	}
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bodyReader)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to create upstream request")
+		return
+	}
+
+	// Copy headers
+	for _, h2 := range []string{"Content-Type", "Authorization", "Accept"} {
+		if v := r.Header.Get(h2); v != "" {
+			upstreamReq.Header.Set(h2, v)
+		}
+	}
+
+	resp, err := client.Do(upstreamReq)
+	if err != nil {
+		log.Printf("[OAuth-Proxy] Failed to reach upstream %s: %v", upstreamURL, err)
+		writeError(w, http.StatusBadGateway, "Failed to reach upstream OAuth provider")
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // handleClientMetadata serves the Client ID Metadata Document (CIMD).
