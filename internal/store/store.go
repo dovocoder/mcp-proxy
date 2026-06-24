@@ -1077,3 +1077,129 @@ func scanEnvVarImpl(s rowScanner) (*models.EnvVar, error) {
 	ev.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return &ev, nil
 }
+
+// --- Disabled Tools ---
+
+// ListDisabledTools returns all disabled tools (global + per-compound).
+func (s *Store) ListDisabledTools() ([]*models.DisabledTool, error) {
+	rows, err := s.db.Query(`SELECT id, tool_name, server_id, created_at FROM disabled_tools ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanDisabledTools(rows)
+}
+
+// ListDisabledToolsByCompound returns disabled tools scoped to a specific compound.
+func (s *Store) ListDisabledToolsByCompound(compoundID string) ([]*models.DisabledTool, error) {
+	rows, err := s.db.Query(`SELECT id, tool_name, server_id, created_at FROM disabled_tools WHERE server_id = ? ORDER BY created_at DESC`, compoundID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanDisabledTools(rows)
+}
+
+// CreateDisabledTool disables a tool. If serverID is nil the disable is global;
+// otherwise it is scoped to the given compound (server_id).
+func (s *Store) CreateDisabledTool(toolName string, serverID *string) (*models.DisabledTool, error) {
+	// De-duplicate: if an entry already exists for this (tool_name, server_id),
+	// return it instead of erroring. SQLite treats NULL as distinct in UNIQUE
+	// constraints, so we check explicitly for the global case.
+	var existingID string
+	if serverID != nil {
+		err := s.db.QueryRow(
+			`SELECT id FROM disabled_tools WHERE tool_name = ? AND server_id = ?`,
+			toolName, *serverID,
+		).Scan(&existingID)
+		if err == nil {
+			return s.GetDisabledTool(existingID)
+		}
+	} else {
+		err := s.db.QueryRow(
+			`SELECT id FROM disabled_tools WHERE tool_name = ? AND server_id IS NULL`,
+			toolName,
+		).Scan(&existingID)
+		if err == nil {
+			return s.GetDisabledTool(existingID)
+		}
+	}
+
+	dt := &models.DisabledTool{
+		ID:        uuid.NewString(),
+		ToolName:  toolName,
+		ServerID:  serverID,
+		CreatedAt: time.Now(),
+	}
+
+	var serverIDArg interface{}
+	if serverID != nil {
+		serverIDArg = *serverID
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO disabled_tools (id, tool_name, server_id, created_at) VALUES (?, ?, ?, ?)`,
+		dt.ID, dt.ToolName, serverIDArg, dt.CreatedAt.Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return dt, nil
+}
+
+// GetDisabledTool retrieves a single disabled tool entry by ID.
+func (s *Store) GetDisabledTool(id string) (*models.DisabledTool, error) {
+	row := s.db.QueryRow(`SELECT id, tool_name, server_id, created_at FROM disabled_tools WHERE id = ?`, id)
+	return scanDisabledTool(row)
+}
+
+// DeleteDisabledTool removes a disabled tool entry (re-enables the tool).
+func (s *Store) DeleteDisabledTool(id string) error {
+	_, err := s.db.Exec(`DELETE FROM disabled_tools WHERE id = ?`, id)
+	return err
+}
+
+// IsToolDisabled reports whether a tool is disabled. When compoundID is
+// non-nil and non-empty, both global disables and compound-specific disables
+// are checked. When compoundID is nil/empty, only global disables are checked.
+func (s *Store) IsToolDisabled(toolName string, compoundID *string) (bool, error) {
+	var count int
+	if compoundID != nil && *compoundID != "" {
+		err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM disabled_tools WHERE tool_name = ? AND (server_id IS NULL OR server_id = ?)`,
+			toolName, *compoundID,
+		).Scan(&count)
+		return count > 0, err
+	}
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM disabled_tools WHERE tool_name = ? AND server_id IS NULL`,
+		toolName,
+	).Scan(&count)
+	return count > 0, err
+}
+
+func scanDisabledTool(s rowScanner) (*models.DisabledTool, error) {
+	var dt models.DisabledTool
+	var serverID sql.NullString
+	var createdAt string
+	if err := s.Scan(&dt.ID, &dt.ToolName, &serverID, &createdAt); err != nil {
+		return nil, err
+	}
+	if serverID.Valid {
+		sid := serverID.String
+		dt.ServerID = &sid
+	}
+	dt.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &dt, nil
+}
+
+func scanDisabledTools(rows *sql.Rows) ([]*models.DisabledTool, error) {
+	var result []*models.DisabledTool
+	for rows.Next() {
+		dt, err := scanDisabledTool(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, dt)
+	}
+	return result, nil
+}

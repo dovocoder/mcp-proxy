@@ -156,6 +156,11 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PUT /api/env-vars/{id}", h.handleUpdateEnvVar)
 	adminMux.HandleFunc("DELETE /api/env-vars/{id}", h.handleDeleteEnvVar)
 
+	// Disabled tools routes (admin — JWT auth)
+	adminMux.HandleFunc("GET /api/disabled-tools", h.handleListDisabledTools)
+	adminMux.HandleFunc("POST /api/disabled-tools", h.handleCreateDisabledTool)
+	adminMux.HandleFunc("DELETE /api/disabled-tools/{id}", h.handleDeleteDisabledTool)
+
 	// Env var export (API key auth)
 	mux.Handle("GET /api/env-vars/export", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleExportEnvVars)))
 
@@ -326,6 +331,37 @@ func (h *Handlers) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleGetServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
+	// Handle builtin memory servers (virtual — not in the database)
+	if memory.IsMemoryServerID(id) {
+		setID := memory.MemorySetIDFromServerID(id)
+		ms, err := h.store.GetMemorySet(setID)
+		var name string
+		if err == nil && ms != nil {
+			name = ms.Name
+		} else {
+			name = "memory" // default set
+		}
+		srv := &models.Server{
+			ID:        id,
+			Name:      name,
+			Transport: "builtin",
+			Enabled:   true,
+			IsBuiltin: true,
+			Status:    "connected",
+		}
+		toolCount := 0
+		if memSrv := h.proxy.GetMemoryServer(setID); memSrv != nil {
+			toolCount = len(memSrv.Tools())
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"server":      srv,
+			"tools_count": toolCount,
+			"live_error":  "",
+		})
+		return
+	}
+
 	srv, err := h.store.GetServer(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "Server not found")
@@ -1388,4 +1424,55 @@ func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *htt
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// --- Disabled Tools ---
+
+func (h *Handlers) handleListDisabledTools(w http.ResponseWriter, r *http.Request) {
+	compoundID := r.URL.Query().Get("compound_id")
+	var tools []*models.DisabledTool
+	var err error
+	if compoundID != "" {
+		tools, err = h.store.ListDisabledToolsByCompound(compoundID)
+	} else {
+		tools, err = h.store.ListDisabledTools()
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list disabled tools")
+		return
+	}
+	if tools == nil {
+		tools = []*models.DisabledTool{}
+	}
+	writeJSON(w, http.StatusOK, tools)
+}
+
+func (h *Handlers) handleCreateDisabledTool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ToolName   string  `json:"tool_name"`
+		CompoundID *string `json:"compound_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.ToolName == "" {
+		writeError(w, http.StatusBadRequest, "tool_name is required")
+		return
+	}
+	dt, err := h.store.CreateDisabledTool(req.ToolName, req.CompoundID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable tool: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, dt)
+}
+
+func (h *Handlers) handleDeleteDisabledTool(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteDisabledTool(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to enable tool")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

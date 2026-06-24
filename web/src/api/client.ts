@@ -292,6 +292,26 @@ export const registry = {
   },
 };
 
+// --- Disabled Tools ---
+
+export interface DisabledTool {
+  id: string;
+  tool_name: string;
+  server_id?: string | null;
+  created_at: string;
+}
+
+export const disabledTools = {
+  list: (compoundId?: string) => {
+    const qs = compoundId ? `?compound_id=${encodeURIComponent(compoundId)}` : '';
+    return request<DisabledTool[]>(`/disabled-tools${qs}`);
+  },
+  create: (data: { tool_name: string; compound_id?: string }) =>
+    request<DisabledTool>('/disabled-tools', { method: 'POST', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/disabled-tools/${id}`, { method: 'DELETE' }),
+};
+
 // --- Env Variables ---
 
 export interface EnvVar {

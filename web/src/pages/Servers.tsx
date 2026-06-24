@@ -242,14 +242,12 @@ export default function Servers() {
               <span className="uppercase tracking-wide">{srv.transport}</span>
               <Separator orientation="vertical" className="h-3" />
               <span>{srv.tools_count ?? 0} tools</span>
-              {!srv.is_builtin && (
-                <Link
-                  to={`/servers/${srv.id}`}
-                  className="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline"
-                >
-                  Details <ChevronRight className="size-3" />
-                </Link>
-              )}
+              <Link
+                to={`/servers/${srv.id}`}
+                className="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline"
+              >
+                Details <ChevronRight className="size-3" />
+              </Link>
             </CardContent>
             {srv.live_error && (
               <CardContent className="pt-0">

@@ -16,8 +16,9 @@ import {
   Loader2,
   Terminal,
   Eraser,
+  Ban,
 } from 'lucide-react';
-import { servers as serversApi, tools as toolsApi, type DeviceAuthResult } from '../api/client';
+import { servers as serversApi, tools as toolsApi, disabledTools as disabledToolsApi, type DeviceAuthResult } from '../api/client';
 import { cn } from '../lib/utils';
 import { Button } from '@/components/ui/button';
 import {
@@ -76,6 +77,21 @@ export default function ServerDetail() {
   });
 
   const { data: allTools } = useQuery({ queryKey: ['tools'], queryFn: toolsApi.list });
+
+  const { data: disabledToolsList } = useQuery({
+    queryKey: ['disabled-tools'],
+    queryFn: () => disabledToolsApi.list(),
+  });
+
+  const disableMutation = useMutation({
+    mutationFn: (toolName: string) => disabledToolsApi.create({ tool_name: toolName }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['disabled-tools'] }),
+  });
+
+  const enableMutation = useMutation({
+    mutationFn: (id: string) => disabledToolsApi.delete(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['disabled-tools'] }),
+  });
 
   const isHTTP =
     data?.server.transport === 'http' || data?.server.transport === 'streamable-http';

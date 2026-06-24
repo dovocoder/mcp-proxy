@@ -550,8 +550,31 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 	if mcpTools == nil {
 		mcpTools = []mcp.Tool{}
 	}
+
+	// Filter out disabled tools (global + per-compound).
+	mcpTools = m.filterDisabledMCPTools(mcpTools, scope)
+
 	result := mcp.ToolListResult{Tools: mcpTools}
 	return json.Marshal(result)
+}
+
+// filterDisabledMCPTools removes tools that have been disabled either globally
+// or for the compound in the given scope. toolName is the namespaced name
+// (serverName__toolName) as exposed to MCP clients.
+func (m *Manager) filterDisabledMCPTools(tools []mcp.Tool, scope Scope) []mcp.Tool {
+	var compoundIDPtr *string
+	if scope.CompoundID != "" {
+		compoundIDPtr = &scope.CompoundID
+	}
+	filtered := make([]mcp.Tool, 0, len(tools))
+	for _, t := range tools {
+		disabled, err := m.store.IsToolDisabled(t.Name, compoundIDPtr)
+		if err == nil && disabled {
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+	return filtered
 }
 
 func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
@@ -1101,6 +1124,20 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 				}
 			}
 		}
+		// Filter out disabled tools (global + per-compound).
+		var compoundIDPtr *string
+		if scope.CompoundID != "" {
+			compoundIDPtr = &scope.CompoundID
+		}
+		filteredCatalog := make([]map[string]string, 0, len(catalog))
+		for _, entry := range catalog {
+			disabled, err := m.store.IsToolDisabled(entry["name"], compoundIDPtr)
+			if err == nil && disabled {
+				continue
+			}
+			filteredCatalog = append(filteredCatalog, entry)
+		}
+		catalog = filteredCatalog
 		return wrapMCPContent(map[string]interface{}{
 			"tools": catalog,
 			"count": len(catalog),

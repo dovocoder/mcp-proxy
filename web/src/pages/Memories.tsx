@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Search, Brain, Clock, Eye, Pencil, X, Check, FolderPlus, Layers } from 'lucide-react';
+import { Plus, Trash2, Search, Brain, Clock, Eye, Pencil, X, Check, FolderPlus, Layers, Link2, Copy } from 'lucide-react';
 import { memories as memApi, memorySets as setsApi, type Memory, type MemorySet } from '@/api/client';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -30,6 +30,7 @@ export default function Memories() {
   const [editing, setEditing] = useState<Memory | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [newSetOpen, setNewSetOpen] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
 
   const { data: sets } = useQuery({ queryKey: ['memory-sets'], queryFn: setsApi.list });
 
@@ -72,6 +73,20 @@ export default function Memories() {
   const palaceList = palaces ?? [];
   const totalMemories = palaceList.reduce((sum, p) => sum + p.count, 0);
   const currentSet = sets?.find((s) => s.id === selectedSet);
+
+  // Connection URLs for this memory set
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const memServerId = selectedSet === 'default'
+    ? 'builtin-memory'
+    : `builtin-memory:${selectedSet}`;
+  const mcpUrl = `${origin}/api/servers/${memServerId}/mcp`;
+  const sseUrl = `${origin}/api/servers/${memServerId}/sse`;
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedUrl(text);
+    setTimeout(() => setCopiedUrl(null), 2000);
+  };
 
   return (
     <div className="space-y-6">
@@ -135,6 +150,55 @@ export default function Memories() {
           ))}
         </div>
       )}
+
+      {/* Connection URLs for this memory set */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Link2 className="size-4 text-primary shrink-0" />
+            <div>
+              <CardTitle className="text-base">Connection URLs</CardTitle>
+              <CardDescription>
+                Connect MCP clients to this memory set
+                {currentSet && currentSet.name !== 'memory' ? ` (${currentSet.name})` : ''}.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Badge variant="default" className="font-mono shrink-0 text-xs">POST</Badge>
+            <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
+              {mcpUrl}
+            </code>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              onClick={() => copyToClipboard(mcpUrl)}
+              aria-label="Copy MCP URL"
+              className="shrink-0"
+            >
+              {copiedUrl === mcpUrl ? <Check className="size-4" /> : <Copy className="size-4" />}
+            </Button>
+          </div>
+          <Separator />
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="font-mono shrink-0 text-xs bg-emerald-500/15 text-emerald-400">SSE</Badge>
+            <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
+              {sseUrl}
+            </code>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              onClick={() => copyToClipboard(sseUrl)}
+              aria-label="Copy SSE URL"
+              className="shrink-0"
+            >
+              {copiedUrl === sseUrl ? <Check className="size-4" /> : <Copy className="size-4" />}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Search bar */}
       <div className="flex gap-2">
