@@ -818,11 +818,19 @@ func (h *Handlers) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		status = "expired"
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":     status,
 		"has_tokens": hasTokens,
 		"expired":    expired,
-	})
+	}
+
+	// Include OAuth provider info from discovered metadata
+	if meta := h.proxy.GetOAuthMetadata(id); meta != nil {
+		resp["issuer"] = meta.Issuer
+		resp["authorization_endpoint"] = meta.AuthorizationEndpoint
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handlers) handleInitiateDeviceAuth(w http.ResponseWriter, r *http.Request) {

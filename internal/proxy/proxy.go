@@ -62,27 +62,30 @@ func (sl *serverLog) clear() {
 
 // Manager manages all backend MCP server connections.
 type Manager struct {
-	store       *store.Store
-	memorySets  map[string]*memory.Server    // setID -> memory server
-	mu          sync.RWMutex
-	clients     map[string]*mcp.Client         // serverID -> client
-	errors      map[string]string              // serverID -> last error message
-	authStates  map[string]*mcp.AuthState     // state -> pending OAuth flow
-	deviceAuths map[string]*DeviceAuthResult   // serverID -> pending device code flow
-	logMu       sync.RWMutex
-	serverLogs  map[string]*serverLog          // serverID -> stderr log ring buffer
+	store          *store.Store
+	memorySets     map[string]*memory.Server    // setID -> memory server
+	mu             sync.RWMutex
+	clients        map[string]*mcp.Client         // serverID -> client
+	errors         map[string]string              // serverID -> last error message
+	authStates     map[string]*mcp.AuthState     // state -> pending OAuth flow
+	deviceAuths    map[string]*DeviceAuthResult   // serverID -> pending device code flow
+	logMu          sync.RWMutex
+	serverLogs     map[string]*serverLog          // serverID -> stderr log ring buffer
+	oauthMetaCache map[string]*mcp.OAuthServerMetadata // serverID -> cached discovery result
+	oauthMetaMu    sync.RWMutex
 }
 
 // New creates a new proxy Manager.
 func New(s *store.Store) *Manager {
 	m := &Manager{
-		store:       s,
-		memorySets:  make(map[string]*memory.Server),
-		clients:     make(map[string]*mcp.Client),
-		errors:      make(map[string]string),
-		authStates:  make(map[string]*mcp.AuthState),
-		deviceAuths: make(map[string]*DeviceAuthResult),
-		serverLogs:  make(map[string]*serverLog),
+		store:          s,
+		memorySets:     make(map[string]*memory.Server),
+		clients:        make(map[string]*mcp.Client),
+		errors:         make(map[string]string),
+		authStates:     make(map[string]*mcp.AuthState),
+		deviceAuths:    make(map[string]*DeviceAuthResult),
+		serverLogs:     make(map[string]*serverLog),
+		oauthMetaCache: make(map[string]*mcp.OAuthServerMetadata),
 	}
 	m.InitMemorySets()
 	return m
@@ -833,6 +836,35 @@ func (m *Manager) GetAuthStatus(serverID string) (hasTokens bool, expired bool) 
 		return false, false
 	}
 	return true, tokens.IsExpired()
+}
+
+// GetOAuthMetadata returns cached OAuth metadata for a server, discovering it
+// on first access and caching the result.
+func (m *Manager) GetOAuthMetadata(serverID string) *mcp.OAuthServerMetadata {
+	// Check cache first
+	m.oauthMetaMu.RLock()
+	if meta, ok := m.oauthMetaCache[serverID]; ok {
+		m.oauthMetaMu.RUnlock()
+		return meta
+	}
+	m.oauthMetaMu.RUnlock()
+
+	// Discover and cache
+	srv, err := m.store.GetServer(serverID)
+	if err != nil || srv == nil || (srv.Transport != "http" && srv.Transport != "streamable-http") {
+		return nil
+	}
+
+	meta, err := mcp.DiscoverOAuthMetadata(srv.URL)
+	if err != nil || meta == nil {
+		return nil
+	}
+
+	m.oauthMetaMu.Lock()
+	m.oauthMetaCache[serverID] = meta
+	m.oauthMetaMu.Unlock()
+
+	return meta
 }
 
 // DeviceAuthResult holds the result of initiating a device code flow.

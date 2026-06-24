@@ -234,6 +234,21 @@ export default function ServerDetail() {
         ? 'Token expired — re-authenticate'
         : 'Not authenticated';
 
+  const oauthProviderName = (() => {
+    const issuer = authStatus?.issuer;
+    if (!issuer) return 'OAuth';
+    try {
+      const host = new URL(issuer).hostname;
+      if (host === 'github.com') return 'GitHub';
+      if (host === 'login.microsoftonline.com' || host === 'login.windows.net') return 'Microsoft';
+      if (host === 'accounts.google.com') return 'Google';
+      if (host === 'gitlab.com') return 'GitLab';
+      return host;
+    } catch {
+      return 'OAuth';
+    }
+  })();
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -294,13 +309,15 @@ export default function ServerDetail() {
                 ) : (
                   <LogIn className="size-4" />
                 )}
-                {authStatus?.status === 'valid' ? 'Re-authenticate' : 'Sign in with Microsoft'}
+                {authStatus?.status === 'valid' ? 'Re-authenticate' : `Sign in with ${oauthProviderName}`}
               </Button>
             </CardAction>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              No client_id needed — just sign in with your Microsoft account.
+              {authStatus?.issuer
+                ? `Authorization server: ${authStatus.issuer}`
+                : 'Discovering OAuth provider…'}
             </p>
 
             {deviceError && (

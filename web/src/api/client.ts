@@ -128,7 +128,7 @@ export const servers = {
   initiateAuth: (id: string) =>
     request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
   authStatus: (id: string) =>
-    request<{ status: string; has_tokens: boolean; expired: boolean }>(`/servers/${id}/auth-status`),
+    request<{ status: string; has_tokens: boolean; expired: boolean; issuer?: string; authorization_endpoint?: string }>(`/servers/${id}/auth-status`),
   initiateDeviceAuth: (id: string) =>
     request<DeviceAuthResult>(`/servers/${id}/device-auth`, { method: 'POST' }),
   pollDeviceAuth: (id: string) =>
