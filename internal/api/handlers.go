@@ -1323,8 +1323,8 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Redirect to frontend with token
-	// The frontend will read the token from the URL and store it
-	frontendURL := "/?token=" + jwtToken
+	// Use /login route (not protected) so the token is processed before auth check
+	frontendURL := "/login?token=" + jwtToken
 	http.Redirect(w, r, frontendURL, http.StatusFound)
 }
 
