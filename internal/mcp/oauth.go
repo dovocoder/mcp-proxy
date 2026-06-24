@@ -281,16 +281,6 @@ func followAuthServers(prm *ProtectedResourceMetadata) *OAuthServerMetadata {
 		}
 	}
 
-	// If we found authorization servers but no metadata, use Entra ID default endpoints
-	if len(prm.AuthorizationServers) > 0 {
-		authServer := prm.AuthorizationServers[0]
-		return &OAuthServerMetadata{
-			AuthorizationEndpoint: authServer + "/oauth2/v2.0/authorize",
-			TokenEndpoint:          authServer + "/oauth2/v2.0/token",
-			ScopesSupported:        prm.ScopesSupported,
-		}
-	}
-
 	return nil
 }
 
