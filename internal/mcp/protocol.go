@@ -84,6 +84,7 @@ type Client struct {
 	onStderr       func(string) // callback for stderr lines (stdio transport only)
 
 	mu        sync.Mutex
+	sessionMu sync.Mutex // separate mutex for sessionID — avoids deadlock when httpCall is called from Connect (which holds mu)
 	tools     []Tool
 	status    string
 	lastErr   string
@@ -337,6 +338,8 @@ func (c *Client) setHeaders(req *http.Request) {
 
 // setSessionHeader sets the Mcp-Session-Id header if we have one.
 func (c *Client) setSessionHeader(req *http.Request) {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
 	if c.sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", c.sessionID)
 	}
@@ -344,24 +347,30 @@ func (c *Client) setSessionHeader(req *http.Request) {
 
 // closeSession sends a DELETE request to close the MCP session.
 func (c *Client) closeSession() {
-	if c.httpURL == "" || c.sessionID == "" {
+	c.sessionMu.Lock()
+	sessionID := c.sessionID
+	httpURL := c.httpURL
+	c.sessionMu.Unlock()
+	if httpURL == "" || sessionID == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", c.httpURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", httpURL, nil)
 	if err != nil {
 		return
 	}
 	c.setHeaders(req)
-	c.setSessionHeader(req)
+	req.Header.Set("Mcp-Session-Id", sessionID)
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err == nil {
 		resp.Body.Close()
 	}
+	c.sessionMu.Lock()
 	c.sessionID = ""
+	c.sessionMu.Unlock()
 }
 
 // httpCall sends a JSON-RPC request over Streamable HTTP transport.
@@ -425,14 +434,27 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	// Capture session ID from initialize response
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
-		c.mu.Lock()
+		c.sessionMu.Lock()
 		c.sessionID = sid
-		c.mu.Unlock()
+		c.sessionMu.Unlock()
 	}
 
 	contentType := resp.Header.Get("Content-Type")
 
-	// Read body in a goroutine with the context deadline
+	// For SSE streams, use line-by-line reader directly.
+	// io.ReadAll blocks forever because SSE streams never send EOF.
+	if strings.Contains(contentType, "text/event-stream") {
+		log.Printf("[MCP] %s (id=%d) reading SSE stream...", method, reqID)
+		result, err := c.readSSEWithTimeout(resp.Body, reqID, c.timeout)
+		if err != nil {
+			log.Printf("[MCP] ✗ %s (id=%d) SSE read error: %v", method, reqID, err)
+			return nil, err
+		}
+		log.Printf("[MCP] %s (id=%d) SSE response parsed successfully", method, reqID)
+		return result, nil
+	}
+
+	// For non-SSE responses (plain JSON), read full body with context deadline
 	type readResult struct {
 		data []byte
 		err  error
@@ -451,16 +473,6 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 		}
 		rawBody := res.data
 		log.Printf("[MCP] %s (id=%d) body: %d bytes, first 500: %s", method, reqID, len(rawBody), truncateLog(string(rawBody), 500))
-
-		// Try SSE parsing first if content-type is text/event-stream
-		if strings.Contains(contentType, "text/event-stream") {
-			result, err := c.parseSSEBytes(rawBody, reqID)
-			if err == nil {
-				return result, nil
-			}
-			log.Printf("[MCP] SSE parse failed, trying raw JSON: %v", err)
-			// Fall through to JSON parsing
-		}
 
 		// Parse as JSON
 		var rpcResp JSONRPCResponse
