@@ -1834,12 +1834,42 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward the request to the upstream provider
-	client := &http.Client{Timeout: 30 * time.Second}
+	// For token requests, fix the redirect_uri to match the one used in
+	// the authorization request (the proxy's callback URL). The MCP client
+	// sends its own redirect_uri (e.g. http://localhost:PORT/callback),
+	// but PocketID expects the proxy's callback URL that was used during
+	// the authorize step.
 	var bodyReader io.Reader
-	if r.Body != nil {
+	if r.URL.Path == "/api/oauth/token" && r.Method == "POST" {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Failed to read request body")
+			return
+		}
+		r.Body.Close()
+
+		// Parse form data
+		vals, err := url.ParseQuery(string(bodyBytes))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "Failed to parse form data")
+			return
+		}
+
+		// Replace redirect_uri with the proxy's callback URL
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		proxyCallbackURL := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
+		vals.Set("redirect_uri", proxyCallbackURL)
+
+		bodyReader = strings.NewReader(vals.Encode())
+	} else if r.Body != nil {
 		bodyReader = r.Body
 	}
+
+	// Forward the request to the upstream provider
+	client := &http.Client{Timeout: 30 * time.Second}
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bodyReader)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to create upstream request")
@@ -1847,7 +1877,12 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Copy headers
-	for _, h2 := range []string{"Content-Type", "Authorization", "Accept"} {
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/x-www-form-urlencoded"
+	}
+	upstreamReq.Header.Set("Content-Type", contentType)
+	for _, h2 := range []string{"Authorization", "Accept"} {
 		if v := r.Header.Get(h2); v != "" {
 			upstreamReq.Header.Set(h2, v)
 		}
