@@ -54,6 +54,45 @@ func (a *AuthService) JWTSecret() string {
 	return string(a.jwtSecret)
 }
 
+// CreateOAuthState creates a signed JWT encoding the MCP client's redirect_uri
+// and state. This allows the proxy to forward the OAuth callback to the client
+// after the upstream OIDC provider redirects back to the proxy's callback URL.
+func (a *AuthService) CreateOAuthState(clientRedirectURI, clientState string) (string, error) {
+	claims := jwt.MapClaims{
+		"rd":  clientRedirectURI, // client's redirect_uri
+		"st":  clientState,         // client's original state
+		"exp": time.Now().Add(10 * time.Minute).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(a.jwtSecret)
+}
+
+// VerifyOAuthState decodes a proxy-issued state JWT and returns the client's
+// redirect_uri and original state. Returns an error if the state is not a
+// valid proxy-issued JWT (which means it's from the legacy MCP server auth flow).
+func (a *AuthService) VerifyOAuthState(state string) (clientRedirectURI, clientState string, err error) {
+	token, err := jwt.Parse(state, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return a.jwtSecret, nil
+	})
+	if err != nil || !token.Valid {
+		return "", "", fmt.Errorf("invalid state")
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", "", fmt.Errorf("invalid claims")
+	}
+	rd, _ := claims["rd"].(string)
+	st, _ := claims["st"].(string)
+	if rd == "" {
+		return "", "", fmt.Errorf("missing redirect_uri in state")
+	}
+	return rd, st, nil
+}
+
 // HashPassword hashes a password using bcrypt.
 func HashPassword(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)

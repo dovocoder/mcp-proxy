@@ -99,6 +99,10 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Dynamic Client Registration (RFC 7591) — returns pre-registered OIDC credentials
 	mux.HandleFunc("POST /api/oauth/register", h.handleOAuthRegister)
 
+	// OAuth authorize endpoint — proxy forwards to upstream OIDC provider
+	// and stores the client's redirect_uri in a signed state JWT
+	mux.HandleFunc("GET /api/oauth/authorize", h.handleOAuthAuthorize)
+
 	// --- MCP client endpoints (API key auth) ---
 	// Global (all servers)
 	mux.Handle("POST /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyGlobal)))
@@ -806,6 +810,80 @@ func (h *Handlers) handleInitiateAuth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleOAuthAuthorize is the proxy's authorization endpoint.
+// It receives the MCP client's authorization request, stores the client's
+// redirect_uri + state in a signed JWT, then redirects to the upstream OIDC
+// provider (PocketID) with the proxy's own callback URL as redirect_uri.
+// When PocketID redirects back, handleOAuthCallback decodes the JWT and
+// forwards the authorization code to the client's actual redirect_uri.
+func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
+	if !h.auth.HasOIDC() {
+		writeError(w, http.StatusBadRequest, "OAuth not configured")
+		return
+	}
+
+	q := r.URL.Query()
+	clientRedirectURI := q.Get("redirect_uri")
+	clientState := q.Get("state")
+	codeChallenge := q.Get("code_challenge")
+	codeChallengeMethod := q.Get("code_challenge_method")
+	scope := q.Get("scope")
+	resource := q.Get("resource")
+
+	if clientRedirectURI == "" {
+		writeError(w, http.StatusBadRequest, "Missing redirect_uri parameter")
+		return
+	}
+
+	oidc := h.auth.OIDC()
+	discovery := oidc.Discovery()
+	if discovery == nil || discovery.AuthorizationEndpoint == "" {
+		writeError(w, http.StatusInternalServerError, "OIDC provider not discovered")
+		return
+	}
+
+	// Build the proxy's callback URL (the redirect_uri registered with PocketID)
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	proxyCallbackURL := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
+
+	// Create a signed state JWT that encodes the client's redirect_uri + state.
+	// This allows the proxy to forward the callback to the client after PocketID
+	// redirects back to the proxy's callback URL.
+	stateJWT, err := h.auth.CreateOAuthState(clientRedirectURI, clientState)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to create state")
+		return
+	}
+
+	// Redirect to PocketID's authorization endpoint
+	upstreamURL := discovery.AuthorizationEndpoint
+	upstreamParams := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {oidc.ClientID()},
+		"redirect_uri":          {proxyCallbackURL},
+		"state":                 {stateJWT},
+		"scope":                 {scope},
+	}
+	if codeChallenge != "" {
+		upstreamParams.Set("code_challenge", codeChallenge)
+	}
+	if codeChallengeMethod != "" {
+		upstreamParams.Set("code_challenge_method", codeChallengeMethod)
+	}
+	if resource != "" {
+		upstreamParams.Set("resource", resource)
+	}
+
+	http.Redirect(w, r, upstreamURL+"?"+upstreamParams.Encode(), http.StatusFound)
+}
+
+// handleOAuthCallback handles the OAuth callback from the upstream OIDC provider.
+// It decodes the signed state JWT to extract the MCP client's actual redirect_uri,
+// then redirects the browser to the client's redirect_uri with the authorization
+// code and the client's original state parameter.
 func (h *Handlers) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
@@ -815,18 +893,37 @@ func (h *Handlers) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.proxy.HandleAuthCallback(state, code); err != nil {
-		// Return an HTML page so the browser shows a readable result
+	// Try to decode the state as a proxy-issued JWT
+	clientRedirect, clientState, err := h.auth.VerifyOAuthState(state)
+	if err != nil {
+		// Not a proxy-issued state — fall back to the existing MCP server auth flow
+		// (this handles the case where the proxy itself initiates OAuth for an
+		// upstream MCP server like GitHub Copilot)
+		if err := h.proxy.HandleAuthCallback(state, code); err != nil {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, err.Error())
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, err.Error())
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<!DOCTYPE html><html><body><h2>✅ Authentication Successful</h2><p>You can close this window and return to MCP Proxy.</p><script>setTimeout(() => window.close(), 3000);</script></body></html>`))
 		return
 	}
 
-	// Return success HTML page
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`<!DOCTYPE html><html><body><h2>✅ Authentication Successful</h2><p>You can close this window and return to MCP Proxy.</p><script>setTimeout(() => window.close(), 3000);</script></body></html>`))
+	// Proxy-issued state: forward the code + client's original state to the
+	// client's actual redirect_uri
+	targetURL := clientRedirect
+	if clientState != "" {
+		targetURL += "?" + url.Values{
+			"code":  {code},
+			"state": {clientState},
+		}.Encode()
+	} else {
+		targetURL += "?" + url.Values{"code": {code}}.Encode()
+	}
+
+	http.Redirect(w, r, targetURL, http.StatusFound)
 }
 
 func (h *Handlers) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
@@ -1617,9 +1714,18 @@ func (h *Handlers) handleAuthorizationServerMetadata(w http.ResponseWriter, r *h
 		"client_id_metadata_document_supported": true,
 	}
 
+	// Authorization endpoint is the PROXY itself — the proxy forwards to
+	// the upstream OIDC provider and passes the callback through to the
+	// MCP client's actual redirect_uri (stored in a signed state JWT).
+	resp["authorization_endpoint"] = fmt.Sprintf("%s/api/oauth/authorize", proxyURL)
+
 	// Wrap upstream OIDC provider endpoints
+	// NOTE: authorization_endpoint stays as the proxy — the proxy handles
+	// the auth request, stores the client's redirect_uri in a signed state,
+	// then redirects to the upstream OIDC provider. token_endpoint and
+	// jwks_uri point upstream since the client exchanges the code directly.
 	if discovery != nil {
-		resp["authorization_endpoint"] = discovery.AuthorizationEndpoint
+		// Don't override authorization_endpoint — it's the proxy
 		resp["token_endpoint"] = discovery.TokenEndpoint
 		if discovery.JwksURI != "" {
 			resp["jwks_uri"] = discovery.JwksURI
@@ -1657,26 +1763,20 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse the request body to extract the client's requested redirect_uris.
-	// Per RFC 7591, the DCR response should echo back the requested redirect_uris.
-	var dcrReq struct {
-		RedirectURIs []string `json:"redirect_uris"`
+	// The redirect_uri is always the PROXY's callback URL.
+	// The proxy receives the callback from the upstream OIDC provider and
+	// forwards the authorization code to the client's actual redirect_uri
+	// (which is stored in a signed state JWT during the authorize step).
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
 	}
-	var redirectURIs []string
-	if err := json.NewDecoder(r.Body).Decode(&dcrReq); err == nil && len(dcrReq.RedirectURIs) > 0 {
-		redirectURIs = dcrReq.RedirectURIs
-	} else {
-		// Fallback to the proxy's callback URL if the client didn't send any
-		scheme := "http"
-		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-			scheme = "https"
-		}
-		redirectURIs = []string{fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)}
-	}
+	proxyCallbackURL := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
 
 	resp := map[string]interface{}{
 		"client_id":                   clientID,
 		"client_id_issued_at":         time.Now().Unix(),
-		"redirect_uris":               redirectURIs,
+		"redirect_uris":               []string{proxyCallbackURL},
 		"grant_types":                 []string{"authorization_code", "refresh_token"},
 		"response_types":              []string{"code"},
 		"token_endpoint_auth_method":  "none",
