@@ -1,18 +1,36 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { auth, setToken } from '../api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
 
 export default function Login() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [oidcEnabled, setOidcEnabled] = useState(false);
+
+  // Check for OIDC token in URL (from OIDC callback redirect)
+  useEffect(() => {
+    const token = searchParams.get('token');
+    if (token) {
+      setToken(token);
+      // Clean the URL
+      navigate('/', { replace: true });
+      return;
+    }
+    // Check if OIDC is enabled
+    auth.oidcStatus()
+      .then((res) => setOidcEnabled(res.enabled))
+      .catch(() => {});
+  }, [searchParams, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,6 +47,10 @@ export default function Login() {
     }
   };
 
+  const handleOIDC = () => {
+    window.location.href = '/api/auth/oidc/login';
+  };
+
   return (
     <div className="min-h-screen bg-background flex items-center justify-center px-4 py-8">
       <div className="w-full max-w-md">
@@ -40,9 +62,33 @@ export default function Login() {
         <Card>
           <CardHeader>
             <CardTitle>Sign in</CardTitle>
-            <CardDescription>Enter your credentials to access the console</CardDescription>
+            <CardDescription>
+              {oidcEnabled
+                ? 'Sign in with your OIDC provider or local credentials'
+                : 'Enter your credentials to access the console'}
+            </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
+            {/* OIDC login button */}
+            {oidcEnabled && (
+              <>
+                <Button
+                  variant="default"
+                  className="w-full"
+                  onClick={handleOIDC}
+                  disabled={loading}
+                >
+                  Continue with SSO
+                </Button>
+                <div className="flex items-center gap-3">
+                  <Separator className="flex-1" />
+                  <span className="text-xs text-muted-foreground">or</span>
+                  <Separator className="flex-1" />
+                </div>
+              </>
+            )}
+
+            {/* Password login form */}
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="username">Username</Label>
@@ -78,16 +124,18 @@ export default function Login() {
                 </div>
               )}
 
-              <Button type="submit" disabled={loading} className="w-full">
+              <Button type="submit" disabled={loading} variant={oidcEnabled ? "outline" : "default"} className="w-full">
                 {loading ? 'Signing in...' : 'Sign In'}
               </Button>
             </form>
           </CardContent>
         </Card>
 
-        <p className="text-center text-xs text-muted-foreground mt-5 sm:mt-6 px-4">
-          Default credentials: admin / admin (set MCP_PROXY_ADMIN_PASS to change)
-        </p>
+        {!oidcEnabled && (
+          <p className="text-center text-xs text-muted-foreground mt-5 sm:mt-6 px-4">
+            Default credentials: admin / admin (set MCP_PROXY_ADMIN_PASS to change)
+          </p>
+        )}
       </div>
     </div>
   );

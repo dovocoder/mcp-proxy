@@ -63,6 +63,11 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// OAuth callback (no auth — browser redirect)
 	mux.HandleFunc("GET /api/oauth/callback", h.handleOAuthCallback)
 
+	// OIDC routes (no auth — browser redirect flow)
+	mux.HandleFunc("GET /api/auth/oidc/status", h.handleOIDCStatus)
+	mux.HandleFunc("GET /api/auth/oidc/login", h.handleOIDCLogin)
+	mux.HandleFunc("GET /api/auth/oidc/callback", h.handleOIDCCallback)
+
 	// --- MCP client endpoints (API key auth) ---
 	// Global (all servers)
 	mux.Handle("POST /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyGlobal)))
@@ -1166,4 +1171,111 @@ func (h *Handlers) handleExportEnvVars(w http.ResponseWriter, r *http.Request) {
 		Encrypted:   encrypted,
 		Nonce:       nonceHint,
 	})
+}
+
+// --- OIDC ---
+
+// handleOIDCStatus returns whether OIDC is configured.
+func (h *Handlers) handleOIDCStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"enabled": h.auth.HasOIDC(),
+	})
+}
+
+// handleOIDCLogin redirects to the OIDC provider's authorization endpoint.
+func (h *Handlers) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
+	if !h.auth.HasOIDC() {
+		writeError(w, http.StatusBadRequest, "OIDC not configured")
+		return
+	}
+	provider := h.auth.OIDC()
+	state := auth.GenerateState()
+	redirectURL := provider.RedirectURL(r)
+
+	// Store state in a short-lived cookie for CSRF protection
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_state",
+		Value:    state,
+		Path:     "/",
+		MaxAge:   300, // 5 minutes
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+	})
+
+	authURL := provider.AuthURL(state, redirectURL)
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// handleOIDCCallback handles the OIDC callback, exchanges code for token,
+// provisions the user, and redirects to the frontend with a JWT.
+func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
+	if !h.auth.HasOIDC() {
+		writeError(w, http.StatusBadRequest, "OIDC not configured")
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	if code == "" || state == "" {
+		writeError(w, http.StatusBadRequest, "Missing code or state")
+		return
+	}
+
+	// Verify state from cookie
+	cookie, err := r.Cookie("oidc_state")
+	if err != nil || cookie.Value != state {
+		writeError(w, http.StatusBadRequest, "Invalid or expired state")
+		return
+	}
+	// Clear the cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:   "oidc_state",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+
+	provider := h.auth.OIDC()
+	redirectURL := provider.RedirectURL(r)
+
+	// Exchange code for tokens
+	token, err := provider.Exchange(code, redirectURL)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Token exchange failed: %v", err))
+		return
+	}
+
+	// Fetch user info
+	userInfo, err := provider.UserInfo(token.AccessToken)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Failed to get user info: %v", err))
+		return
+	}
+
+	// Extract normalized user
+	pu := auth.ExtractUser(userInfo)
+	if pu.Subject == "" {
+		writeError(w, http.StatusUnauthorized, "No subject in OIDC response")
+		return
+	}
+
+	// Find or provision user
+	user, err := h.auth.LoginOrProvisionUser(pu)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to provision user: %v", err))
+		return
+	}
+
+	// Generate JWT
+	jwtToken, _, err := h.auth.GenerateToken(user.ID, user.Username, user.Role)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to generate token")
+		return
+	}
+
+	// Redirect to frontend with token
+	// The frontend will read the token from the URL and store it
+	frontendURL := "/?token=" + jwtToken
+	http.Redirect(w, r, frontendURL, http.StatusFound)
 }

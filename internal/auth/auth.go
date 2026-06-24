@@ -18,10 +18,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// AuthService handles authentication (JWT + API keys).
+// AuthService handles authentication (JWT + API keys + optional OIDC).
 type AuthService struct {
 	store     *store.Store
 	jwtSecret []byte
+	oidc      *OIDCProvider
 }
 
 // New creates a new AuthService.
@@ -30,6 +31,21 @@ func New(s *store.Store, jwtSecret string) *AuthService {
 		store:     s,
 		jwtSecret: []byte(jwtSecret),
 	}
+}
+
+// SetOIDCProvider configures OIDC after construction.
+func (a *AuthService) SetOIDCProvider(p *OIDCProvider) {
+	a.oidc = p
+}
+
+// HasOIDC returns true if OIDC is configured.
+func (a *AuthService) HasOIDC() bool {
+	return a.oidc != nil
+}
+
+// OIDC returns the OIDC provider (nil if not configured).
+func (a *AuthService) OIDC() *OIDCProvider {
+	return a.oidc
 }
 
 // JWTSecret returns the JWT secret as a string.

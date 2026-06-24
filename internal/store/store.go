@@ -9,6 +9,7 @@ import (
 
 	"github.com/agentic/mcp-proxy/internal/mcp"
 	"github.com/agentic/mcp-proxy/internal/models"
+	"github.com/google/uuid"
 
 	_ "modernc.org/sqlite"
 )
@@ -77,6 +78,7 @@ func migrate(db *sql.DB) error {
 		username TEXT NOT NULL UNIQUE,
 		password_hash TEXT NOT NULL,
 		role TEXT NOT NULL DEFAULT 'admin',
+		oidc_subject TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -165,6 +167,12 @@ func migrate(db *sql.DB) error {
 
 	// Migration: add set_id column to memories
 	_, err = db.Exec(`ALTER TABLE memories ADD COLUMN set_id TEXT DEFAULT 'default'`)
+	if err != nil {
+		// Column already exists
+	}
+
+	// Migration: add oidc_subject column to users
+	_, err = db.Exec(`ALTER TABLE users ADD COLUMN oidc_subject TEXT NOT NULL DEFAULT ''`)
 	if err != nil {
 		// Column already exists
 	}
@@ -353,6 +361,42 @@ func (s *Store) GetUserByUsername(username string) (*models.User, error) {
 	}
 	user.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 	return &user, nil
+}
+
+// GetUserByOIDCSubject retrieves a user by their OIDC subject identifier.
+func (s *Store) GetUserByOIDCSubject(subject string) (*models.User, error) {
+	row := s.db.QueryRow(`SELECT id, username, password_hash, role, created_at FROM users WHERE oidc_subject = ?`, subject)
+	var user models.User
+	var createdAt string
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+	user.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return &user, nil
+}
+
+// CreateUserFromOIDC creates a new user provisioned from an OIDC login.
+func (s *Store) CreateUserFromOIDC(username, oidcSubject string) (*models.User, error) {
+	user := &models.User{
+		ID:           uuid.NewString(),
+		Username:     username,
+		PasswordHash: "", // no password — OIDC only
+		Role:         "admin",
+		CreatedAt:    time.Now(),
+	}
+	_, err := s.db.Exec(`INSERT INTO users (id, username, password_hash, role, oidc_subject, created_at) VALUES (?, ?, '', ?, ?, ?)`,
+		user.ID, user.Username, user.Role, oidcSubject, user.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// LinkOIDCSubject links an OIDC subject to an existing user.
+func (s *Store) LinkOIDCSubject(userID, oidcSubject string) error {
+	_, err := s.db.Exec(`UPDATE users SET oidc_subject = ? WHERE id = ?`, oidcSubject, userID)
+	return err
 }
 
 // --- OAuth Tokens ---

@@ -42,6 +42,7 @@ export const auth = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
+  oidcStatus: () => request<{ enabled: boolean }>('/auth/oidc/status'),
 };
 
 // --- Servers ---

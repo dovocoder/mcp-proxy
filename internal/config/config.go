@@ -15,6 +15,11 @@ type Config struct {
 	AdminPassword  string
 	WebDistPath    string
 	AllowedOrigins []string
+	// OIDC (e.g. PocketID)
+	OIDCIssuer       string
+	OIDCClientID     string
+	OIDCClientSecret  string
+	OIDCRedirectURL   string // optional override; auto-detected from request if empty
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -27,6 +32,11 @@ func Load() (*Config, error) {
 		AdminPassword:  envOrDefault("MCP_PROXY_ADMIN_PASS", ""),
 		WebDistPath:    envOrDefault("MCP_PROXY_WEB_DIST", "web/dist"),
 		AllowedOrigins: []string{"http://localhost:5173", "http://localhost:8080"},
+		// OIDC
+		OIDCIssuer:      envOrDefault("OIDC_ISSUER", ""),
+		OIDCClientID:    envOrDefault("OIDC_CLIENT_ID", ""),
+		OIDCClientSecret: envOrDefault("OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURL:  envOrDefault("OIDC_REDIRECT_URL", ""),
 	}
 
 	if cfg.JWTSecret == "" {
@@ -48,6 +58,11 @@ func (c *Config) ListenAddr() string {
 // IsProduction returns true if running in production mode.
 func (c *Config) IsProduction() bool {
 	return os.Getenv("MCP_PROXY_ENV") == "production"
+}
+
+// OIDCEnabled returns true if OIDC is configured.
+func (c *Config) OIDCEnabled() bool {
+	return c.OIDCIssuer != "" && c.OIDCClientID != ""
 }
 
 func envOrDefault(key, defaultVal string) string {

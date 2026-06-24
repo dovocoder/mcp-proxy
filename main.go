@@ -39,9 +39,25 @@ func main() {
 	// Initialize auth
 	authSvc := auth.New(dbStore, cfg.JWTSecret)
 
-	// Ensure default admin user exists
+	// Ensure default admin user exists (for password login fallback)
 	if err := authSvc.EnsureDefaultAdmin(cfg.AdminUsername, cfg.AdminPassword); err != nil {
 		log.Printf("Warning: failed to ensure default admin: %v", err)
+	}
+
+	// Initialize OIDC if configured
+	if cfg.OIDCEnabled() {
+		provider, err := auth.NewOIDCProvider(auth.OIDCConfig{
+			Issuer:       cfg.OIDCIssuer,
+			ClientID:     cfg.OIDCClientID,
+			ClientSecret: cfg.OIDCClientSecret,
+			RedirectURL:  cfg.OIDCRedirectURL,
+		})
+		if err != nil {
+			log.Printf("Warning: OIDC initialization failed: %v (password login still available)", err)
+		} else {
+			authSvc.SetOIDCProvider(provider)
+			log.Printf("OIDC enabled: issuer=%s client_id=%s", cfg.OIDCIssuer, cfg.OIDCClientID)
+		}
 	}
 
 	// Initialize proxy manager
