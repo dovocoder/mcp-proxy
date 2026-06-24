@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -370,7 +371,10 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 	}
 	body, _ := json.Marshal(req)
 
-	httpReq, err := http.NewRequest("POST", c.httpURL, strings.NewReader(string(body)))
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.httpURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +383,13 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	log.Printf("[MCP] → %s (id=%d, url=%s, auth=%v)", method, reqID, c.httpURL, c.authToken != "")
 
-	client := &http.Client{Timeout: c.timeout}
+	// Don't use client.Timeout — it would timeout the body read too.
+	// Use context timeout instead so we can read SSE streams.
+	transport := &http.Transport{
+		ResponseHeaderTimeout: c.connectTimeout,
+		IdleConnTimeout:      30 * time.Second,
+	}
+	client := &http.Client{Transport: transport}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		log.Printf("[MCP] ✗ %s (id=%d) network error: %v", method, reqID, err)
@@ -391,7 +401,6 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	// Handle non-200 responses
 	if resp.StatusCode == http.StatusNotFound {
-		// Session expired — reset and return error
 		c.mu.Lock()
 		c.sessionID = ""
 		c.mu.Unlock()
@@ -417,33 +426,52 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	contentType := resp.Header.Get("Content-Type")
 
-	// Handle SSE streaming response
-	if strings.Contains(contentType, "text/event-stream") {
-		result, err := c.readSSEWithTimeout(resp.Body, reqID, 15*time.Second)
-		if err != nil {
-			log.Printf("[MCP] ✗ %s (id=%d) SSE error: %v", method, reqID, err)
+	// Read body in a goroutine with the context deadline
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(resp.Body)
+		ch <- readResult{data, err}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			log.Printf("[MCP] ✗ %s (id=%d) read error: %v", method, reqID, res.err)
+			return nil, fmt.Errorf("failed to read response: %w", res.err)
 		}
-		return result, err
-	}
+		rawBody := res.data
+		log.Printf("[MCP] %s (id=%d) body: %d bytes, first 500: %s", method, reqID, len(rawBody), truncateLog(string(rawBody), 500))
 
-	// Handle simple JSON response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+		// Try SSE parsing first if content-type is text/event-stream
+		if strings.Contains(contentType, "text/event-stream") {
+			result, err := c.parseSSEBytes(rawBody, reqID)
+			if err == nil {
+				return result, nil
+			}
+			log.Printf("[MCP] SSE parse failed, trying raw JSON: %v", err)
+			// Fall through to JSON parsing
+		}
 
-	log.Printf("[MCP] %s (id=%d) body: %d bytes, first 200: %s", method, reqID, len(respBody), truncateLog(string(respBody), 200))
+		// Parse as JSON
+		var rpcResp JSONRPCResponse
+		if err := json.Unmarshal(rawBody, &rpcResp); err != nil {
+			log.Printf("[MCP] ✗ %s (id=%d) JSON parse error: %v (body len=%d)", method, reqID, err, len(rawBody))
+			return nil, fmt.Errorf("failed to parse response: %w", err)
+		}
+		if rpcResp.Error != nil {
+			log.Printf("[MCP] ✗ %s (id=%d) RPC error %d: %s", method, reqID, rpcResp.Error.Code, rpcResp.Error.Message)
+			return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		}
+		return rpcResp.Result, nil
 
-	var rpcResp JSONRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		log.Printf("[MCP] ✗ %s (id=%d) JSON parse error: %v (body len=%d)", method, reqID, err, len(respBody))
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+	case <-ctx.Done():
+		log.Printf("[MCP] ✗ %s (id=%d) context timeout after %v", method, reqID, c.timeout)
+		return nil, fmt.Errorf("timeout reading response body after %v", c.timeout)
 	}
-	if rpcResp.Error != nil {
-		log.Printf("[MCP] ✗ %s (id=%d) RPC error %d: %s", method, reqID, rpcResp.Error.Code, rpcResp.Error.Message)
-		return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
-	return rpcResp.Result, nil
 }
 
 // readSSEWithTimeout reads an SSE stream line-by-line with a per-line timeout.
@@ -578,6 +606,77 @@ func (c *Client) readSSEWithTimeout(body io.Reader, reqID uint64, timeout time.D
 // matching the given request ID.
 func (c *Client) parseSSEResponse(body io.Reader, reqID uint64) (json.RawMessage, error) {
 	return c.readSSEWithTimeout(body, reqID, c.timeout)
+}
+
+// parseSSEBytes parses SSE event data from a byte slice.
+func (c *Client) parseSSEBytes(data []byte, reqID uint64) (json.RawMessage, error) {
+	lines := strings.Split(string(data), "\n")
+
+	var dataLines []string
+
+	tryMatch := func(d string) (json.RawMessage, bool, error) {
+		var rpcResp JSONRPCResponse
+		if err := json.Unmarshal([]byte(d), &rpcResp); err != nil {
+			return nil, false, nil
+		}
+		matched := false
+		switch id := rpcResp.ID.(type) {
+		case float64:
+			matched = uint64(id) == reqID
+		case string:
+			var parsed uint64
+			if _, err := fmt.Sscanf(id, "%d", &parsed); err == nil {
+				matched = parsed == reqID
+			}
+		case json.Number:
+			if parsed, err := id.Int64(); err == nil {
+				matched = uint64(parsed) == reqID
+			}
+		}
+		if !matched {
+			return nil, false, nil
+		}
+		if rpcResp.Error != nil {
+			return nil, true, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		}
+		return rpcResp.Result, true, nil
+	}
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			if len(dataLines) > 0 {
+				d := strings.Join(dataLines, "\n")
+				dataLines = nil
+				if result, found, err := tryMatch(d); found {
+					return result, err
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			d := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			dataLines = append(dataLines, d)
+			combined := strings.Join(dataLines, "\n")
+			if result, found, err := tryMatch(combined); found {
+				return result, err
+			}
+		}
+	}
+
+	if len(dataLines) > 0 {
+		d := strings.Join(dataLines, "\n")
+		if result, found, err := tryMatch(d); found {
+			return result, err
+		}
+	}
+
+	// Last resort: try parsing the entire body as JSON
+	if result, found, err := tryMatch(string(data)); found {
+		return result, err
+	}
+
+	return nil, fmt.Errorf("no matching response found in SSE data")
 }
 
 func truncateLog(s string, max int) string {
