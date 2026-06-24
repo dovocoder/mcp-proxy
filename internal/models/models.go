@@ -235,13 +235,15 @@ type UpdateMemoryRequest struct {
 
 // EnvVar represents an environment variable stored per project/environment.
 type EnvVar struct {
-	ID          string    `json:"id"`
-	Project     string    `json:"project"`
-	Environment string    `json:"environment"` // e.g. "dev", "staging", "prod"
-	Key         string    `json:"key"`
-	Value       string    `json:"value"` // plaintext (only in API responses)
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	Project       string    `json:"project"`
+	Environment   string    `json:"environment"` // e.g. "dev", "staging", "prod"
+	Key           string    `json:"key"`
+	Value         string    `json:"value"`             // plaintext (only in API responses)
+	ResolvedValue string    `json:"resolved_value,omitempty"` // value with ${KEY} refs resolved
+	IsReference   bool      `json:"is_reference"`       // true if value contains ${...} patterns
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // CreateEnvVarRequest creates a new env var.

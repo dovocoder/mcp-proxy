@@ -263,6 +263,8 @@ export interface EnvVar {
   environment: string;
   key: string;
   value: string;
+  resolved_value?: string;
+  is_reference: boolean;
   created_at: string;
   updated_at: string;
 }

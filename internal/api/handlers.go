@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -980,6 +981,29 @@ func (h *Handlers) handleDeleteMemorySet(w http.ResponseWriter, r *http.Request)
 
 // --- Env Vars (admin) ---
 
+// envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
+var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+
+// resolveEnvVarReferences resolves ${KEY} and ${KEY:-default} references in env var values.
+// Keys are resolved within the same project/environment scope. Unknown keys are left
+// as-is (or replaced with the default if specified).
+func resolveEnvVarReferences(envMap map[string]string) {
+	for key, val := range envMap {
+		envMap[key] = envVarRefPattern.ReplaceAllStringFunc(val, func(match string) string {
+			sub := envVarRefPattern.FindStringSubmatch(match)
+			refKey := sub[1]
+			defaultVal := sub[2]
+			if resolved, ok := envMap[refKey]; ok {
+				return resolved
+			}
+			if defaultVal != "" || strings.Contains(match, ":-") {
+				return defaultVal
+			}
+			return match
+		})
+	}
+}
+
 func (h *Handlers) handleListEnvVars(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	environment := r.URL.Query().Get("environment")
@@ -990,14 +1014,28 @@ func (h *Handlers) handleListEnvVars(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decrypt values for admin response
+	// Decrypt values for admin response and build reference map
+	envMap := make(map[string]string)
 	for _, ev := range envVars {
 		decrypted, err := crypto.Decrypt(h.masterKey, ev.Value)
 		if err != nil {
-			// If decryption fails, return the raw value (shouldn't happen normally)
 			continue
 		}
 		ev.Value = decrypted
+		envMap[ev.Key] = decrypted
+		ev.IsReference = envVarRefPattern.MatchString(decrypted)
+	}
+
+	// Resolve ${KEY} references for display
+	resolvedMap := make(map[string]string, len(envMap))
+	for k, v := range envMap {
+		resolvedMap[k] = v
+	}
+	resolveEnvVarReferences(resolvedMap)
+	for _, ev := range envVars {
+		if resolved, ok := resolvedMap[ev.Key]; ok && resolved != ev.Value {
+			ev.ResolvedValue = resolved
+		}
 	}
 
 	if envVars == nil {
@@ -1140,6 +1178,9 @@ func (h *Handlers) handleExportEnvVars(w http.ResponseWriter, r *http.Request) {
 		}
 		envMap[ev.Key] = decrypted
 	}
+
+	// Resolve ${KEY} references before exporting
+	resolveEnvVarReferences(envMap)
 
 	jsonData, err := json.Marshal(envMap)
 	if err != nil {
