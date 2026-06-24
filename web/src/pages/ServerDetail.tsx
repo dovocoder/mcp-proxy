@@ -156,8 +156,9 @@ export default function ServerDetail() {
   const srv = data.server;
   const serverTools = allTools?.filter((t) => t.server_id === id) || [];
 
-  const mcpUrl = `/api/servers/${id}/mcp`;
-  const sseUrl = `/api/servers/${id}/sse`;
+  const origin = window.location.origin;
+  const mcpUrl = `${origin}/api/servers/${id}/mcp`;
+  const sseUrl = `${origin}/api/servers/${id}/sse`;
 
   const renderCopyField = (label: string, method: string, url: string) => (
     <div className="grid gap-1.5">

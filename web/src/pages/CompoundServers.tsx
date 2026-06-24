@@ -108,8 +108,9 @@ export default function CompoundServers() {
     const memberIds = new Set(detail.members.map((m) => m.id));
     const availableServers = allServers?.filter((s) => !memberIds.has(s.id)) || [];
 
-    const mcpUrl = `/api/compounds/${selectedId}/mcp`;
-    const sseUrl = `/api/compounds/${selectedId}/sse`;
+    const origin = window.location.origin;
+    const mcpUrl = `${origin}/api/compounds/${selectedId}/mcp`;
+    const sseUrl = `${origin}/api/compounds/${selectedId}/sse`;
 
     return (
       <div className="space-y-6">
