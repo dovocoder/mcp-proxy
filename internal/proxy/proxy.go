@@ -432,19 +432,21 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 		// Check if compound has dictionary mode enabled
 		compound, err := m.store.GetCompound(scope.CompoundID)
 		if err == nil && compound != nil && compound.DictionaryMode {
-			// Dictionary mode: return the dictionary tool + memory tools (always available)
+			// Dictionary mode: return the dictionary tool + memory tools (if memory is a member)
 			tools := []mcp.Tool{{
 				Name:        "dictionary",
 				Description: dictionaryDescription,
 				InputSchema: dictionarySchema,
 			}}
-			for _, mt := range m.memory.Tools() {
-				tools = append(tools, mcp.Tool{
-					Name:        memory.NamespacedName(mt.Name),
-					Description: fmt.Sprintf("[memory] %s", mt.Description),
-				})
-				if len(mt.InputSchema) > 0 {
-					tools[len(tools)-1].InputSchema = mt.InputSchema
+			if m.isMemoryCompoundMember(scope.CompoundID) {
+				for _, mt := range m.memory.Tools() {
+					tools = append(tools, mcp.Tool{
+						Name:        memory.NamespacedName(mt.Name),
+						Description: fmt.Sprintf("[memory] %s", mt.Description),
+					})
+					if len(mt.InputSchema) > 0 {
+						tools[len(tools)-1].InputSchema = mt.InputSchema
+					}
 				}
 			}
 			result := mcp.ToolListResult{Tools: tools}
@@ -469,16 +471,24 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 		mcpTools = append(mcpTools, tool)
 	}
 
-	// Add built-in memory tools (always available, not scoped)
-	for _, mt := range m.memory.Tools() {
-		tool := mcp.Tool{
-			Name:        memory.NamespacedName(mt.Name),
-			Description: fmt.Sprintf("[memory] %s", mt.Description),
+	// Add built-in memory tools
+	// For global and server scope: always available
+	// For compound scope: only if the memory server is a compound member
+	addMemory := true
+	if scope.CompoundID != "" {
+		addMemory = m.isMemoryCompoundMember(scope.CompoundID)
+	}
+	if addMemory {
+		for _, mt := range m.memory.Tools() {
+			tool := mcp.Tool{
+				Name:        memory.NamespacedName(mt.Name),
+				Description: fmt.Sprintf("[memory] %s", mt.Description),
+			}
+			if len(mt.InputSchema) > 0 {
+				tool.InputSchema = mt.InputSchema
+			}
+			mcpTools = append(mcpTools, tool)
 		}
-		if len(mt.InputSchema) > 0 {
-			tool.InputSchema = mt.InputSchema
-		}
-		mcpTools = append(mcpTools, tool)
 	}
 
 	if mcpTools == nil {
@@ -498,7 +508,11 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 	}
 
 	// Check if this is a built-in memory tool
+	// For compound scope, memory tools only work if memory is a compound member
 	if baseName, ok := memory.ParseNamespaced(params.Name); ok {
+		if scope.CompoundID != "" && !m.isMemoryCompoundMember(scope.CompoundID) {
+			return nil, fmt.Errorf("memory tools are not available in this compound — add the memory server as a member")
+		}
 		return m.memory.HandleToolCall(baseName, params.Arguments)
 	}
 
@@ -889,6 +903,21 @@ func (m *Manager) ClearServerLogs(serverID string) {
 
 // --- Compound Dictionary Mode ---
 
+// isMemoryCompoundMember returns true if the built-in memory server is a member
+// of the specified compound.
+func (m *Manager) isMemoryCompoundMember(compoundID string) bool {
+	memberIDs, err := m.store.GetCompoundMemberIDs(compoundID)
+	if err != nil {
+		return false
+	}
+	for _, mid := range memberIDs {
+		if mid == models.BuiltinMemoryServerID {
+			return true
+		}
+	}
+	return false
+}
+
 const dictionaryDescription = `Dictionary tool for compound servers. Instead of receiving all tools upfront, use this tool to discover, inspect, and call tools from member servers lazily.
 
 Actions (pass as "action" parameter):
@@ -958,13 +987,15 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 				"description": t.Description,
 			})
 		}
-		// Include memory tools in the catalog
-		for _, mt := range m.memory.Tools() {
-			catalog = append(catalog, map[string]string{
-				"name":        memory.NamespacedName(mt.Name),
-				"server":      "memory",
-				"description": mt.Description,
-			})
+		// Include memory tools only if memory is a compound member
+		if m.isMemoryCompoundMember(scope.CompoundID) {
+			for _, mt := range m.memory.Tools() {
+				catalog = append(catalog, map[string]string{
+					"name":        memory.NamespacedName(mt.Name),
+					"server":      "memory",
+					"description": mt.Description,
+				})
+			}
 		}
 		return wrapMCPContent(map[string]interface{}{
 			"tools": catalog,
@@ -975,16 +1006,18 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		if params.Tool == "" {
 			return nil, fmt.Errorf("tool parameter is required for describe action")
 		}
-		// Check memory tools first
-		if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
-			for _, mt := range m.memory.Tools() {
-				if mt.Name == baseName {
-					return wrapMCPContent(map[string]interface{}{
-						"name":         params.Tool,
-						"server":      "memory",
-						"description": mt.Description,
-						"inputSchema": mt.InputSchema,
-					})
+		// Check memory tools first (only if memory is a compound member)
+		if m.isMemoryCompoundMember(scope.CompoundID) {
+			if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
+				for _, mt := range m.memory.Tools() {
+					if mt.Name == baseName {
+						return wrapMCPContent(map[string]interface{}{
+							"name":         params.Tool,
+							"server":      "memory",
+							"description": mt.Description,
+							"inputSchema": mt.InputSchema,
+						})
+					}
 				}
 			}
 		}
@@ -1006,9 +1039,11 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		if params.Tool == "" {
 			return nil, fmt.Errorf("tool parameter is required for call action")
 		}
-		// Check if it's a memory tool — route to memory handler directly
-		if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
-			return m.memory.HandleToolCall(baseName, params.Arguments)
+		// Check if it's a memory tool — route to memory handler (only if member)
+		if m.isMemoryCompoundMember(scope.CompoundID) {
+			if baseName, ok := memory.ParseNamespaced(params.Tool); ok {
+				return m.memory.HandleToolCall(baseName, params.Arguments)
+			}
 		}
 		// Route to the backend server — reuse the normal tool call path
 		serverName, toolName, err := parseNamespacedTool(params.Tool)
@@ -1060,16 +1095,18 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 				})
 			}
 		}
-		// Search memory tools too
-		for _, mt := range m.memory.Tools() {
-			name := memory.NamespacedName(mt.Name)
-			if strings.Contains(strings.ToLower(name), query) ||
-				strings.Contains(strings.ToLower(mt.Description), query) {
-				results = append(results, map[string]string{
-					"name":        name,
-					"server":      "memory",
-					"description": mt.Description,
-				})
+		// Search memory tools too (only if memory is a compound member)
+		if m.isMemoryCompoundMember(scope.CompoundID) {
+			for _, mt := range m.memory.Tools() {
+				name := memory.NamespacedName(mt.Name)
+				if strings.Contains(strings.ToLower(name), query) ||
+					strings.Contains(strings.ToLower(mt.Description), query) {
+					results = append(results, map[string]string{
+						"name":        name,
+						"server":      "memory",
+						"description": mt.Description,
+					})
+				}
 			}
 		}
 		return wrapMCPContent(map[string]interface{}{

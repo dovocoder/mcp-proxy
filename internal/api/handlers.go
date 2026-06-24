@@ -203,6 +203,15 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var result []serverWithStatus
+
+	// Prepend the built-in memory server
+	builtin := models.BuiltinMemoryServer()
+	memTools := h.proxy.Memory().Tools()
+	result = append(result, serverWithStatus{
+		Server:     &builtin,
+		ToolsCount: len(memTools),
+	})
+
 	for _, srv := range servers {
 		status, toolCount, lastErr := h.proxy.GetServerStatus(srv.ID)
 		srv.Status = status
@@ -499,6 +508,12 @@ func (h *Handlers) handleGetCompound(w http.ResponseWriter, r *http.Request) {
 	memberIDs, _ := h.store.GetCompoundMemberIDs(id)
 	var members []models.Server
 	for _, mid := range memberIDs {
+		if mid == models.BuiltinMemoryServerID {
+			// Virtual builtin server — not in the database
+			builtin := models.BuiltinMemoryServer()
+			members = append(members, builtin)
+			continue
+		}
 		srv, err := h.store.GetServer(mid)
 		if err != nil {
 			continue
@@ -550,14 +565,17 @@ func (h *Handlers) handleAddCompoundMember(w http.ResponseWriter, r *http.Reques
 	compoundID := r.PathValue("id")
 	serverID := r.PathValue("serverId")
 
-	// Verify both exist
+	// Verify compound exists
 	if _, err := h.store.GetCompound(compoundID); err != nil {
 		writeError(w, http.StatusNotFound, "Compound server not found")
 		return
 	}
-	if _, err := h.store.GetServer(serverID); err != nil {
-		writeError(w, http.StatusNotFound, "Server not found")
-		return
+	// Allow builtin servers without DB lookup
+	if serverID != models.BuiltinMemoryServerID {
+		if _, err := h.store.GetServer(serverID); err != nil {
+			writeError(w, http.StatusNotFound, "Server not found")
+			return
+		}
 	}
 
 	if err := h.store.AddCompoundMember(compoundID, serverID); err != nil {

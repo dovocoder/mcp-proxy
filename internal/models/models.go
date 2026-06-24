@@ -6,22 +6,38 @@ import (
 
 // Server represents a backend MCP server that the proxy connects to.
 type Server struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Transport      string     `json:"transport"` // "stdio", "http", or "streamable-http"
-	Command        string     `json:"command,omitempty"`
-	Args           []string   `json:"args,omitempty"`
-	URL            string     `json:"url,omitempty"`
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	Transport      string            `json:"transport"` // "stdio", "http", or "streamable-http"
+	Command        string            `json:"command,omitempty"`
+	Args           []string          `json:"args,omitempty"`
+	URL            string            `json:"url,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
-	AuthToken      string     `json:"auth_token,omitempty"`
-	Timeout        int        `json:"timeout"`
-	ConnectTimeout int        `json:"connect_timeout"`
-	Enabled        bool       `json:"enabled"`
-	Status         string     `json:"status"` // "connected", "disconnected", "error"
-	LastSeen       *time.Time `json:"last_seen,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	AuthToken      string            `json:"auth_token,omitempty"`
+	Timeout        int               `json:"timeout"`
+	ConnectTimeout int               `json:"connect_timeout"`
+	Enabled        bool              `json:"enabled"`
+	IsBuiltin      bool              `json:"is_builtin"` // builtin servers can't be edited/deleted
+	Status         string            `json:"status"` // "connected", "disconnected", "error"
+	LastSeen       *time.Time        `json:"last_seen,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+// BuiltinMemoryServerID is the virtual server ID for the built-in memory MCP server.
+const BuiltinMemoryServerID = "builtin-memory"
+
+// BuiltinServer returns a virtual Server record for the built-in memory server.
+func BuiltinMemoryServer() Server {
+	return Server{
+		ID:        BuiltinMemoryServerID,
+		Name:      "memory",
+		Transport: "builtin",
+		Enabled:   true,
+		IsBuiltin: true,
+		Status:    "connected",
+	}
 }
 
 // APIKey represents an authentication key for accessing the proxy.

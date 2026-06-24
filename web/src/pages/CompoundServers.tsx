@@ -179,7 +179,10 @@ export default function CompoundServers() {
                     <div className="flex items-center gap-3 min-w-0">
                       <ServerIcon className="size-4 text-muted-foreground shrink-0" />
                       <div className="min-w-0">
-                        <div className="font-medium text-foreground truncate">{m.name}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-foreground truncate">{m.name}</span>
+                          {m.is_builtin && <Badge variant="secondary" className="text-[10px]">builtin</Badge>}
+                        </div>
                         <div className="text-xs text-muted-foreground">
                           {m.transport} · {m.status}
                         </div>

@@ -249,44 +249,53 @@ export default function Servers() {
                 </CardDescription>
               </Link>
               <CardAction className="flex items-center gap-1.5">
+                {srv.is_builtin ? (
+                  <Badge variant="secondary">builtin</Badge>
+                ) : null}
                 {statusBadge(srv.status)}
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => reconnectMutation.mutate(srv.id)}
-                  title="Reconnect"
-                >
-                  <RefreshCw className="size-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => handleEditOpen(srv)}
-                  title="Edit"
-                >
-                  <Pencil className="size-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => deleteMutation.mutate(srv.id)}
-                  title="Delete"
-                  className="text-destructive hover:text-destructive"
-                >
-                  <Trash2 className="size-4" />
-                </Button>
+                {!srv.is_builtin && (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => reconnectMutation.mutate(srv.id)}
+                      title="Reconnect"
+                    >
+                      <RefreshCw className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => handleEditOpen(srv)}
+                      title="Edit"
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => deleteMutation.mutate(srv.id)}
+                      title="Delete"
+                      className="text-destructive hover:text-destructive"
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </>
+                )}
               </CardAction>
             </CardHeader>
             <CardContent className="flex items-center gap-3 text-xs text-muted-foreground">
               <span className="uppercase tracking-wide">{srv.transport}</span>
               <Separator orientation="vertical" className="h-3" />
               <span>{srv.tools_count ?? 0} tools</span>
-              <Link
-                to={`/servers/${srv.id}`}
-                className="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline"
-              >
-                Details <ChevronRight className="size-3" />
-              </Link>
+              {!srv.is_builtin && (
+                <Link
+                  to={`/servers/${srv.id}`}
+                  className="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline"
+                >
+                  Details <ChevronRight className="size-3" />
+                </Link>
+              )}
             </CardContent>
             {srv.live_error && (
               <CardContent className="pt-0">
