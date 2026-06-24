@@ -1899,8 +1899,23 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "Failed to parse form data")
 				return
 			}
-			log.Printf("[OAuth-Proxy] Token request (form): grant_type=%s, has_code=%v, has_verifier=%v, redirect_uri=%s -> %s",
+
+			// Ensure client_id and client_secret are in the form body.
+			// Some MCP clients (Raycast) use HTTP Basic auth for client
+			// authentication, sending client_id:client_secret in the
+			// Authorization header instead of the form body. PocketID's
+			// token endpoint requires client_id in the form body to look
+			// up the client — without it, returns 404 "Client not found".
+			if vals.Get("client_id") == "" {
+				vals.Set("client_id", oidc.ClientID())
+			}
+			if vals.Get("client_secret") == "" && oidc.ClientSecret() != "" {
+				vals.Set("client_secret", oidc.ClientSecret())
+			}
+
+			log.Printf("[OAuth-Proxy] Token request (form): grant_type=%s, has_code=%v, has_verifier=%v, has_client_id=%v, has_auth_header=%v, redirect_uri=%s -> %s",
 				vals.Get("grant_type"), vals.Get("code") != "", vals.Get("code_verifier") != "",
+				vals.Get("client_id") != "", r.Header.Get("Authorization") != "",
 				vals.Get("redirect_uri"), proxyCallbackURL)
 			vals.Set("redirect_uri", proxyCallbackURL)
 			bodyReader = strings.NewReader(vals.Encode())
