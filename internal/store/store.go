@@ -1118,6 +1118,31 @@ func (s *Store) ListEnvVars(project, environment string) ([]*models.EnvVar, erro
 	return result, nil
 }
 
+// ListEnvVarsDecrypted returns all env vars as a key→value map with values
+// decrypted using the store's encryption key. If encryption is not enabled,
+// values are returned as-is. This is used by the proxy to resolve ${KEY}
+// references in server env maps before spawning subprocesses.
+func (s *Store) ListEnvVarsDecrypted() (map[string]string, error) {
+	envVars, err := s.ListEnvVars("", "")
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string)
+	for _, ev := range envVars {
+		if s.encEnabled {
+			decrypted, err := crypto.Decrypt(s.encKey, ev.Value)
+			if err != nil {
+				log.Printf("Warning: failed to decrypt env var %s: %v — skipping", ev.Key, err)
+				continue
+			}
+			result[ev.Key] = decrypted
+		} else {
+			result[ev.Key] = ev.Value
+		}
+	}
+	return result, nil
+}
+
 // ListEnvVarProjects returns distinct project names from env_vars.
 func (s *Store) ListEnvVarProjects() ([]string, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT project FROM env_vars ORDER BY project`)

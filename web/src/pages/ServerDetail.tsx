@@ -784,10 +784,23 @@ export default function ServerDetail() {
               {srv.env && Object.keys(srv.env).length > 0 && (
                 <div className="grid gap-1">
                   <dt className="text-sm text-muted-foreground">Environment</dt>
-                  <dd className="rounded-lg bg-muted px-3 py-2 text-sm text-foreground font-mono whitespace-pre-line break-all">
-                    {Object.keys(srv.env)
-                      .map((k) => `${k}=***`)
-                      .join('\n')}
+                  <dd className="rounded-lg bg-muted px-3 py-2 text-sm text-foreground font-mono space-y-1">
+                    {Object.entries(srv.env).map(([k, v]) => {
+                      const refMatch = v.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/);
+                      return (
+                        <div key={k} className="flex items-center gap-2 break-all">
+                          <span className="text-foreground">{k}=</span>
+                          {refMatch ? (
+                            <Badge variant="secondary" className="font-mono text-xs gap-1">
+                              <Variable className="size-3" />
+                              {refMatch[1]}
+                            </Badge>
+                          ) : (
+                            <span className="text-muted-foreground">{'•'.repeat(8)}</span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </dd>
                 </div>
               )}

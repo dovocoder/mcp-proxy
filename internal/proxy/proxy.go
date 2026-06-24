@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,31 @@ import (
 	"github.com/agentic/mcp-proxy/internal/store"
 	"github.com/google/uuid"
 )
+
+// envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
+var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+
+// resolveEnvRefs resolves ${KEY} and ${KEY:-default} references in env map
+// values using the decrypted env vars from the store. Unknown keys are left
+// as-is (or replaced with the default if specified).
+func resolveEnvRefs(envMap map[string]string, refVars map[string]string) map[string]string {
+	resolved := make(map[string]string, len(envMap))
+	for key, val := range envMap {
+		resolved[key] = envVarRefPattern.ReplaceAllStringFunc(val, func(match string) string {
+			sub := envVarRefPattern.FindStringSubmatch(match)
+			refKey := sub[1]
+			defaultVal := sub[2]
+			if v, ok := refVars[refKey]; ok {
+				return v
+			}
+			if defaultVal != "" || strings.Contains(match, ":-") {
+				return defaultVal
+			}
+			return match
+		})
+	}
+	return resolved
+}
 
 // LogEntry is a single stderr log line with timestamp.
 type LogEntry struct {
@@ -255,11 +281,33 @@ func (m *Manager) connectServer(srv *models.Server) {
 		}
 	}
 
+	// Resolve ${KEY} references in the server's env map using decrypted env
+	// vars from the store. This allows servers to reference shared secrets
+	// (stored in the env_vars table) without hardcoding them.
+	serverEnv := srv.Env
+	if len(serverEnv) > 0 {
+		hasRefs := false
+		for _, v := range serverEnv {
+			if envVarRefPattern.MatchString(v) {
+				hasRefs = true
+				break
+			}
+		}
+		if hasRefs {
+			if refVars, err := m.store.ListEnvVarsDecrypted(); err == nil && len(refVars) > 0 {
+				serverEnv = resolveEnvRefs(serverEnv, refVars)
+				log.Printf("Server %s: resolved env var references from %d stored env vars", srv.Name, len(refVars))
+			} else if err != nil {
+				log.Printf("Server %s: failed to load env vars for reference resolution: %v", srv.Name, err)
+			}
+		}
+	}
+
 	cfg := mcp.ClientConfig{
 		Transport:      srv.Transport,
 		Command:        srv.Command,
 		Args:           srv.Args,
-		Env:            srv.Env,
+		Env:            serverEnv,
 		URL:            srv.URL,
 		Headers:        srv.Headers,
 		AuthToken:      authToken,

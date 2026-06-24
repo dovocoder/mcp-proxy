@@ -42,6 +42,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
+import { EnvVarInput, type EnvVarEntry } from '@/components/EnvVarInput';
 import {
   Select,
   SelectContent,
@@ -470,10 +471,10 @@ function ServerForm({
       ? Object.entries(server.headers).map(([k, v]) => `${k}: ${v}`).join('\n')
       : '',
   );
-  const [env, setEnv] = useState(
+  const [envEntries, setEnvEntries] = useState<EnvVarEntry[]>(
     server?.env
-      ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n')
-      : '',
+      ? Object.entries(server.env).map(([k, v]) => ({ key: k, value: v }))
+      : [],
   );
   const [authToken, setAuthToken] = useState('');
   const [authMethod, setAuthMethod] = useState(server?.auth_method || 'none');
@@ -503,7 +504,7 @@ function ServerForm({
           setUrl(pkg.url);
         }
         if (pkg.env) {
-          setEnv(Object.entries(pkg.env).map(([k, v]) => `${k}=${v}`).join('\n'));
+          setEnvEntries(Object.entries(pkg.env).map(([k, v]) => ({ key: k, value: v })));
         }
       }
     };
@@ -556,11 +557,10 @@ function ServerForm({
       }
 
       const envVars: Record<string, string> = {};
-      if (env) {
-        env.split('\n').forEach((line) => {
-          const idx = line.indexOf('=');
-          if (idx > 0) envVars[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-        });
+      for (const entry of envEntries) {
+        if (entry.key.trim()) {
+          envVars[entry.key.trim()] = entry.value;
+        }
       }
       data.env = envVars;
 
@@ -864,19 +864,12 @@ function ServerForm({
 
       {/* Environment Variables */}
       <div className="grid gap-1.5">
-        <Label htmlFor="srv-env" className="flex items-center gap-1.5">
+        <Label className="flex items-center gap-1.5">
           <Settings2 className="size-3.5 text-muted-foreground" />
           Environment Variables
-          <span className="text-[10px] text-muted-foreground font-normal">(one per line, KEY=value)</span>
+          <span className="text-[10px] text-muted-foreground font-normal">(key → value or ${'{}'} reference)</span>
         </Label>
-        <Textarea
-          id="srv-env"
-          value={env}
-          onChange={(e) => setEnv(e.target.value)}
-          rows={3}
-          className="font-mono text-xs"
-          placeholder="GITHUB_PERSONAL_ACCESS_TOKEN=ghp_..."
-        />
+        <EnvVarInput entries={envEntries} onChange={setEnvEntries} />
       </div>
 
       <Separator />
