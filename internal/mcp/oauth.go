@@ -116,9 +116,9 @@ func authorizationBaseURL(serverURL string) (string, error) {
 
 // DiscoverOAuthMetadata fetches the OAuth 2.0 Authorization Server Metadata.
 // This implements the MCP spec's metadata discovery with fallbacks:
-// 1. Try GET /.well-known/oauth-authorization-server (RFC 8414)
-// 2. If 404, make a test request, check WWW-Authenticate for resource_metadata
-// 3. Fetch the protected resource metadata
+// 1. Try GET /.well-known/oauth-authorization-server (RFC 8414) at the base URL
+// 2. Try GET /.well-known/oauth-protected-resource (RFC 9728) at the server URL and base URL
+// 3. If 401 with WWW-Authenticate, follow resource_metadata to protected resource metadata
 // 4. Follow authorization_servers to the actual OAuth server metadata
 func DiscoverOAuthMetadata(serverURL string) (*OAuthServerMetadata, error) {
 	baseURL, err := authorizationBaseURL(serverURL)
@@ -126,7 +126,7 @@ func DiscoverOAuthMetadata(serverURL string) (*OAuthServerMetadata, error) {
 		return nil, err
 	}
 
-	// Step 1: Try standard discovery
+	// Step 1: Try standard RFC 8414 discovery at base URL
 	metadataURL := baseURL + "/.well-known/oauth-authorization-server"
 	req, err := http.NewRequest("GET", metadataURL, nil)
 	if err != nil {
@@ -149,18 +149,149 @@ func DiscoverOAuthMetadata(serverURL string) (*OAuthServerMetadata, error) {
 		resp.Body.Close()
 	}
 
-	// Step 2: Check WWW-Authenticate on the MCP server itself
+	// Step 2: Try fetching .well-known/oauth-protected-resource directly
+	// Some MCP servers expose this at their URL path (e.g. /v1/mcp/.well-known/...)
+	// rather than returning it via WWW-Authenticate.
+	for _, candidateURL := range []string{serverURL, baseURL} {
+		prmURL := strings.TrimSuffix(candidateURL, "/") + "/.well-known/oauth-protected-resource"
+		prm, err := fetchProtectedResourceMetadata(prmURL)
+		if err == nil && prm != nil && len(prm.AuthorizationServers) > 0 {
+			if metadata := followAuthServers(prm); metadata != nil {
+				return metadata, nil
+			}
+		}
+	}
+
+	// Step 3: Check WWW-Authenticate on the MCP server itself
 	metadata, err := discoverViaProtectedResource(serverURL)
 	if err == nil && metadata != nil {
 		return metadata, nil
 	}
 
-	// Step 3: Fallback to default endpoints
+	// Step 4: Fallback to default endpoints
 	return &OAuthServerMetadata{
 		AuthorizationEndpoint: baseURL + "/authorize",
 		TokenEndpoint:          baseURL + "/token",
 		RegistrationEndpoint:   baseURL + "/register",
 	}, nil
+}
+
+// fetchProtectedResourceMetadata fetches and parses RFC 9728 Protected Resource
+// Metadata from the given URL.
+func fetchProtectedResourceMetadata(metadataURL string) (*ProtectedResourceMetadata, error) {
+	req, err := http.NewRequest("GET", metadataURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("MCP-Protocol-Version", "2025-03-26")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("resource metadata returned HTTP %d", resp.StatusCode)
+	}
+
+	var prm ProtectedResourceMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&prm); err != nil {
+		return nil, fmt.Errorf("failed to parse resource metadata: %w", err)
+	}
+
+	return &prm, nil
+}
+
+// followAuthServers follows authorization_servers from Protected Resource
+// Metadata to find OAuth server metadata. Tries oauth-authorization-server,
+// then OIDC openid-configuration, then Entra ID default endpoints.
+func followAuthServers(prm *ProtectedResourceMetadata) *OAuthServerMetadata {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Try oauth-authorization-server endpoint first
+	for _, authServerURL := range prm.AuthorizationServers {
+		oauthMetaURL := authServerURL + "/.well-known/oauth-authorization-server"
+		oauthReq, err := http.NewRequest("GET", oauthMetaURL, nil)
+		if err != nil {
+			continue
+		}
+		oauthReq.Header.Set("Accept", "application/json")
+
+		oauthResp, err := client.Do(oauthReq)
+		if err != nil {
+			continue
+		}
+
+		if oauthResp.StatusCode == http.StatusOK {
+			body, _ := io.ReadAll(oauthResp.Body)
+			oauthResp.Body.Close()
+
+			var metadata OAuthServerMetadata
+			if err := json.Unmarshal(body, &metadata); err == nil && metadata.AuthorizationEndpoint != "" {
+				// Add scopes from resource metadata if not present
+				if len(metadata.ScopesSupported) == 0 && len(prm.ScopesSupported) > 0 {
+					metadata.ScopesSupported = prm.ScopesSupported
+				}
+				return &metadata
+			}
+		} else {
+			oauthResp.Body.Close()
+		}
+	}
+
+	// Try OIDC discovery (Entra ID uses openid-configuration)
+	for _, authServerURL := range prm.AuthorizationServers {
+		oidcURL := authServerURL + "/.well-known/openid-configuration"
+		oidcReq, err := http.NewRequest("GET", oidcURL, nil)
+		if err != nil {
+			continue
+		}
+		oidcReq.Header.Set("Accept", "application/json")
+
+		oidcResp, err := client.Do(oidcReq)
+		if err != nil {
+			continue
+		}
+
+		if oidcResp.StatusCode == http.StatusOK {
+			body, _ := io.ReadAll(oidcResp.Body)
+			oidcResp.Body.Close()
+
+			var oidc struct {
+				Issuer                string `json:"issuer"`
+				AuthorizationEndpoint string `json:"authorization_endpoint"`
+				TokenEndpoint         string `json:"token_endpoint"`
+				RevocationEndpoint    string `json:"revocation_endpoint,omitempty"`
+				ScopesSupported       []string `json:"scopes_supported,omitempty"`
+			}
+			if json.Unmarshal(body, &oidc) == nil && oidc.AuthorizationEndpoint != "" {
+				return &OAuthServerMetadata{
+					Issuer:               oidc.Issuer,
+					AuthorizationEndpoint: oidc.AuthorizationEndpoint,
+					TokenEndpoint:         oidc.TokenEndpoint,
+					RevocationEndpoint:    oidc.RevocationEndpoint,
+					ScopesSupported:       prm.ScopesSupported,
+				}
+			}
+		} else {
+			oidcResp.Body.Close()
+		}
+	}
+
+	// If we found authorization servers but no metadata, use Entra ID default endpoints
+	if len(prm.AuthorizationServers) > 0 {
+		authServer := prm.AuthorizationServers[0]
+		return &OAuthServerMetadata{
+			AuthorizationEndpoint: authServer + "/oauth2/v2.0/authorize",
+			TokenEndpoint:          authServer + "/oauth2/v2.0/token",
+			ScopesSupported:        prm.ScopesSupported,
+		}
+	}
+
+	return nil
 }
 
 // discoverViaProtectedResource uses the WWW-Authenticate header to discover
@@ -196,113 +327,19 @@ func discoverViaProtectedResource(serverURL string) (*OAuthServerMetadata, error
 		return nil, fmt.Errorf("no resource_metadata in WWW-Authenticate")
 	}
 
-	// Step 3: Fetch the protected resource metadata
-	metaReq, err := http.NewRequest("GET", resourceMetaURL, nil)
+	// Fetch the protected resource metadata from the URL in the header
+	prm, err := fetchProtectedResourceMetadata(resourceMetaURL)
 	if err != nil {
 		return nil, err
-	}
-	metaReq.Header.Set("Accept", "application/json")
-	metaReq.Header.Set("MCP-Protocol-Version", "2025-03-26")
-
-	metaResp, err := client.Do(metaReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch resource metadata: %w", err)
-	}
-	defer metaResp.Body.Close()
-
-	if metaResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("resource metadata returned HTTP %d", metaResp.StatusCode)
-	}
-
-	var prm ProtectedResourceMetadata
-	if err := json.NewDecoder(metaResp.Body).Decode(&prm); err != nil {
-		return nil, fmt.Errorf("failed to parse resource metadata: %w", err)
 	}
 
 	if len(prm.AuthorizationServers) == 0 {
 		return nil, fmt.Errorf("no authorization_servers in resource metadata")
 	}
 
-	// Step 4: Fetch the OAuth server metadata from each authorization server
-	for _, authServerURL := range prm.AuthorizationServers {
-		oauthMetaURL := authServerURL + "/.well-known/oauth-authorization-server"
-		oauthReq, err := http.NewRequest("GET", oauthMetaURL, nil)
-		if err != nil {
-			continue
-		}
-		oauthReq.Header.Set("Accept", "application/json")
-
-		oauthResp, err := client.Do(oauthReq)
-		if err != nil {
-			continue
-		}
-
-		if oauthResp.StatusCode == http.StatusOK {
-			body, _ := io.ReadAll(oauthResp.Body)
-			oauthResp.Body.Close()
-
-			var metadata OAuthServerMetadata
-			if err := json.Unmarshal(body, &metadata); err == nil && metadata.AuthorizationEndpoint != "" {
-				// Add scopes from resource metadata if not present
-				if len(metadata.ScopesSupported) == 0 && len(prm.ScopesSupported) > 0 {
-					metadata.ScopesSupported = prm.ScopesSupported
-				}
-				return &metadata, nil
-			}
-		} else {
-			oauthResp.Body.Close()
-		}
-	}
-
-	// If we found authorization servers but no metadata, try OIDC discovery
-	// (Entra ID uses openid-configuration, not oauth-authorization-server)
-	for _, authServerURL := range prm.AuthorizationServers {
-		oidcURL := authServerURL + "/.well-known/openid-configuration"
-		oidcReq, err := http.NewRequest("GET", oidcURL, nil)
-		if err != nil {
-			continue
-		}
-		oidcReq.Header.Set("Accept", "application/json")
-
-		oidcResp, err := client.Do(oidcReq)
-		if err != nil {
-			continue
-		}
-
-		if oidcResp.StatusCode == http.StatusOK {
-			body, _ := io.ReadAll(oidcResp.Body)
-			oidcResp.Body.Close()
-
-			// Parse OIDC metadata — it has the same endpoints we need
-			var oidc struct {
-				Issuer                string `json:"issuer"`
-				AuthorizationEndpoint string `json:"authorization_endpoint"`
-				TokenEndpoint         string `json:"token_endpoint"`
-				RevocationEndpoint    string `json:"revocation_endpoint,omitempty"`
-				ScopesSupported       []string `json:"scopes_supported,omitempty"`
-			}
-			if json.Unmarshal(body, &oidc) == nil && oidc.AuthorizationEndpoint != "" {
-				return &OAuthServerMetadata{
-					Issuer:               oidc.Issuer,
-					AuthorizationEndpoint: oidc.AuthorizationEndpoint,
-					TokenEndpoint:         oidc.TokenEndpoint,
-					RevocationEndpoint:    oidc.RevocationEndpoint,
-					ScopesSupported:       prm.ScopesSupported,
-				}, nil
-			}
-		} else {
-			oidcResp.Body.Close()
-		}
-	}
-
-	// If we found authorization servers but no metadata, use Entra ID default endpoints
-	if len(prm.AuthorizationServers) > 0 {
-		authServer := prm.AuthorizationServers[0]
-		return &OAuthServerMetadata{
-			AuthorizationEndpoint: authServer + "/oauth2/v2.0/authorize",
-			TokenEndpoint:          authServer + "/oauth2/v2.0/token",
-			ScopesSupported:        prm.ScopesSupported,
-		}, nil
+	// Follow authorization_servers to find OAuth server metadata
+	if metadata := followAuthServers(prm); metadata != nil {
+		return metadata, nil
 	}
 
 	return nil, fmt.Errorf("no authorization servers found")
