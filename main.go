@@ -138,8 +138,11 @@ func serveFrontend(mux *http.ServeMux, cfg *config.Config) error {
 	fileServer := http.FileServer(http.FS(distFS))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// SPA fallback: serve index.html for non-API, non-file routes
+		// BUT never serve SPA HTML for .well-known paths — these must
+		// return proper JSON or 404, otherwise MCP clients break their
+		// OAuth discovery chain when they get HTML instead of JSON.
 		path := r.URL.Path
-		if path != "/" && !startsWith(path, "/api/") {
+		if path != "/" && !startsWith(path, "/api/") && !startsWith(path, "/.well-known/") {
 			// Check if file exists
 			if _, err := fs.Stat(distFS, strings.TrimPrefix(path, "/")); err != nil {
 				r.URL.Path = "/"
@@ -162,7 +165,7 @@ func serveFrontendFromDisk(mux *http.ServeMux, cfg *config.Config) {
 	fileServer := http.FileServer(http.Dir(distPath))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path != "/" && !startsWith(path, "/api/") {
+		if path != "/" && !startsWith(path, "/api/") && !startsWith(path, "/.well-known/") {
 			fullPath := distPath + path
 			if _, err := os.Stat(fullPath); err != nil {
 				r.URL.Path = "/"

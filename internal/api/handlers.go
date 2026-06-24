@@ -84,6 +84,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Authorization Server Metadata (RFC 8414) — wraps OIDC provider endpoints + adds DCR/CIMD
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", h.handleAuthorizationServerMetadata)
 
+	// OIDC Discovery 1.0 — same metadata as above, for clients that prefer OIDC format
+	mux.HandleFunc("GET /.well-known/openid-configuration", h.handleAuthorizationServerMetadata)
+
 	// Client ID Metadata Document (CIMD) — public endpoint fetched by authorization servers
 	mux.HandleFunc("GET /api/oauth/client-metadata", h.handleClientMetadata)
 
