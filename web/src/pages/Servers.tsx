@@ -676,7 +676,7 @@ function ServerForm({
           <div className="grid gap-1.5">
             <Label htmlFor="srv-token" className="flex items-center gap-1.5">
               <KeyRound className="size-3.5 text-muted-foreground" />
-              Auth Token
+              OAuth Client ID
               <span className="text-[10px] text-muted-foreground font-normal">(optional)</span>
             </Label>
             <Input
@@ -685,11 +685,12 @@ function ServerForm({
               value={authToken}
               onChange={(e) => setAuthToken(e.target.value)}
               className="font-mono"
-              placeholder="Leave empty for Entra ID device code flow"
+              placeholder="Leave empty for auto-discovery"
             />
             <p className="text-xs text-muted-foreground">
-              Used as OAuth client_id. For Entra ID / Azure DevOps: leave empty to use
-              a built-in public client with device code authentication.
+              Pre-registered OAuth client_id. Leave empty to use dynamic registration,
+              CIMD, or Entra ID public client. For manual bearer tokens or env var tokens,
+              configure them from the server detail page after creation.
             </p>
           </div>
           <div className="grid gap-1.5">

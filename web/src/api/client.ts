@@ -65,6 +65,8 @@ export interface Server {
   headers?: Record<string, string>;
   env?: Record<string, string>;
   auth_token?: string;
+  auth_method?: string;
+  bearer_token_env?: string;
   enabled: boolean;
   logs_enabled: boolean;
   is_builtin?: boolean;
@@ -128,7 +130,9 @@ export const servers = {
   initiateAuth: (id: string) =>
     request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
   authStatus: (id: string) =>
-    request<{ status: string; has_tokens: boolean; expired: boolean; issuer?: string; authorization_endpoint?: string; device_auth_supported?: boolean }>(`/servers/${id}/auth-status`),
+    request<{ status: string; has_tokens: boolean; expired: boolean; auth_method?: string; issuer?: string; authorization_endpoint?: string; device_auth_supported?: boolean; bearer_token_env?: string }>(`/servers/${id}/auth-status`),
+  setBearerToken: (id: string, data: { method: string; bearer_token?: string; bearer_token_env?: string }) =>
+    request<{ status: string }>(`/servers/${id}/bearer-token`, { method: 'POST', body: JSON.stringify(data) }),
   registration: (id: string) =>
     request<RegistrationInfo>(`/servers/${id}/registration`),
   deleteRegistration: (id: string) =>

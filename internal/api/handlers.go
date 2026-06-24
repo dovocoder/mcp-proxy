@@ -119,6 +119,7 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PATCH /api/servers/{id}/logs-enabled", h.handleToggleLogsEnabled)
 	adminMux.HandleFunc("POST /api/servers/{id}/auth", h.handleInitiateAuth)
 	adminMux.HandleFunc("GET /api/servers/{id}/auth-status", h.handleAuthStatus)
+	adminMux.HandleFunc("POST /api/servers/{id}/bearer-token", h.handleSetBearerToken)
 	adminMux.HandleFunc("POST /api/servers/{id}/device-auth", h.handleInitiateDeviceAuth)
 	adminMux.HandleFunc("POST /api/servers/{id}/device-auth/poll", h.handlePollDeviceAuth)
 	adminMux.HandleFunc("DELETE /api/servers/{id}/device-auth", h.handleCancelDeviceAuth)
@@ -824,21 +825,93 @@ func (h *Handlers) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		status = "expired"
 	}
 
-	resp := map[string]interface{}{
-		"status":     status,
-		"has_tokens": hasTokens,
-		"expired":    expired,
+	// Get the auth method configured for this server
+	authMethod := h.proxy.GetServerAuthMethod(id)
+
+	// For bearer/env_bearer, status is based on whether token is configured
+	if authMethod == "bearer" {
+		if h.proxy.HasBearerToken(id) {
+			status = "valid"
+		} else {
+			status = "none"
+		}
+	}
+	if authMethod == "env_bearer" {
+		if h.proxy.HasEnvBearerToken(id) {
+			status = "valid"
+		} else {
+			status = "none"
+		}
 	}
 
-	// Include OAuth provider info from discovered metadata
-	if meta := h.proxy.GetOAuthMetadata(id); meta != nil {
-		resp["issuer"] = meta.Issuer
-		resp["authorization_endpoint"] = meta.AuthorizationEndpoint
-		resp["device_auth_supported"] = meta.DeviceAuthorizationEndpoint != "" ||
-			mcp.IsEntraID(meta.Issuer) || mcp.IsEntraID(meta.AuthorizationEndpoint) || mcp.IsEntraID(meta.TokenEndpoint)
+	resp := map[string]interface{}{
+		"status":      status,
+		"has_tokens":  hasTokens,
+		"expired":     expired,
+		"auth_method": authMethod,
+	}
+
+	// For env_bearer, include the env var name
+	if authMethod == "env_bearer" {
+		resp["bearer_token_env"] = h.proxy.GetBearerTokenEnv(id)
+	}
+
+	// Include OAuth provider info from discovered metadata (only for OAuth method)
+	if authMethod == "oauth" {
+		if meta := h.proxy.GetOAuthMetadata(id); meta != nil {
+			resp["issuer"] = meta.Issuer
+			resp["authorization_endpoint"] = meta.AuthorizationEndpoint
+			resp["device_auth_supported"] = meta.DeviceAuthorizationEndpoint != "" ||
+				mcp.IsEntraID(meta.Issuer) || mcp.IsEntraID(meta.AuthorizationEndpoint) || mcp.IsEntraID(meta.TokenEndpoint)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handlers) handleSetBearerToken(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var body struct {
+		BearerToken string `json:"bearer_token"`
+		BearerTokenEnv string `json:"bearer_token_env"`
+		Method     string `json:"method"` // "bearer" or "env_bearer"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	switch body.Method {
+	case "bearer":
+		if body.BearerToken == "" {
+			writeError(w, http.StatusBadRequest, "bearer_token is required")
+			return
+		}
+		if err := h.proxy.SetBearerToken(id, body.BearerToken); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case "env_bearer":
+		if body.BearerTokenEnv == "" {
+			writeError(w, http.StatusBadRequest, "bearer_token_env is required")
+			return
+		}
+		if err := h.proxy.SetEnvBearerToken(id, body.BearerTokenEnv); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case "none":
+		if err := h.proxy.ClearAuth(id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "method must be 'bearer', 'env_bearer', or 'none'")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handlers) handleInitiateDeviceAuth(w http.ResponseWriter, r *http.Request) {

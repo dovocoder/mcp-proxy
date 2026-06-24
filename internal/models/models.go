@@ -15,6 +15,8 @@ type Server struct {
 	Headers        map[string]string `json:"headers,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	AuthToken      string            `json:"auth_token,omitempty"`
+	AuthMethod     string            `json:"auth_method"`              // "none", "oauth", "bearer", "env_bearer"
+	BearerTokenEnv string            `json:"bearer_token_env,omitempty"` // env var name for env_bearer method
 	Timeout        int               `json:"timeout"`
 	ConnectTimeout int               `json:"connect_timeout"`
 	Enabled        bool              `json:"enabled"`
@@ -101,6 +103,8 @@ type CreateServerRequest struct {
 	Headers        map[string]string   `json:"headers,omitempty"`
 	Env            map[string]string   `json:"env,omitempty"`
 	AuthToken      string              `json:"auth_token,omitempty"`
+	AuthMethod     string              `json:"auth_method,omitempty"`
+	BearerTokenEnv string              `json:"bearer_token_env,omitempty"`
 	Timeout        int                 `json:"timeout,omitempty"`
 	ConnectTimeout int                 `json:"connect_timeout,omitempty"`
 	Enabled        *bool               `json:"enabled,omitempty"`
@@ -117,6 +121,8 @@ type UpdateServerRequest struct {
 	Headers        *map[string]string  `json:"headers,omitempty"`
 	Env            *map[string]string  `json:"env,omitempty"`
 	AuthToken      *string             `json:"auth_token,omitempty"`
+	AuthMethod     *string             `json:"auth_method,omitempty"`
+	BearerTokenEnv *string             `json:"bearer_token_env,omitempty"`
 	Timeout        *int                `json:"timeout,omitempty"`
 	ConnectTimeout *int                `json:"connect_timeout,omitempty"`
 	Enabled        *bool               `json:"enabled,omitempty"`

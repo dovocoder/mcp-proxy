@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -157,29 +158,47 @@ func (m *Manager) StartAll() {
 
 // connectServer establishes a connection to a backend server.
 func (m *Manager) connectServer(srv *models.Server) {
-	// For HTTP transports, check if we have stored OAuth tokens
-	authToken := srv.AuthToken
+	// Determine auth token based on auth method
+	authToken := ""
 
-	if srv.Transport == "http" || srv.Transport == "streamable-http" {
-		tokens, cid, csec, err := m.store.GetOAuthTokens(srv.ID)
-		if err == nil && tokens != nil {
-			// Check if token needs refresh
-			if tokens.IsExpired() && tokens.HasRefreshToken() {
-				// Need metadata for refresh endpoint
-				meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
-				if meta != nil && meta.TokenEndpoint != "" {
-					refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
-					if err == nil {
-						tokens = refreshed
-						_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
-						log.Printf("Refreshed OAuth token for server %s", srv.Name)
-					} else {
-						log.Printf("Failed to refresh OAuth token for %s: %v", srv.Name, err)
+	switch srv.AuthMethod {
+	case "bearer":
+		// Manual bearer token stored in auth_token field
+		authToken = srv.AuthToken
+	case "env_bearer":
+		// Bearer token read from an environment variable
+		if srv.BearerTokenEnv != "" {
+			authToken = os.Getenv(srv.BearerTokenEnv)
+			if authToken == "" {
+				log.Printf("Warning: env var %s is empty for server %s", srv.BearerTokenEnv, srv.Name)
+			}
+		}
+	case "oauth":
+		// OAuth flow — check for stored tokens (with auto-refresh)
+		if srv.Transport == "http" || srv.Transport == "streamable-http" {
+			tokens, cid, csec, err := m.store.GetOAuthTokens(srv.ID)
+			if err == nil && tokens != nil {
+				// Check if token needs refresh
+				if tokens.IsExpired() && tokens.HasRefreshToken() {
+					meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
+					if meta != nil && meta.TokenEndpoint != "" {
+						refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
+						if err == nil {
+							tokens = refreshed
+							_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
+							log.Printf("Refreshed OAuth token for server %s", srv.Name)
+						} else {
+							log.Printf("Failed to refresh OAuth token for %s: %v", srv.Name, err)
+						}
 					}
 				}
+				authToken = tokens.AccessToken
 			}
-			authToken = tokens.AccessToken
-			}
+		}
+	default:
+		// "none" or empty — no auth token
+		// Fall back to legacy auth_token field for backward compatibility
+		authToken = srv.AuthToken
 	}
 
 	cfg := mcp.ClientConfig{
@@ -249,13 +268,15 @@ func (m *Manager) AddServer(req *models.CreateServerRequest) (*models.Server, er
 		Headers:        req.Headers,
 		Env:            req.Env,
 		AuthToken:      req.AuthToken,
+		AuthMethod:     req.AuthMethod,
+		BearerTokenEnv: req.BearerTokenEnv,
 		Timeout:        timeout,
 		ConnectTimeout: connTimeout,
 		Enabled:        enabled,
 		LogsEnabled:    logsEnabled,
 		Status:         "disconnected",
 		CreatedAt:      time.Now(),
-		UpdatedAt:     time.Now(),
+		UpdatedAt:      time.Now(),
 	}
 
 	if err := m.store.CreateServer(srv); err != nil {
@@ -299,6 +320,12 @@ func (m *Manager) UpdateServer(id string, req *models.UpdateServerRequest) (*mod
 	}
 	if req.AuthToken != nil {
 		srv.AuthToken = *req.AuthToken
+	}
+	if req.AuthMethod != nil {
+		srv.AuthMethod = *req.AuthMethod
+	}
+	if req.BearerTokenEnv != nil {
+		srv.BearerTokenEnv = *req.BearerTokenEnv
 	}
 	if req.Timeout != nil {
 		srv.Timeout = *req.Timeout
@@ -702,6 +729,12 @@ func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string,
 		return "", fmt.Errorf("OAuth only supported for http/streamable-http transports")
 	}
 
+	// Set auth method to oauth if not already set
+	if srv.AuthMethod == "" || srv.AuthMethod == "none" {
+		srv.AuthMethod = "oauth"
+		_ = m.store.UpdateServer(srv)
+	}
+
 	// Discover OAuth metadata
 	metadata, err := mcp.DiscoverOAuthMetadata(srv.URL)
 	if err != nil {
@@ -840,11 +873,13 @@ func (m *Manager) HandleAuthCallback(state, code string) error {
 
 	log.Printf("OAuth tokens stored for server %s", authState.ServerID)
 
-	// Reconnect the server with the new token
+	// Set auth method to oauth
 	srv, err := m.store.GetServer(authState.ServerID)
 	if err != nil {
 		return fmt.Errorf("server not found after auth: %w", err)
 	}
+	srv.AuthMethod = "oauth"
+	_ = m.store.UpdateServer(srv)
 
 	m.DisconnectServer(authState.ServerID)
 	go m.connectServer(srv)
@@ -859,6 +894,99 @@ func (m *Manager) GetAuthStatus(serverID string) (hasTokens bool, expired bool) 
 		return false, false
 	}
 	return true, tokens.IsExpired()
+}
+
+// GetServerAuthMethod returns the configured auth method for a server.
+func (m *Manager) GetServerAuthMethod(serverID string) string {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil || srv == nil {
+		return "none"
+	}
+	if srv.AuthMethod == "" {
+		// Backward compat: if auth_token is set but no method, infer "bearer"
+		if srv.AuthToken != "" {
+			return "bearer"
+		}
+		return "none"
+	}
+	return srv.AuthMethod
+}
+
+// HasBearerToken returns true if the server has a manual bearer token configured.
+func (m *Manager) HasBearerToken(serverID string) bool {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil || srv == nil {
+		return false
+	}
+	return srv.AuthToken != ""
+}
+
+// HasEnvBearerToken returns true if the server has an env var bearer token configured.
+func (m *Manager) HasEnvBearerToken(serverID string) bool {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil || srv == nil {
+		return false
+	}
+	return srv.BearerTokenEnv != ""
+}
+
+// GetBearerTokenEnv returns the env var name configured for env_bearer auth.
+func (m *Manager) GetBearerTokenEnv(serverID string) string {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil || srv == nil {
+		return ""
+	}
+	return srv.BearerTokenEnv
+}
+
+// SetBearerToken sets a manual bearer token for a server and reconnects.
+func (m *Manager) SetBearerToken(serverID, token string) error {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil {
+		return fmt.Errorf("server not found: %w", err)
+	}
+	srv.AuthToken = token
+	srv.AuthMethod = "bearer"
+	if err := m.store.UpdateServer(srv); err != nil {
+		return fmt.Errorf("failed to update server: %w", err)
+	}
+	// Reconnect with the new token
+	m.DisconnectServer(serverID)
+	go m.connectServer(srv)
+	return nil
+}
+
+// SetEnvBearerToken sets an env var-based bearer token for a server and reconnects.
+func (m *Manager) SetEnvBearerToken(serverID, envVar string) error {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil {
+		return fmt.Errorf("server not found: %w", err)
+	}
+	srv.BearerTokenEnv = envVar
+	srv.AuthMethod = "env_bearer"
+	if err := m.store.UpdateServer(srv); err != nil {
+		return fmt.Errorf("failed to update server: %w", err)
+	}
+	m.DisconnectServer(serverID)
+	go m.connectServer(srv)
+	return nil
+}
+
+// ClearAuth removes all auth configuration for a server and reconnects.
+func (m *Manager) ClearAuth(serverID string) error {
+	srv, err := m.store.GetServer(serverID)
+	if err != nil {
+		return fmt.Errorf("server not found: %w", err)
+	}
+	srv.AuthMethod = "none"
+	srv.AuthToken = ""
+	srv.BearerTokenEnv = ""
+	if err := m.store.UpdateServer(srv); err != nil {
+		return fmt.Errorf("failed to update server: %w", err)
+	}
+	m.DisconnectServer(serverID)
+	go m.connectServer(srv)
+	return nil
 }
 
 // GetOAuthMetadata returns cached OAuth metadata for a server, discovering it
