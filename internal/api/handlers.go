@@ -866,11 +866,13 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	// Redirect to PocketID's authorization endpoint
 	upstreamURL := discovery.AuthorizationEndpoint
 	upstreamParams := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {oidc.ClientID()},
-		"redirect_uri":          {proxyCallbackURL},
-		"state":                 {stateJWT},
-		"scope":                 {scope},
+		"response_type": {"code"},
+		"client_id":     {oidc.ClientID()},
+		"redirect_uri":  {proxyCallbackURL},
+		"state":         {stateJWT},
+	}
+	if scope != "" {
+		upstreamParams.Set("scope", scope)
 	}
 	if codeChallenge != "" {
 		upstreamParams.Set("code_challenge", codeChallenge)
