@@ -6,13 +6,16 @@ import {
   Trash2,
   RefreshCw,
   Server as ServerIcon,
-  Cloud,
-  Zap,
-  Terminal,
   ChevronRight,
   Pencil,
+  Search,
+  Package,
+  Cloud,
+  Terminal,
+  ArrowLeft,
+  ExternalLink,
 } from 'lucide-react';
-import { servers as serversApi, type Server } from '../api/client';
+import { servers as serversApi, type Server, registry as registryApi, type RegistryServer } from '../api/client';
 import { cn } from '../lib/utils';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,7 +25,6 @@ import {
   CardDescription,
   CardAction,
   CardContent,
-  CardFooter,
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -49,61 +51,6 @@ import {
 
 type Transport = 'stdio' | 'streamable-http' | 'http';
 
-interface PresetConfig {
-  name: string;
-  transport: Transport;
-  command?: string;
-  args?: string;
-  url?: string;
-  urlHint?: string;
-}
-
-const PRESETS = [
-  {
-    id: 'azure-devops',
-    name: 'Azure DevOps',
-    icon: Cloud,
-    description: 'Microsoft hosted MCP server',
-    config: {
-      name: 'azure-devops',
-      transport: 'streamable-http',
-      url: 'https://mcp.dev.azure.com/',
-      urlHint: 'https://mcp.dev.azure.com/{your-organization}',
-    } as PresetConfig,
-  },
-  {
-    id: 'azure-devops-local',
-    name: 'Azure DevOps (Local)',
-    icon: Terminal,
-    description: 'Local stdio server via npx',
-    config: {
-      name: 'azure-devops-local',
-      transport: 'stdio',
-      command: 'npx',
-      args: '-y @azure-devops/mcp',
-    } as PresetConfig,
-  },
-  {
-    id: 'github',
-    name: 'GitHub MCP',
-    icon: Zap,
-    description: 'GitHub MCP server via npx',
-    config: {
-      name: 'github',
-      transport: 'stdio',
-      command: 'npx',
-      args: '-y @modelcontextprotocol/server-github',
-    } as PresetConfig,
-  },
-  {
-    id: 'custom',
-    name: 'Custom',
-    icon: Plus,
-    description: 'Configure manually',
-    config: null,
-  },
-] as const;
-
 function statusBadge(status: string) {
   if (status === 'connected') return <Badge variant="default">{status}</Badge>;
   if (status === 'error') return <Badge variant="destructive">{status}</Badge>;
@@ -114,8 +61,8 @@ export default function Servers() {
   const queryClient = useQueryClient();
   const { data: srvList } = useQuery({ queryKey: ['servers'], queryFn: serversApi.list });
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [preset, setPreset] = useState<string | null>(null);
   const [editServer, setEditServer] = useState<Server | null>(null);
+  const [dialogView, setDialogView] = useState<'form' | 'registry'>('form');
 
   const deleteMutation = useMutation({
     mutationFn: serversApi.delete,
@@ -130,13 +77,14 @@ export default function Servers() {
   const handleOpenChange = (open: boolean) => {
     setDialogOpen(open);
     if (!open) {
-      setPreset(null);
       setEditServer(null);
+      setDialogView('form');
     }
   };
 
   const handleEditOpen = (srv: Server) => {
     setEditServer(srv);
+    setDialogView('form');
     setDialogOpen(true);
   };
 
@@ -157,49 +105,55 @@ export default function Servers() {
               </Button>
             }
           />
-          <DialogContent className="sm:max-w-lg">
+          <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
             {editServer ? (
               <ServerForm
                 server={editServer}
-                onClose={() => {
-                  setDialogOpen(false);
-                  setEditServer(null);
-                }}
+                onClose={() => handleOpenChange(false)}
               />
-            ) : !preset ? (
+            ) : (
               <>
                 <DialogHeader>
-                  <DialogTitle>Choose a preset</DialogTitle>
+                  <div className="flex items-center justify-between">
+                    <DialogTitle>Add MCP Server</DialogTitle>
+                    {dialogView === 'registry' && (
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => setDialogView('form')}
+                      >
+                        <ArrowLeft className="size-3.5" />
+                        Back
+                      </Button>
+                    )}
+                  </div>
                   <DialogDescription>
-                    Pick a template to pre-fill the server form, or start from scratch.
+                    {dialogView === 'form'
+                      ? 'Configure a server manually, or search the MCP registry.'
+                      : 'Search the MCP server registry and import a server.'}
                   </DialogDescription>
                 </DialogHeader>
-                <div className="grid grid-cols-2 gap-3">
-                  {PRESETS.map((p) => {
-                    const Icon = p.icon;
-                    return (
-                      <button
-                        key={p.id}
-                        onClick={() => setPreset(p.id)}
-                        className="flex flex-col items-center gap-2 rounded-lg border border-border bg-background p-4 text-center transition-colors hover:bg-muted hover:border-primary/50"
-                      >
-                        <Icon className="size-6 text-primary" />
-                        <div className="font-medium text-foreground text-sm">{p.name}</div>
-                        <div className="text-xs text-muted-foreground">{p.description}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-                <DialogFooter showCloseButton />
+
+                {dialogView === 'form' ? (
+                  <>
+                    <ServerForm
+                      onClose={() => handleOpenChange(false)}
+                      onRegistryView={() => setDialogView('registry')}
+                    />
+                  </>
+                ) : (
+                  <RegistrySearch
+                    onPick={(srv) => {
+                      setDialogView('form');
+                      // Pass the registry server to the form via a custom event
+                      // The form will read it and pre-fill fields
+                      setEditServer(null);
+                      // Store the picked server temporarily
+                      window.dispatchEvent(new CustomEvent('registry-pick', { detail: srv }));
+                    }}
+                  />
+                )}
               </>
-            ) : (
-              <ServerForm
-                preset={PRESETS.find((p) => p.id === preset)!}
-                onClose={() => {
-                  setDialogOpen(false);
-                  setPreset(null);
-                }}
-              />
             )}
           </DialogContent>
         </Dialog>
@@ -311,28 +265,153 @@ export default function Servers() {
   );
 }
 
+// --- Registry Search Component ---
+
+function RegistrySearch({ onPick }: { onPick: (srv: RegistryServer) => void }) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<RegistryServer[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
+
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setSearched(true);
+    try {
+      const data = await registryApi.search(query || undefined);
+      // The registry returns { servers: [...] } or an array
+      const servers = Array.isArray(data) ? data : (data.servers || []);
+      setResults(servers);
+    } catch {
+      setResults([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <form onSubmit={handleSearch} className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search MCP registry..."
+            className="pl-9"
+            autoFocus
+          />
+        </div>
+        <Button type="submit" disabled={loading} size="sm">
+          {loading ? 'Searching...' : 'Search'}
+        </Button>
+      </form>
+
+      <div className="max-h-[50vh] overflow-y-auto space-y-2 rounded-lg">
+        {loading && (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            Searching registry...
+          </div>
+        )}
+
+        {!loading && searched && results.length === 0 && (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            No servers found. Try a different search term.
+          </div>
+        )}
+
+        {!loading && !searched && (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            <Package className="size-6 mx-auto mb-2 opacity-50" />
+            Search the MCP registry to find servers to add
+          </div>
+        )}
+
+        {results.map((srv, i) => {
+          const pkg = srv.packages?.[0];
+          const isStdio = pkg?.transport_type === 'stdio' || !!pkg?.command;
+          const repoUrl = srv.repository?.url;
+          return (
+            <div
+              key={srv.id || srv.name + i}
+              className="rounded-lg border border-border bg-card p-3 hover:bg-accent/30 transition-colors"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    {isStdio ? (
+                      <Terminal className="size-3.5 text-muted-foreground shrink-0" />
+                    ) : (
+                      <Cloud className="size-3.5 text-muted-foreground shrink-0" />
+                    )}
+                    <span className="font-medium text-foreground text-sm truncate">
+                      {srv.name}
+                    </span>
+                    {pkg?.transport_type && (
+                      <Badge variant="outline" className="text-[10px] shrink-0">
+                        {pkg.transport_type}
+                      </Badge>
+                    )}
+                  </div>
+                  {srv.description && (
+                    <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                      {srv.description}
+                    </p>
+                  )}
+                  {repoUrl && (
+                    <a
+                      href={repoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline mt-1"
+                    >
+                      <ExternalLink className="size-2.5" />
+                      {repoUrl.replace('https://', '')}
+                    </a>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  className="shrink-0"
+                  onClick={() => onPick(srv)}
+                >
+                  <Plus className="size-3" />
+                  Use
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// --- Server Form Component ---
+
 function ServerForm({
-  preset,
   server,
   onClose,
+  onRegistryView,
 }: {
-  preset?: { id: string; name: string; config: PresetConfig | null };
   server?: Server | null;
   onClose: () => void;
+  onRegistryView?: () => void;
 }) {
   const queryClient = useQueryClient();
   const isEdit = !!server;
-  const cfg = preset?.config;
 
-  const [name, setName] = useState(server?.name || cfg?.name || '');
+  // Listen for registry picks
+  const [name, setName] = useState(server?.name || '');
   const [transport, setTransport] = useState<Transport>(
-    (server?.transport as Transport) || cfg?.transport || 'stdio',
+    (server?.transport as Transport) || 'stdio',
   );
-  const [command, setCommand] = useState(server?.command || cfg?.command || '');
+  const [command, setCommand] = useState(server?.command || '');
   const [args, setArgs] = useState(
-    server?.args?.join(' ') || cfg?.args || '',
+    server?.args?.join(' ') || '',
   );
-  const [url, setUrl] = useState(server?.url || cfg?.url || '');
+  const [url, setUrl] = useState(server?.url || '');
   const [headers, setHeaders] = useState(
     server?.headers
       ? Object.entries(server.headers)
@@ -350,6 +429,30 @@ function ServerForm({
   const [authToken, setAuthToken] = useState(server?.auth_token || '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // Listen for registry pick events
+  useState(() => {
+    const handler = (e: Event) => {
+      const srv = (e as CustomEvent).detail as RegistryServer;
+      const pkg = srv.packages?.[0];
+      if (pkg) {
+        setName(srv.name);
+        if (pkg.transport_type === 'stdio' || pkg.command) {
+          setTransport('stdio');
+          setCommand(pkg.command || 'npx');
+          setArgs((pkg.args || []).join(' '));
+        } else if (pkg.url) {
+          setTransport('streamable-http');
+          setUrl(pkg.url);
+        }
+        if (pkg.env) {
+          setEnv(Object.entries(pkg.env).map(([k, v]) => `${k}=${v}`).join('\n'));
+        }
+      }
+    };
+    window.addEventListener('registry-pick', handler);
+    return () => window.removeEventListener('registry-pick', handler);
+  });
 
   const isHTTP = transport === 'http' || transport === 'streamable-http';
 
@@ -415,16 +518,17 @@ function ServerForm({
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-      <DialogHeader>
-        <DialogTitle>{isEdit ? 'Edit MCP Server' : 'Add MCP Server'}</DialogTitle>
+      {!isEdit && (
         <DialogDescription>
-          {isEdit ? (
-            <>Update configuration for <span className="font-medium text-foreground">{server!.name}</span></>
-          ) : (
-            <>Preset: <span className="font-medium text-foreground">{preset?.name}</span></>
-          )}
+          Configure a server manually, or search the MCP registry.
         </DialogDescription>
-      </DialogHeader>
+      )}
+
+      {isEdit && (
+        <DialogDescription>
+          Update configuration for <span className="font-medium text-foreground">{server!.name}</span>
+        </DialogDescription>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="grid gap-1.5">
@@ -478,12 +582,7 @@ function ServerForm({
         </div>
       ) : (
         <div className="grid gap-1.5">
-          <Label htmlFor="srv-url">
-            URL
-            {cfg?.urlHint && (
-              <span className="text-muted-foreground font-normal"> ({cfg.urlHint})</span>
-            )}
-          </Label>
+          <Label htmlFor="srv-url">URL</Label>
           <Input
             id="srv-url"
             value={url}
@@ -508,8 +607,7 @@ function ServerForm({
           />
           <p className="text-xs text-muted-foreground">
             Optional — used as client_id for OAuth. For Entra ID / Azure DevOps: leave empty and
-            OAuth will use a built-in public client. Enter a client_id only if you have a custom app
-            registration.
+            OAuth will use a built-in public client.
           </p>
         </div>
       )}
@@ -544,6 +642,17 @@ function ServerForm({
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive break-words">
           {error}
         </div>
+      )}
+
+      {!isEdit && onRegistryView && (
+        <button
+          type="button"
+          onClick={onRegistryView}
+          className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline self-start"
+        >
+          <Search className="size-3" />
+          Search MCP registry instead
+        </button>
       )}
 
       <DialogFooter>

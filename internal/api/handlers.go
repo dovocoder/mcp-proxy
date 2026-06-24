@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -61,6 +63,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 
 	// Auth routes (no auth required)
 	mux.Handle("POST /api/auth/login", h.auth.LoginRateLimitMiddleware(http.HandlerFunc(h.handleLogin)))
+
+	// Registry search (no auth — public catalog)
+	mux.HandleFunc("GET /api/registry/search", h.handleRegistrySearch)
 
 	// OAuth callback (no auth — browser redirect)
 	mux.HandleFunc("GET /api/oauth/callback", h.handleOAuthCallback)
@@ -1327,6 +1332,40 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// won't appear in server logs, browser history entries, or referrer headers
 	frontendURL := "/login#token=" + jwtToken
 	http.Redirect(w, r, frontendURL, http.StatusFound)
+}
+
+// handleRegistrySearch proxies a search query to an MCP registry.
+// Default registry: https://registry.modelcontextprotocol.io/v0/servers
+// Can be overridden with MCP_REGISTRY_URL env var.
+func (h *Handlers) handleRegistrySearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	registryURL := os.Getenv("MCP_REGISTRY_URL")
+	if registryURL == "" {
+		registryURL = "https://registry.modelcontextprotocol.io/v0/servers"
+	}
+
+	targetURL := registryURL
+	if q != "" {
+		targetURL += "?search=" + url.QueryEscape(q)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Failed to reach registry"})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024)) // 2MB max
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to read registry response"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
 }
 
 // handleProtectedResourceMetadata returns RFC 9728 Protected Resource Metadata.

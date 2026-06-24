@@ -263,6 +263,35 @@ export const memorySets = {
     request<{ status: string }>(`/memory-sets/${id}`, { method: 'DELETE' }),
 };
 
+// --- Registry ---
+
+export interface RegistryServer {
+  id?: string;
+  name: string;
+  description?: string;
+  repository?: { url?: string; source?: string };
+  version_detail?: {
+    version?: string;
+  };
+  packages?: Array<{
+    registry_type: string;
+    registry_base_url?: string;
+    identifier?: string;
+    transport_type: string;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+  }>;
+}
+
+export const registry = {
+  search: (query?: string) => {
+    const qs = query ? `?q=${encodeURIComponent(query)}` : '';
+    return fetch(`/api/registry/search${qs}`).then((r) => r.json());
+  },
+};
+
 // --- Env Variables ---
 
 export interface EnvVar {

@@ -19,11 +19,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <div className="dark">
-          <BrowserRouter>
-            <App />
-          </BrowserRouter>
-        </div>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
       </TooltipProvider>
     </QueryClientProvider>
   </StrictMode>,
