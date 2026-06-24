@@ -1910,14 +1910,21 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward the request to the upstream provider
-	// Don't follow redirects — OAuth endpoints should not redirect POST requests
+	// Don't follow redirects — OAuth endpoints should not redirect POST requests.
+	// A 301/302 redirect would convert POST→GET, causing PocketID to return 404.
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			log.Printf("[OAuth-Proxy] Redirect blocked: %s -> %s (method=%s)", upstreamURL, req.URL.String(), req.Method)
 			return http.ErrUseLastResponse
 		},
 	}
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bodyReader)
+	// Always use POST for token requests — never let a redirect change the method
+	method := r.Method
+	if r.URL.Path == "/api/oauth/token" {
+		method = http.MethodPost
+	}
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), method, upstreamURL, bodyReader)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to create upstream request")
 		return
