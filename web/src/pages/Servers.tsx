@@ -18,7 +18,12 @@ import {
   Zap,
   Settings2,
   Shield,
+  ShieldAlert,
   KeyRound,
+  Globe,
+  Variable,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { servers as serversApi, type Server, registry as registryApi, type RegistryServer } from '../api/client';
 import { cn } from '../lib/utils';
@@ -37,6 +42,13 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Dialog,
   DialogTrigger,
@@ -464,6 +476,10 @@ function ServerForm({
       : '',
   );
   const [authToken, setAuthToken] = useState(server?.auth_token || '');
+  const [authMethod, setAuthMethod] = useState(server?.auth_method || (server?.auth_token ? 'bearer' : 'none'));
+  const [bearerToken, setBearerToken] = useState(server?.auth_token || '');
+  const [bearerTokenEnv, setBearerTokenEnv] = useState(server?.bearer_token_env || '');
+  const [showToken, setShowToken] = useState(false);
   const [timeout, setTimeout] = useState(server?.timeout ?? 120);
   const [connectTimeout, setConnectTimeout] = useState(server?.connect_timeout ?? 60);
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
@@ -527,7 +543,16 @@ function ServerForm({
         data.headers = hdrs;
       }
 
-      if (authToken) data.auth_token = authToken;
+      // Set auth fields based on auth method
+      data.auth_method = authMethod;
+      if (authMethod === 'oauth') {
+        // For OAuth, auth_token is the client_id
+        if (authToken) data.auth_token = authToken;
+      } else if (authMethod === 'bearer') {
+        data.auth_token = bearerToken;
+      } else if (authMethod === 'env_bearer') {
+        data.bearer_token_env = bearerTokenEnv;
+      }
 
       const envVars: Record<string, string> = {};
       if (env) {
@@ -673,26 +698,147 @@ function ServerForm({
       {/* Authentication (HTTP only) */}
       {isHTTP && (
         <div className="grid gap-3">
+          <Separator />
           <div className="grid gap-1.5">
-            <Label htmlFor="srv-token" className="flex items-center gap-1.5">
-              <KeyRound className="size-3.5 text-muted-foreground" />
-              OAuth Client ID
-              <span className="text-[10px] text-muted-foreground font-normal">(optional)</span>
+            <Label className="flex items-center gap-1.5">
+              <Shield className="size-3.5 text-muted-foreground" />
+              Authentication Method
             </Label>
-            <Input
-              id="srv-token"
-              type="password"
-              value={authToken}
-              onChange={(e) => setAuthToken(e.target.value)}
-              className="font-mono"
-              placeholder="Leave empty for auto-discovery"
-            />
-            <p className="text-xs text-muted-foreground">
-              Pre-registered OAuth client_id. Leave empty to use dynamic registration,
-              CIMD, or Entra ID public client. For manual bearer tokens or env var tokens,
-              configure them from the server detail page after creation.
-            </p>
+            <Select
+              value={authMethod}
+              onValueChange={(v) => {
+                if (!v) return;
+                setAuthMethod(v);
+                // Reset fields when switching methods
+                if (v === 'none') {
+                  setBearerToken('');
+                  setBearerTokenEnv('');
+                  setAuthToken('');
+                } else if (v === 'oauth') {
+                  setBearerToken('');
+                  setBearerTokenEnv('');
+                } else if (v === 'bearer') {
+                  setAuthToken('');
+                  setBearerTokenEnv('');
+                } else if (v === 'env_bearer') {
+                  setAuthToken('');
+                  setBearerToken('');
+                }
+              }}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">
+                  <span className="flex items-center gap-2">
+                    <ShieldAlert className="size-4 text-muted-foreground" />
+                    No Authentication
+                  </span>
+                </SelectItem>
+                <SelectItem value="oauth">
+                  <span className="flex items-center gap-2">
+                    <Globe className="size-4 text-primary" />
+                    OAuth (Auto-discovery)
+                  </span>
+                </SelectItem>
+                <SelectItem value="bearer">
+                  <span className="flex items-center gap-2">
+                    <KeyRound className="size-4 text-primary" />
+                    Manual Bearer Token
+                  </span>
+                </SelectItem>
+                <SelectItem value="env_bearer">
+                  <span className="flex items-center gap-2">
+                    <Variable className="size-4 text-primary" />
+                    Env Var Bearer Token
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
+
+          {/* OAuth — client_id field */}
+          {authMethod === 'oauth' && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="srv-token" className="flex items-center gap-1.5">
+                <KeyRound className="size-3.5 text-muted-foreground" />
+                OAuth Client ID
+                <span className="text-[10px] text-muted-foreground font-normal">(optional)</span>
+              </Label>
+              <Input
+                id="srv-token"
+                type="password"
+                value={authToken}
+                onChange={(e) => setAuthToken(e.target.value)}
+                className="font-mono"
+                placeholder="Leave empty for auto-discovery"
+              />
+              <p className="text-xs text-muted-foreground">
+                Pre-registered OAuth client_id. Leave empty to use dynamic registration,
+                CIMD, or Entra ID public client. Complete the flow from the server detail page after creation.
+              </p>
+            </div>
+          )}
+
+          {/* Bearer token — manual */}
+          {authMethod === 'bearer' && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="srv-bearer" className="flex items-center gap-1.5">
+                <KeyRound className="size-3.5 text-muted-foreground" />
+                Bearer Token
+              </Label>
+              <div className="relative">
+                <Textarea
+                  id="srv-bearer"
+                  value={bearerToken}
+                  onChange={(e) => setBearerToken(e.target.value)}
+                  placeholder="Paste bearer token..."
+                  className={`font-mono text-xs pr-10 ${!showToken ? '[-webkit-text-security:disc] [text-security:disc]' : ''}`}
+                  rows={2}
+                />
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  className="absolute right-1.5 top-1.5"
+                  onClick={() => setShowToken(!showToken)}
+                >
+                  {showToken ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Pre-obtained bearer token sent as <code className="font-mono">Authorization: Bearer ...</code> header.
+              </p>
+            </div>
+          )}
+
+          {/* Env var bearer */}
+          {authMethod === 'env_bearer' && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="srv-envvar" className="flex items-center gap-1.5">
+                <Variable className="size-3.5 text-muted-foreground" />
+                Environment Variable Name
+              </Label>
+              <Input
+                id="srv-envvar"
+                value={bearerTokenEnv}
+                onChange={(e) => setBearerTokenEnv(e.target.value)}
+                placeholder="e.g. GITHUB_COPILOT_TOKEN"
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Token read from <code className="font-mono">os.Getenv()</code> at runtime — never stored in the database.
+              </p>
+            </div>
+          )}
+
+          {/* No auth hint */}
+          {authMethod === 'none' && (
+            <p className="text-xs text-muted-foreground">
+              No authentication header will be sent. The server must allow unauthenticated access.
+            </p>
+          )}
+
           <div className="grid gap-1.5">
             <Label htmlFor="srv-headers" className="flex items-center gap-1.5">
               <Shield className="size-3.5 text-muted-foreground" />
