@@ -269,8 +269,11 @@ func discoverAuthServerMetadata(authServerURL string) *OAuthServerMetadata {
 			continue
 		}
 
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err != nil {
+			continue
+		}
 
 		// Parse as OAuth 2.0 metadata (same fields as OIDC for our purposes)
 		var metadata OAuthServerMetadata

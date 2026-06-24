@@ -100,11 +100,12 @@ func main() {
 
 	// Create server
 	srv := &http.Server{
-		Addr:         cfg.ListenAddr(),
-		Handler:      finalHandler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 120 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:           cfg.ListenAddr(),
+		Handler:        finalHandler,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   120 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1MB — prevents header-based DoS
 	}
 
 	// Graceful shutdown

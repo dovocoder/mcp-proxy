@@ -165,6 +165,12 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 				"frame-ancestors 'none'; "+
 				"base-uri 'self'")
 
+		// Limit request body size to 10MB — prevents memory exhaustion from large payloads.
+		// 10MB is generous enough for MCP tool calls while preventing abuse.
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
