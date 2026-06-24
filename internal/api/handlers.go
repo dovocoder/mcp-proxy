@@ -79,12 +79,18 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/oidc/callback", h.handleOIDCCallback)
 
 	// Protected Resource Metadata (RFC 9728) — for MCP client OAuth discovery
+	// Root: /.well-known/oauth-protected-resource
+	// Path-insertion: /.well-known/oauth-protected-resource/api/compounds/{id}/mcp
+	// The path-insertion variant is tried FIRST by MCP clients (per RFC 9728 §5.1).
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", h.handleProtectedResourceMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/", h.handleProtectedResourceMetadata)
 
 	// Authorization Server Metadata (RFC 8414) — wraps OIDC provider endpoints + adds DCR/CIMD
+	// Also serve path-insertion variant for clients that try it.
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", h.handleAuthorizationServerMetadata)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server/", h.handleAuthorizationServerMetadata)
 
-	// OIDC Discovery 1.0 — same metadata as above, for clients that prefer OIDC format
+	// OIDC Discovery 1.0 — same metadata, for clients that prefer OIDC format
 	mux.HandleFunc("GET /.well-known/openid-configuration", h.handleAuthorizationServerMetadata)
 
 	// Client ID Metadata Document (CIMD) — public endpoint fetched by authorization servers
@@ -1536,14 +1542,29 @@ func (h *Handlers) handleRegistrySearch(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleProtectedResourceMetadata returns RFC 9728 Protected Resource Metadata.
-// MCP clients use this to discover the authorization server.
-// Points to the proxy itself as the authorization server (which wraps the OIDC provider).
+// Handles both root (/.well-known/oauth-protected-resource) and path-insertion
+// (/.well-known/oauth-protected-resource/api/compounds/{id}/mcp) variants.
+// The resource field reflects the actual MCP endpoint URL when accessed via path-insertion.
 func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
 	}
-	resourceURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+
+	// Check if this is a path-insertion request (e.g. /.well-known/oauth-protected-resource/api/compounds/.../mcp)
+	// The path after the well-known prefix is the actual MCP endpoint path.
+	wellKnownPrefix := "/.well-known/oauth-protected-resource"
+	resourceURL := baseURL
+	if len(r.URL.Path) > len(wellKnownPrefix) {
+		// Extract the MCP endpoint path from the URL
+		mcpPath := r.URL.Path[len(wellKnownPrefix):]
+		// Strip leading slashes
+		mcpPath = strings.TrimPrefix(mcpPath, "/")
+		if mcpPath != "" {
+			resourceURL = fmt.Sprintf("%s/%s", baseURL, mcpPath)
+		}
+	}
 
 	resp := map[string]interface{}{
 		"resource": resourceURL,
@@ -1553,7 +1574,7 @@ func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *htt
 		// Point to the proxy itself as the auth server — the proxy serves
 		// /.well-known/oauth-authorization-server which wraps the OIDC provider
 		// and adds DCR + CIMD support that the upstream provider may lack.
-		resp["authorization_servers"] = []string{resourceURL}
+		resp["authorization_servers"] = []string{baseURL}
 		resp["bearer_methods"] = []string{"header"}
 	}
 
