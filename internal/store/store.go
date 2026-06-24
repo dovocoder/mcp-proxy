@@ -149,6 +149,17 @@ func migrate(db *sql.DB) error {
 		created_at TEXT NOT NULL,
 		UNIQUE(tool_name, server_id)
 	);
+
+	CREATE TABLE IF NOT EXISTS oauth_registrations (
+		issuer TEXT PRIMARY KEY,
+		client_id TEXT NOT NULL,
+		client_secret TEXT NOT NULL DEFAULT '',
+		registration_access_token TEXT NOT NULL DEFAULT '',
+		client_id_issued_at INTEGER NOT NULL DEFAULT 0,
+		client_secret_expires_at INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
 `
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -467,6 +478,43 @@ func (s *Store) GetOAuthTokens(serverID string) (*mcp.OAuthTokens, string, strin
 // DeleteOAuthTokens removes OAuth tokens for a server.
 func (s *Store) DeleteOAuthTokens(serverID string) error {
 	_, err := s.db.Exec(`DELETE FROM oauth_tokens WHERE server_id = ?`, serverID)
+	return err
+}
+
+// --- OAuth Client Registration ---
+
+// OAuthRegistration is a persisted dynamic client registration keyed by issuer.
+type OAuthRegistration struct {
+	Issuer                  string `json:"issuer"`
+	ClientID                string `json:"client_id"`
+	ClientSecret            string `json:"client_secret,omitempty"`
+	RegistrationAccessToken string `json:"registration_access_token,omitempty"`
+	ClientIDIssuedAt        int64  `json:"client_id_issued_at,omitempty"`
+	ClientSecretExpiresAt   int64  `json:"client_secret_expires_at,omitempty"`
+	CreatedAt               string `json:"created_at"`
+	UpdatedAt               string `json:"updated_at"`
+}
+
+// GetOAuthRegistration retrieves a persisted client registration by issuer.
+func (s *Store) GetOAuthRegistration(issuer string) (*OAuthRegistration, error) {
+	row := s.db.QueryRow(`SELECT issuer, client_id, client_secret, registration_access_token, client_id_issued_at, client_secret_expires_at, created_at, updated_at FROM oauth_registrations WHERE issuer = ?`, issuer)
+	var r OAuthRegistration
+	if err := row.Scan(&r.Issuer, &r.ClientID, &r.ClientSecret, &r.RegistrationAccessToken, &r.ClientIDIssuedAt, &r.ClientSecretExpiresAt, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// SaveOAuthRegistration creates or updates a client registration keyed by issuer.
+func (s *Store) SaveOAuthRegistration(reg *mcp.ClientRegistration, issuer string) error {
+	_, err := s.db.Exec(`INSERT INTO oauth_registrations (issuer, client_id, client_secret, registration_access_token, client_id_issued_at, client_secret_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(issuer) DO UPDATE SET client_id = excluded.client_id, client_secret = excluded.client_secret, registration_access_token = excluded.registration_access_token, client_id_issued_at = excluded.client_id_issued_at, client_secret_expires_at = excluded.client_secret_expires_at, updated_at = excluded.updated_at`,
+		issuer, reg.ClientID, reg.ClientSecret, reg.RegistrationAccessToken, reg.ClientIDIssuedAt, reg.ClientSecretExpiresAt, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	return err
+}
+
+// DeleteOAuthRegistration removes a client registration by issuer.
+func (s *Store) DeleteOAuthRegistration(issuer string) error {
+	_, err := s.db.Exec(`DELETE FROM oauth_registrations WHERE issuer = ?`, issuer)
 	return err
 }
 

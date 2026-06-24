@@ -709,38 +709,58 @@ func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string,
 	}
 
 	redirectURI := fmt.Sprintf("%s/api/oauth/callback", callbackBaseURL)
+	cimdURL := fmt.Sprintf("%s/api/oauth/client-metadata", callbackBaseURL)
 	var clientID, clientSecret string
 
-	// Try dynamic client registration if endpoint exists
-	if metadata.RegistrationEndpoint != "" {
-		reg, err := mcp.RegisterClient(metadata.RegistrationEndpoint, []string{redirectURI})
-		if err == nil {
-			clientID = reg.ClientID
-			clientSecret = reg.ClientSecret
-			log.Printf("Dynamically registered OAuth client for server %s: %s", srv.Name, clientID)
-		} else {
-			log.Printf("Dynamic registration failed for %s: %v", srv.Name, err)
+	// Priority 1: Pre-registered client ID (auth_token field)
+	if srv.AuthToken != "" {
+		clientID = srv.AuthToken
+		log.Printf("Using pre-registered client ID for server %s", srv.Name)
+	}
+
+	// Priority 2: Client ID Metadata Documents (CIMD)
+	if clientID == "" && metadata.ClientIDMetadataDocumentSupported {
+		clientID = cimdURL
+		log.Printf("Using Client ID Metadata Document for server %s: %s", srv.Name, cimdURL)
+	}
+
+	// Priority 3: Dynamic Client Registration (RFC 7591)
+	if clientID == "" && metadata.RegistrationEndpoint != "" {
+		// Check for persisted registration first (Authorization Server Binding)
+		if metadata.Issuer != "" {
+			if reg, err := m.store.GetOAuthRegistration(metadata.Issuer); err == nil && reg != nil {
+				clientID = reg.ClientID
+				clientSecret = reg.ClientSecret
+				log.Printf("Reusing persisted DCR client for server %s (issuer %s)", srv.Name, metadata.Issuer)
+			}
+		}
+		// Register new client if none persisted
+		if clientID == "" {
+			reg, err := mcp.RegisterClient(metadata.RegistrationEndpoint, []string{redirectURI})
+			if err == nil {
+				clientID = reg.ClientID
+				clientSecret = reg.ClientSecret
+				log.Printf("Dynamically registered OAuth client for server %s: %s", srv.Name, clientID)
+				// Persist the registration keyed by issuer
+				if metadata.Issuer != "" {
+					if err := m.store.SaveOAuthRegistration(reg, metadata.Issuer); err != nil {
+						log.Printf("Warning: failed to persist DCR registration: %v", err)
+					}
+				}
+			} else {
+				log.Printf("Dynamic registration failed for %s: %v", srv.Name, err)
+			}
 		}
 	}
 
-	// If no client ID from registration, check if the server config has an auth_token
-	// that could be a pre-configured client ID (stored in auth_token field)
-	if clientID == "" && srv.AuthToken != "" {
-		// Use the configured auth_token as a static client ID
-		clientID = srv.AuthToken
-		log.Printf("Using configured client ID for server %s", srv.Name)
-	}
-
-	// If still no client ID, check if the authorization server is Entra ID.
-	// Entra ID doesn't support dynamic registration, but we can use a well-known
-	// public client (Azure CLI's client_id) with PKCE — no app registration needed.
+	// Priority 4: Entra ID public client (well-known client_id)
 	if clientID == "" && (mcp.IsEntraID(metadata.Issuer) || mcp.IsEntraID(metadata.AuthorizationEndpoint) || mcp.IsEntraID(metadata.TokenEndpoint)) {
 		clientID = mcp.EntraIDPublicClientID
 		log.Printf("Using Entra ID public client for server %s (no app registration required)", srv.Name)
 	}
 
 	if clientID == "" {
-		return "", fmt.Errorf("no client ID available — dynamic registration not supported by the authorization server. Configure a client_id in the server's Auth Token field, or register an OAuth app in your identity provider (e.g., Microsoft Entra ID) and enter the client ID")
+		return "", fmt.Errorf("no client ID available — the authorization server does not support CIMD or dynamic registration. Configure a client_id in the server's Auth Token field, or register an OAuth app in your identity provider and enter the client ID")
 	}
 
 	// Generate PKCE
@@ -867,6 +887,13 @@ func (m *Manager) GetOAuthMetadata(serverID string) *mcp.OAuthServerMetadata {
 	return meta
 }
 
+// InvalidateOAuthMetadataCache removes cached OAuth metadata for a server.
+func (m *Manager) InvalidateOAuthMetadataCache(serverID string) {
+	m.oauthMetaMu.Lock()
+	delete(m.oauthMetaCache, serverID)
+	m.oauthMetaMu.Unlock()
+}
+
 // DeviceAuthResult holds the result of initiating a device code flow.
 type DeviceAuthResult struct {
 	UserCode        string `json:"user_code"`
@@ -898,12 +925,53 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 		return nil, fmt.Errorf("failed to discover OAuth metadata: %w", err)
 	}
 
-	// Determine client ID: configured > Entra ID public client
-	clientID := srv.AuthToken
+	// Determine client ID using MCP spec priority order:
+	// 1. Pre-registered (auth_token)
+	// 2. CIMD (if supported)
+	// 3. Persisted or new Dynamic Client Registration
+	// 4. Entra ID public client
+	clientID := ""
+
+	// Priority 1: Pre-registered client ID
+	if srv.AuthToken != "" {
+		clientID = srv.AuthToken
+		log.Printf("Using pre-registered client ID for device auth (server %s)", srv.Name)
+	}
+
+	// Priority 2: CIMD — device code doesn't need redirect_uri but auth server
+	// may still fetch the metadata document to validate the client
+	if clientID == "" && metadata.ClientIDMetadataDocumentSupported {
+		// For device code, we can't use a URL client_id without the auth server
+		// being able to reach our CIMD endpoint. Fall through to DCR/Entra.
+		log.Printf("CIMD supported but device code flow — skipping for server %s", srv.Name)
+	}
+
+	// Priority 3: Dynamic Client Registration
+	if clientID == "" && metadata.RegistrationEndpoint != "" {
+		if metadata.Issuer != "" {
+			if reg, err := m.store.GetOAuthRegistration(metadata.Issuer); err == nil && reg != nil {
+				clientID = reg.ClientID
+				log.Printf("Reusing persisted DCR client for device auth (server %s)", srv.Name)
+			}
+		}
+		if clientID == "" {
+			reg, err := mcp.RegisterClient(metadata.RegistrationEndpoint, nil)
+			if err == nil {
+				clientID = reg.ClientID
+				log.Printf("Dynamically registered client for device auth (server %s): %s", srv.Name, clientID)
+				if metadata.Issuer != "" {
+					m.store.SaveOAuthRegistration(reg, metadata.Issuer)
+				}
+			}
+		}
+	}
+
+	// Priority 4: Entra ID public client
 	if clientID == "" && (mcp.IsEntraID(metadata.Issuer) || mcp.IsEntraID(metadata.AuthorizationEndpoint) || mcp.IsEntraID(metadata.TokenEndpoint)) {
 		clientID = mcp.EntraIDPublicClientID
 		log.Printf("Using Entra ID public client for device code flow (server %s)", srv.Name)
 	}
+
 	if clientID == "" {
 		return nil, fmt.Errorf("no client ID available — configure a client_id in the server's Auth Token field")
 	}

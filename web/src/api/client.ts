@@ -129,6 +129,10 @@ export const servers = {
     request<{ auth_url: string; message: string }>(`/servers/${id}/auth`, { method: 'POST' }),
   authStatus: (id: string) =>
     request<{ status: string; has_tokens: boolean; expired: boolean; issuer?: string; authorization_endpoint?: string }>(`/servers/${id}/auth-status`),
+  registration: (id: string) =>
+    request<RegistrationInfo>(`/servers/${id}/registration`),
+  deleteRegistration: (id: string) =>
+    request<{ status: string }>(`/servers/${id}/registration`, { method: 'DELETE' }),
   initiateDeviceAuth: (id: string) =>
     request<DeviceAuthResult>(`/servers/${id}/device-auth`, { method: 'POST' }),
   pollDeviceAuth: (id: string) =>
@@ -138,6 +142,18 @@ export const servers = {
 };
 
 // --- Device Auth ---
+
+export interface RegistrationInfo {
+  status: 'none' | 'pre-registered' | 'registered' | 'cimd-available';
+  issuer?: string;
+  authorization_endpoint?: string;
+  registration_endpoint?: string;
+  client_id_metadata_document_supported?: boolean;
+  client_id?: string;
+  registration_method?: string;
+  cimd_url?: string;
+  created_at?: string;
+}
 
 export interface DeviceAuthResult {
   user_code: string;

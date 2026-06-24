@@ -17,8 +17,11 @@ import {
   Terminal,
   Eraser,
   Ban,
+  KeyRound,
+  Fingerprint,
+  Globe,
 } from 'lucide-react';
-import { servers as serversApi, tools as toolsApi, disabledTools as disabledToolsApi, type DeviceAuthResult } from '../api/client';
+import { servers as serversApi, tools as toolsApi, disabledTools as disabledToolsApi, type DeviceAuthResult, type RegistrationInfo } from '../api/client';
 import { cn } from '../lib/utils';
 import { Button } from '@/components/ui/button';
 import {
@@ -106,6 +109,12 @@ export default function ServerDetail() {
     refetchInterval: 5000,
   });
 
+  const { data: registration } = useQuery({
+    queryKey: ['registration', id],
+    queryFn: () => serversApi.registration(id!),
+    enabled: !!id && isHTTP,
+  });
+
   const isStdio = data?.server.transport === 'stdio';
 
   const { data: logsData } = useQuery({
@@ -125,6 +134,15 @@ export default function ServerDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['server', id] });
       queryClient.invalidateQueries({ queryKey: ['servers'] });
+    },
+  });
+
+  const [deleteRegOpen, setDeleteRegOpen] = useState(false);
+  const deleteRegistrationMutation = useMutation({
+    mutationFn: () => serversApi.deleteRegistration(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['registration', id] });
+      setDeleteRegOpen(false);
     },
   });
 
@@ -355,6 +373,108 @@ export default function ServerDetail() {
         </Card>
       )}
 
+      {/* Client Registration */}
+      {isHTTP && registration && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <KeyRound className="size-5 text-primary shrink-0" />
+              <div>
+                <CardTitle>Client Registration</CardTitle>
+                <CardDescription>
+                  OAuth client registration method and credentials
+                </CardDescription>
+              </div>
+            </div>
+            <CardAction>
+              {registration.status === 'registered' && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => setDeleteRegOpen(true)}
+                >
+                  <Trash2 className="size-4" />
+                  Remove
+                </Button>
+              )}
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {registration.status === 'pre-registered' && (
+                <Badge variant="secondary" className="gap-1">
+                  <Fingerprint className="size-3" />
+                  Pre-registered
+                </Badge>
+              )}
+              {registration.status === 'registered' && (
+                <Badge variant="secondary" className="gap-1">
+                  <KeyRound className="size-3" />
+                  Dynamic Registration
+                </Badge>
+              )}
+              {registration.status === 'cimd-available' && (
+                <Badge variant="secondary" className="gap-1">
+                  <Globe className="size-3" />
+                  CIMD Available
+                </Badge>
+              )}
+              {registration.status === 'none' && (
+                <Badge variant="outline">No registration</Badge>
+              )}
+              {registration.client_id_metadata_document_supported && (
+                <Badge variant="outline" className="gap-1">
+                  <Globe className="size-3" />
+                  CIMD Supported
+                </Badge>
+              )}
+            </div>
+
+            {registration.client_id && (
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Client ID</span>
+                <p className="font-mono text-xs text-foreground bg-muted/40 rounded px-2 py-1.5 break-all">
+                  {registration.client_id.length > 60
+                    ? registration.client_id.slice(0, 60) + '…'
+                    : registration.client_id}
+                </p>
+              </div>
+            )}
+
+            {registration.cimd_url && (
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Globe className="size-3" />
+                  Client ID Metadata Document URL
+                </span>
+                <p className="font-mono text-xs text-primary bg-muted/40 rounded px-2 py-1.5 break-all">
+                  {registration.cimd_url}
+                </p>
+              </div>
+            )}
+
+            {registration.issuer && (
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Authorization Server (Issuer)</span>
+                <p className="font-mono text-xs text-foreground bg-muted/40 rounded px-2 py-1.5 break-all">
+                  {registration.issuer}
+                </p>
+              </div>
+            )}
+
+            {registration.registration_endpoint && (
+              <div className="space-y-1">
+                <span className="text-xs text-muted-foreground">Registration Endpoint</span>
+                <p className="font-mono text-xs text-foreground bg-muted/40 rounded px-2 py-1.5 break-all">
+                  {registration.registration_endpoint}
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Connection URLs */}
       <Card>
         <CardHeader>
@@ -575,6 +695,17 @@ export default function ServerDetail() {
         itemName={srv.name}
         loading={deleteMutation.isPending}
         onConfirm={() => deleteMutation.mutate()}
+      />
+
+      <ConfirmDialog
+        open={deleteRegOpen}
+        onOpenChange={setDeleteRegOpen}
+        title="Remove Client Registration"
+        description="Remove the dynamically registered OAuth client for"
+        itemName={registration?.issuer || 'this server'}
+        confirmText="Remove Registration"
+        loading={deleteRegistrationMutation.isPending}
+        onConfirm={() => deleteRegistrationMutation.mutate()}
       />
     </div>
   );

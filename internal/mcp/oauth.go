@@ -26,6 +26,7 @@ type OAuthServerMetadata struct {
 	GrantTypesSupported    []string `json:"grant_types_supported,omitempty"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	CodeChallengeMethodsSupported      []string `json:"code_challenge_methods_supported,omitempty"`
+	ClientIDMetadataDocumentSupported   bool     `json:"client_id_metadata_document_supported,omitempty"`
 }
 
 // OAuthTokens represents stored OAuth tokens.
@@ -51,10 +52,13 @@ func (t *OAuthTokens) HasRefreshToken() bool {
 	return t.RefreshToken != ""
 }
 
-// ClientRegistration represents a dynamically registered OAuth client.
+// ClientRegistration represents a dynamically registered OAuth client (RFC 7591).
 type ClientRegistration struct {
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret,omitempty"`
+	ClientID                string `json:"client_id"`
+	ClientSecret            string `json:"client_secret,omitempty"`
+	RegistrationAccessToken string `json:"registration_access_token,omitempty"`
+	ClientIDIssuedAt        int64  `json:"client_id_issued_at,omitempty"`
+	ClientSecretExpiresAt   int64  `json:"client_secret_expires_at,omitempty"`
 }
 
 // PKCEParams holds PKCE challenge parameters.
@@ -358,13 +362,15 @@ func extractResourceMetadataURL(header string) string {
 	return header[start:end]
 }
 
-// RegisterClient performs dynamic client registration (RFC7591).
+// RegisterClient performs dynamic client registration (RFC 7591).
+// Uses application_type "native" per MCP spec for local/CLI/desktop apps.
 func RegisterClient(registrationEndpoint string, redirectURIs []string) (*ClientRegistration, error) {
 	body := map[string]interface{}{
-		"redirect_uris": redirectURIs,
+		"redirect_uris":             redirectURIs,
 		"token_endpoint_auth_method": "none", // public client (PKCE)
-		"grant_types": []string{"authorization_code", "refresh_token"},
-		"response_types": []string{"code"},
+		"grant_types":               []string{"authorization_code", "refresh_token"},
+		"response_types":            []string{"code"},
+		"application_type":          "native",
 	}
 	bodyBytes, _ := json.Marshal(body)
 

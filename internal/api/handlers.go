@@ -80,6 +80,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Protected Resource Metadata (RFC 9728) — for MCP client OAuth discovery
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", h.handleProtectedResourceMetadata)
 
+	// Client ID Metadata Document (CIMD) — public endpoint fetched by authorization servers
+	mux.HandleFunc("GET /api/oauth/client-metadata", h.handleClientMetadata)
+
 	// --- MCP client endpoints (API key auth) ---
 	// Global (all servers)
 	mux.Handle("POST /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyGlobal)))
@@ -118,6 +121,8 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("POST /api/servers/{id}/device-auth", h.handleInitiateDeviceAuth)
 	adminMux.HandleFunc("POST /api/servers/{id}/device-auth/poll", h.handlePollDeviceAuth)
 	adminMux.HandleFunc("DELETE /api/servers/{id}/device-auth", h.handleCancelDeviceAuth)
+	adminMux.HandleFunc("GET /api/servers/{id}/registration", h.handleGetRegistration)
+	adminMux.HandleFunc("DELETE /api/servers/{id}/registration", h.handleDeleteRegistration)
 
 	adminMux.HandleFunc("GET /api/keys", h.handleListAPIKeys)
 	adminMux.HandleFunc("POST /api/keys", h.handleCreateAPIKey)
@@ -1465,6 +1470,101 @@ func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *htt
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleClientMetadata serves the Client ID Metadata Document (CIMD).
+// This is a public endpoint that authorization servers fetch to validate
+// the client when a URL-formatted client_id is used.
+// Per MCP spec: client_id MUST equal the URL this document is served at.
+func (h *Handlers) handleClientMetadata(w http.ResponseWriter, r *http.Request) {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	clientID := fmt.Sprintf("%s://%s/api/oauth/client-metadata", scheme, r.Host)
+	redirectURI := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"client_id":                clientID,
+		"client_name":             "MCP Proxy",
+		"client_uri":              fmt.Sprintf("%s://%s", scheme, r.Host),
+		"redirect_uris":           []string{redirectURI},
+		"grant_types":             []string{"authorization_code", "refresh_token"},
+		"response_types":          []string{"code"},
+		"token_endpoint_auth_method": "none",
+	})
+}
+
+// handleGetRegistration returns the OAuth client registration status for a server.
+func (h *Handlers) handleGetRegistration(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	meta := h.proxy.GetOAuthMetadata(id)
+	if meta == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "none",
+			"reason": "No OAuth metadata discovered for this server",
+		})
+		return
+	}
+
+	resp := map[string]interface{}{
+		"status":                                   "none",
+		"issuer":                                   meta.Issuer,
+		"authorization_endpoint":                   meta.AuthorizationEndpoint,
+		"registration_endpoint":                    meta.RegistrationEndpoint,
+		"client_id_metadata_document_supported":    meta.ClientIDMetadataDocumentSupported,
+	}
+
+	// Check for persisted dynamic registration
+	if meta.Issuer != "" {
+		if reg, err := h.store.GetOAuthRegistration(meta.Issuer); err == nil && reg != nil {
+			resp["status"] = "registered"
+			resp["client_id"] = reg.ClientID
+			resp["registration_method"] = "dynamic"
+			resp["created_at"] = reg.CreatedAt
+		}
+	}
+
+	// Check for pre-registered client ID (auth_token)
+	srv, err := h.store.GetServer(id)
+	if err == nil && srv != nil && srv.AuthToken != "" {
+		resp["status"] = "pre-registered"
+		resp["client_id"] = srv.AuthToken
+		resp["registration_method"] = "pre-registration"
+	}
+
+	// If CIMD is supported, report it as available
+	if meta.ClientIDMetadataDocumentSupported {
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		cimdURL := fmt.Sprintf("%s://%s/api/oauth/client-metadata", scheme, r.Host)
+		resp["cimd_url"] = cimdURL
+		if resp["status"] == "none" {
+			resp["status"] = "cimd-available"
+			resp["registration_method"] = "cimd"
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleDeleteRegistration removes a persisted dynamic client registration.
+func (h *Handlers) handleDeleteRegistration(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	meta := h.proxy.GetOAuthMetadata(id)
+	if meta == nil || meta.Issuer == "" {
+		writeError(w, http.StatusBadRequest, "No OAuth metadata found for this server")
+		return
+	}
+	if err := h.store.DeleteOAuthRegistration(meta.Issuer); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to delete registration")
+		return
+	}
+	// Invalidate the metadata cache so it's rediscovered next time
+	h.proxy.InvalidateOAuthMetadataCache(id)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // --- Disabled Tools ---
