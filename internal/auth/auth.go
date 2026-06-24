@@ -163,7 +163,8 @@ func ExtractToken(r *http.Request) string {
 	return ""
 }
 
-// ExtractAPIKey extracts the API key from the header or query param.
+// ExtractAPIKey extracts the API key from the header.
+// Does NOT accept query params (api_key=) to avoid leaking keys in server logs and referrer headers.
 func ExtractAPIKey(r *http.Request) string {
 	// Check X-API-Key header first
 	if key := r.Header.Get("X-API-Key"); key != "" {
@@ -171,10 +172,6 @@ func ExtractAPIKey(r *http.Request) string {
 	}
 	// Check Authorization header with Bearer scheme
 	if key := ExtractToken(r); key != "" && strings.HasPrefix(key, "mcp_") {
-		return key
-	}
-	// Check query parameter
-	if key := r.URL.Query().Get("api_key"); key != "" {
 		return key
 	}
 	return ""

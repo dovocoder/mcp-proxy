@@ -79,8 +79,11 @@ func main() {
 		serveFrontendFromDisk(mux, cfg)
 	}
 
-	// Apply CORS middleware
-	finalHandler := auth.CORSMiddleware(mux)
+	// Apply security headers + CORS middleware
+	finalHandler := auth.SecurityHeadersMiddleware(auth.CORSMiddleware(mux))
+
+	// Start rate limit cleanup routine
+	auth.StartCleanupRoutine()
 
 	// Create server
 	srv := &http.Server{

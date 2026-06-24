@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { auth, setToken } from '../api/client';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -10,19 +10,22 @@ import { Separator } from '@/components/ui/separator';
 
 export default function Login() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [oidcEnabled, setOidcEnabled] = useState(false);
 
-  // Check for OIDC token in URL (from OIDC callback redirect)
+  // Check for OIDC token in URL fragment (from OIDC callback redirect)
+  // Fragments (#) aren't sent to the server, so they don't leak in logs/referrer
   useEffect(() => {
-    const token = searchParams.get('token');
-    if (token) {
+    const hash = window.location.hash;
+    const tokenMatch = hash.match(/[#&]token=([^&]+)/);
+    if (tokenMatch) {
+      const token = decodeURIComponent(tokenMatch[1]);
       setToken(token);
-      // Clean the URL
+      // Clean the URL fragment
+      window.location.hash = '';
       navigate('/', { replace: true });
       return;
     }
@@ -30,7 +33,7 @@ export default function Login() {
     auth.oidcStatus()
       .then((res) => setOidcEnabled(res.enabled))
       .catch(() => {});
-  }, [searchParams, navigate]);
+  }, [navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

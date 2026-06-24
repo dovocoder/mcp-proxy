@@ -60,7 +60,7 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	})
 
 	// Auth routes (no auth required)
-	mux.HandleFunc("POST /api/auth/login", h.handleLogin)
+	mux.Handle("POST /api/auth/login", h.auth.LoginRateLimitMiddleware(http.HandlerFunc(h.handleLogin)))
 
 	// OAuth callback (no auth — browser redirect)
 	mux.HandleFunc("GET /api/oauth/callback", h.handleOAuthCallback)
@@ -1322,9 +1322,10 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect to frontend with token
-	// Use /login route (not protected) so the token is processed before auth check
-	frontendURL := "/login?token=" + jwtToken
+	// Redirect to frontend with token in URL fragment (not query param)
+	// Fragments (#) are NOT sent to the server in HTTP requests, so the token
+	// won't appear in server logs, browser history entries, or referrer headers
+	frontendURL := "/login#token=" + jwtToken
 	http.Redirect(w, r, frontendURL, http.StatusFound)
 }
 
