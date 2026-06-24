@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -1237,6 +1238,7 @@ func (h *Handlers) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	redirectURL := provider.RedirectURL(r)
 
 	// Store state in a short-lived cookie for CSRF protection
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_state",
 		Value:    state,
@@ -1244,7 +1246,7 @@ func (h *Handlers) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   300, // 5 minutes
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   isSecure,
 	})
 
 	authURL := provider.AuthURL(state, redirectURL)
@@ -1286,6 +1288,7 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// Exchange code for tokens
 	token, err := provider.Exchange(code, redirectURL)
 	if err != nil {
+		log.Printf("OIDC callback: token exchange failed (redirect=%s): %v", redirectURL, err)
 		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Token exchange failed: %v", err))
 		return
 	}
@@ -1293,6 +1296,7 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// Fetch user info
 	userInfo, err := provider.UserInfo(token.AccessToken)
 	if err != nil {
+		log.Printf("OIDC callback: userinfo failed: %v", err)
 		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Failed to get user info: %v", err))
 		return
 	}

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,7 +64,8 @@ func NewOIDCProvider(cfg OIDCConfig) (*OIDCProvider, error) {
 func (p *OIDCProvider) discover() error {
 	wellKnown := strings.TrimSuffix(p.config.Issuer, "/") + "/.well-known/openid-configuration"
 
-	resp, err := http.Get(wellKnown)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(wellKnown)
 	if err != nil {
 		return fmt.Errorf("failed to fetch OIDC discovery: %w", err)
 	}
@@ -139,7 +141,10 @@ func (p *OIDCProvider) Exchange(code string, redirectURL string) (*oauth2.Token,
 	}
 	cfg := *p.oauth2
 	cfg.RedirectURL = redirectURL
-	return cfg.Exchange(nil, code)
+	// Use a context with timeout — passing nil panics in oauth2
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return cfg.Exchange(ctx, code)
 }
 
 // UserInfo fetches user info from the OIDC provider's userinfo endpoint.
@@ -158,7 +163,8 @@ func (p *OIDCProvider) UserInfo(accessToken string) (map[string]interface{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch userinfo: %w", err)
 	}
