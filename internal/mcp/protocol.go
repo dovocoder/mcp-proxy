@@ -450,59 +450,80 @@ func (c *Client) parseSSEResponse(body io.Reader, reqID uint64) (json.RawMessage
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 
-	var currentEvent sseEvent
 	var dataLines []string
+
+	tryMatch := func(data string) (json.RawMessage, bool, error) {
+		var rpcResp JSONRPCResponse
+		if err := json.Unmarshal([]byte(data), &rpcResp); err != nil {
+			return nil, false, nil // not valid JSON yet
+		}
+		// Try to match the request ID (handle both numeric and string IDs)
+		matched := false
+		switch id := rpcResp.ID.(type) {
+		case float64:
+			matched = uint64(id) == reqID
+		case string:
+			// Some servers send ID as string
+			var parsed uint64
+			if _, err := fmt.Sscanf(id, "%d", &parsed); err == nil {
+				matched = parsed == reqID
+			}
+		case json.Number:
+			if parsed, err := id.Int64(); err == nil {
+				matched = uint64(parsed) == reqID
+			}
+		}
+		if !matched {
+			return nil, false, nil // not our response
+		}
+		if rpcResp.Error != nil {
+			return nil, true, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		}
+		return rpcResp.Result, true, nil
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		if line == "" {
+		if line == "" || line == "\r" {
 			// Empty line = event boundary — process the event
 			if len(dataLines) > 0 {
-				currentEvent.Data = strings.Join(dataLines, "\n")
+				data := strings.Join(dataLines, "\n")
 				dataLines = nil
-
-				// Try to parse as JSON-RPC response
-				var rpcResp JSONRPCResponse
-				if err := json.Unmarshal([]byte(currentEvent.Data), &rpcResp); err == nil {
-					// Check if this is the response to our request
-					if id, ok := rpcResp.ID.(float64); ok && uint64(id) == reqID {
-						if rpcResp.Error != nil {
-							return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-						}
-						return rpcResp.Result, nil
-					}
-					// Not our response — could be a server-initiated notification/request
-					// We skip it for now
+				if result, found, err := tryMatch(data); found {
+					log.Printf("[MCP] SSE: matched response for reqID=%d (data len=%d)", reqID, len(data))
+					return result, err
 				}
 			}
-			currentEvent = sseEvent{}
 			continue
 		}
 
-		if strings.HasPrefix(line, "event:") {
-			currentEvent.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		} else if strings.HasPrefix(line, "id:") {
-			currentEvent.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+		if strings.HasPrefix(line, "data:") {
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			dataLines = append(dataLines, data)
+
+			// Try to match immediately — some servers don't send a trailing empty line
+			// but the JSON is already complete
+			if len(dataLines) > 0 {
+				data := strings.Join(dataLines, "\n")
+				if result, found, err := tryMatch(data); found {
+					log.Printf("[MCP] SSE: matched response for reqID=%d (immediate, data len=%d)", reqID, len(data))
+					return result, err
+				}
+			}
 		}
-		// Ignore comments (lines starting with :) and retry fields
+		// Ignore event:, id:, comments, and retry fields
 	}
 
 	// Process any remaining data after stream ends
 	if len(dataLines) > 0 {
-		currentEvent.Data = strings.Join(dataLines, "\n")
-		var rpcResp JSONRPCResponse
-		if err := json.Unmarshal([]byte(currentEvent.Data), &rpcResp); err == nil {
-			if id, ok := rpcResp.ID.(float64); ok && uint64(id) == reqID {
-				if rpcResp.Error != nil {
-					return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-				}
-				return rpcResp.Result, nil
-			}
+		data := strings.Join(dataLines, "\n")
+		if result, found, err := tryMatch(data); found {
+			log.Printf("[MCP] SSE: matched response for reqID=%d (stream end, data len=%d)", reqID, len(data))
+			return result, err
 		}
 	}
 
+	log.Printf("[MCP] SSE: no matching response found for reqID=%d (scanner err=%v)", reqID, scanner.Err())
 	return nil, fmt.Errorf("no matching response found in SSE stream")
 }
