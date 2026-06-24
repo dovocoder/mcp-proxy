@@ -196,9 +196,36 @@ func (m *Manager) connectServer(srv *models.Server) {
 			}
 		}
 	default:
-		// "none" or empty — no auth token
-		// Fall back to legacy auth_token field for backward compatibility
-		authToken = srv.AuthToken
+		// "none" or empty — backward compatibility:
+		// For HTTP transports, check if we have stored OAuth tokens first.
+		// Existing servers may have auth_method="" but OAuth tokens in the DB
+		// (from a previous OAuth flow) and auth_token set as a client_id.
+		if srv.Transport == "http" || srv.Transport == "streamable-http" {
+			tokens, cid, csec, err := m.store.GetOAuthTokens(srv.ID)
+			if err == nil && tokens != nil {
+				// We have stored OAuth tokens — use OAuth flow
+				if tokens.IsExpired() && tokens.HasRefreshToken() {
+					meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
+					if meta != nil && meta.TokenEndpoint != "" {
+						refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
+						if err == nil {
+							tokens = refreshed
+							_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
+							log.Printf("Refreshed OAuth token for server %s", srv.Name)
+						} else {
+							log.Printf("Failed to refresh OAuth token for %s: %v", srv.Name, err)
+						}
+					}
+				}
+				authToken = tokens.AccessToken
+			} else {
+				// No OAuth tokens — fall back to auth_token as a static bearer token
+				authToken = srv.AuthToken
+			}
+		} else {
+			// Non-HTTP transports: use auth_token directly
+			authToken = srv.AuthToken
+		}
 	}
 
 	cfg := mcp.ClientConfig{
@@ -902,8 +929,15 @@ func (m *Manager) GetServerAuthMethod(serverID string) string {
 	if err != nil || srv == nil {
 		return "none"
 	}
-	if srv.AuthMethod == "" {
-		// Backward compat: if auth_token is set but no method, infer "bearer"
+	if srv.AuthMethod == "" || srv.AuthMethod == "none" {
+		// Backward compat: check if we have stored OAuth tokens
+		if srv.Transport == "http" || srv.Transport == "streamable-http" {
+			tokens, _, _, err := m.store.GetOAuthTokens(serverID)
+			if err == nil && tokens != nil {
+				return "oauth"
+			}
+		}
+		// If auth_token is set but no OAuth tokens, infer "bearer"
 		if srv.AuthToken != "" {
 			return "bearer"
 		}
