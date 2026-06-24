@@ -409,8 +409,8 @@ func getStringClaim(claims jwt.MapClaims, key string) string {
 }
 
 // ValidateAccessToken validates an OIDC access token and returns the user.
-// Tries JWT validation first (local, via JWKS), then falls back to userinfo.
-// Uses a 5-minute cache to avoid calling userinfo on every request.
+// Tries JWT validation first (local, via JWKS), then introspection, then userinfo.
+// Uses a 5-minute cache to avoid network calls on every request.
 func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, error) {
 	// Check cache first
 	p.cacheMu.RLock()
@@ -420,31 +420,27 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 	}
 	p.cacheMu.RUnlock()
 
-	// Try JWT validation first (local, no network call to userinfo)
-	// PocketID issues JWTs — validating locally avoids the userinfo endpoint
-	// rejecting tokens whose audience is the MCP server (RFC 8707 resource).
+	// Try JWT validation first (local, no network call)
 	if user, err := p.ValidateJWT(accessToken); err == nil {
-		// Cache for 5 minutes
-		p.cacheMu.Lock()
-		p.tokenCache[accessToken] = cachedToken{
-			user:      user,
-			expiresAt: time.Now().Add(5 * time.Minute),
-		}
-		for k, v := range p.tokenCache {
-			if time.Now().After(v.expiresAt) {
-				delete(p.tokenCache, k)
-			}
-		}
-		p.cacheMu.Unlock()
+		p.cacheToken(accessToken, user)
 		return user, nil
 	} else {
-		log.Printf("[OIDC] JWT validation failed, trying userinfo: %v", err)
+		log.Printf("[OIDC] JWT validation failed: %v", err)
 	}
 
-	// Fall back to userinfo for opaque (non-JWT) tokens
+	// Try introspection — works for opaque tokens AND audience-restricted JWTs
+	// that the userinfo endpoint might reject (RFC 8707 resource parameter).
+	if user, err := p.IntrospectToken(accessToken); err == nil {
+		p.cacheToken(accessToken, user)
+		return user, nil
+	} else {
+		log.Printf("[OIDC] Introspection failed: %v", err)
+	}
+
+	// Fall back to userinfo as last resort
 	info, err := p.UserInfo(accessToken)
 	if err != nil {
-		return ProviderUser{}, err
+		return ProviderUser{}, fmt.Errorf("all token validation methods failed: %w", err)
 	}
 
 	user := ExtractUser(info)
@@ -452,7 +448,12 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 		return ProviderUser{}, fmt.Errorf("no subject in userinfo response")
 	}
 
-	// Cache for 5 minutes
+	p.cacheToken(accessToken, user)
+	return user, nil
+}
+
+// cacheToken stores a validated token → user mapping with 5-minute TTL.
+func (p *OIDCProvider) cacheToken(accessToken string, user ProviderUser) {
 	p.cacheMu.Lock()
 	p.tokenCache[accessToken] = cachedToken{
 		user:      user,
@@ -465,8 +466,84 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 		}
 	}
 	p.cacheMu.Unlock()
+}
 
-	return user, nil
+// IntrospectToken validates a token via the introspection endpoint (RFC 7662).
+// This works for both opaque tokens and JWTs, and is not affected by
+// audience restrictions (RFC 8707) that may cause userinfo to reject tokens.
+func (p *OIDCProvider) IntrospectToken(accessToken string) (ProviderUser, error) {
+	p.mu.RLock()
+	introspectionURL := ""
+	if p.discovery != nil {
+		introspectionURL = p.discovery.IntrospectionEndpoint
+	}
+	clientID := p.config.ClientID
+	clientSecret := p.config.ClientSecret
+	p.mu.RUnlock()
+
+	if introspectionURL == "" {
+		return ProviderUser{}, fmt.Errorf("no introspection endpoint")
+	}
+
+	form := url.Values{
+		"token": {accessToken},
+	}
+	if clientID != "" {
+		form.Set("client_id", clientID)
+	}
+	if clientSecret != "" {
+		form.Set("client_secret", clientSecret)
+	}
+
+	req, err := http.NewRequest("POST", introspectionURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return ProviderUser{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ProviderUser{}, fmt.Errorf("introspection request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return ProviderUser{}, fmt.Errorf("introspection returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ProviderUser{}, err
+	}
+
+	var result struct {
+		Active       bool                   `json:"active"`
+		Subject      string                 `json:"sub"`
+		Email        string                 `json:"email"`
+		Name         string                 `json:"name"`
+		Username     string                 `json:"preferred_username"`
+		Claims       map[string]interface{} `json:"-"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return ProviderUser{}, fmt.Errorf("failed to parse introspection response: %w", err)
+	}
+
+	if !result.Active {
+		return ProviderUser{}, fmt.Errorf("token is not active")
+	}
+
+	if result.Subject == "" {
+		return ProviderUser{}, fmt.Errorf("no subject in introspection response")
+	}
+
+	return ProviderUser{
+		Subject:  result.Subject,
+		Email:    result.Email,
+		Name:     result.Name,
+		Username: result.Username,
+	}, nil
 }
 
 // Issuer returns the OIDC issuer URL.

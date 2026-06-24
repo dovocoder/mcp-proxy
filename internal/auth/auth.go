@@ -259,6 +259,8 @@ func (a *AuthService) APIKeyMiddleware(next http.Handler) http.Handler {
 		if a.HasOIDC() {
 			bearerToken := ExtractToken(r)
 			if bearerToken != "" {
+				log.Printf("[MCP-Auth] Attempting OIDC validation (token_len=%d, starts_with_eyJ=%v, path=%s)",
+					len(bearerToken), strings.HasPrefix(bearerToken, "eyJ"), r.URL.Path)
 				user, err := a.oidc.ValidateAccessToken(bearerToken)
 				if err == nil {
 					// Create synthetic API key with full access
@@ -266,7 +268,7 @@ func (a *AuthService) APIKeyMiddleware(next http.Handler) http.Handler {
 						ID:     "oidc:" + user.Subject,
 						Name:   user.Username,
 						Scopes: []string{"read", "write", "admin"},
-						Active: true,
+						Active:  true,
 					}
 					ctx := WithAPIKey(r.Context(), syntheticKey)
 					next.ServeHTTP(w, r.WithContext(ctx))
