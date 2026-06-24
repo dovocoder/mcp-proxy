@@ -246,6 +246,7 @@ func (m *Manager) connectServer(srv *models.Server) {
 	}
 
 	client := mcp.NewClient(cfg)
+	log.Printf("Connecting to %s (transport=%s, auth_method=%s, has_token=%v)", srv.URL, srv.Transport, srv.AuthMethod, authToken != "")
 	if err := client.Connect(); err != nil {
 		log.Printf("Failed to connect to server %s: %v", srv.Name, err)
 		m.mu.Lock()

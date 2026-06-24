@@ -318,6 +318,7 @@ func (c *Client) stdioCall(method string, params json.RawMessage) (json.RawMessa
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", "2025-03-26")
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
@@ -386,6 +387,10 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 		c.sessionID = ""
 		c.mu.Unlock()
 		return nil, fmt.Errorf("session expired (HTTP 404) — reconnection needed")
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unauthorized (HTTP 401) — check your auth token. Server response: %s", string(respBody))
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		respBody, _ := io.ReadAll(resp.Body)
