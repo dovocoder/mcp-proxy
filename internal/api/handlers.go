@@ -25,16 +25,17 @@ import (
 
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
-	store         *store.Store
-	proxy         *proxy.Manager
-	auth          *auth.AuthService
-	sseManager    *sseSessionManager
-	streamManager *streamSessionManager
-	masterKey     [32]byte
+	store            *store.Store
+	proxy            *proxy.Manager
+	auth             *auth.AuthService
+	sseManager       *sseSessionManager
+	streamManager    *streamSessionManager
+	masterKey        [32]byte
+	adminLoginEnabled bool
 }
 
 // New creates a new API Handlers instance.
-func New(s *store.Store, p *proxy.Manager, a *auth.AuthService) *Handlers {
+func New(s *store.Store, p *proxy.Manager, a *auth.AuthService, adminLoginEnabled bool) *Handlers {
 	// Derive master key for at-rest env var encryption.
 	// Prefer ENCRYPTION_KEY, fall back to the JWT secret.
 	encKey := os.Getenv("ENCRYPTION_KEY")
@@ -42,12 +43,13 @@ func New(s *store.Store, p *proxy.Manager, a *auth.AuthService) *Handlers {
 		encKey = a.JWTSecret()
 	}
 	return &Handlers{
-		store:         s,
-		proxy:         p,
-		auth:          a,
-		sseManager:    newSSESessionManager(),
-		streamManager: newStreamSessionManager(),
-		masterKey:     crypto.DeriveKey(encKey),
+		store:            s,
+		proxy:            p,
+		auth:             a,
+		sseManager:       newSSESessionManager(),
+		streamManager:    newStreamSessionManager(),
+		masterKey:        crypto.DeriveKey(encKey),
+		adminLoginEnabled: adminLoginEnabled,
 	}
 }
 
@@ -170,6 +172,11 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 // --- Auth ---
 
 func (h *Handlers) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !h.adminLoginEnabled {
+		writeError(w, http.StatusForbidden, "Password login is disabled. Use SSO.")
+		return
+	}
+
 	var req models.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -1261,10 +1268,11 @@ func (h *Handlers) handleExportEnvVars(w http.ResponseWriter, r *http.Request) {
 
 // --- OIDC ---
 
-// handleOIDCStatus returns whether OIDC is configured.
+// handleOIDCStatus returns auth configuration (OIDC + password login).
 func (h *Handlers) handleOIDCStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{
-		"enabled": h.auth.HasOIDC(),
+		"enabled":         h.auth.HasOIDC(),
+		"password_login":  h.adminLoginEnabled,
 	})
 }
 

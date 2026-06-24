@@ -15,6 +15,7 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [oidcEnabled, setOidcEnabled] = useState(false);
+  const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
 
   // Check for OIDC token in URL fragment (from OIDC callback redirect)
   // Fragments (#) aren't sent to the server, so they don't leak in logs/referrer
@@ -29,9 +30,12 @@ export default function Login() {
       navigate('/', { replace: true });
       return;
     }
-    // Check if OIDC is enabled
+    // Check auth configuration
     auth.oidcStatus()
-      .then((res) => setOidcEnabled(res.enabled))
+      .then((res) => {
+        setOidcEnabled(res.enabled);
+        setPasswordLoginEnabled(res.password_login);
+      })
       .catch(() => {});
   }, [navigate]);
 
@@ -83,58 +87,69 @@ export default function Login() {
                 >
                   Continue with SSO
                 </Button>
-                <div className="flex items-center gap-3">
-                  <Separator className="flex-1" />
-                  <span className="text-xs text-muted-foreground">or</span>
-                  <Separator className="flex-1" />
-                </div>
+                {passwordLoginEnabled && (
+                  <div className="flex items-center gap-3">
+                    <Separator className="flex-1" />
+                    <span className="text-xs text-muted-foreground">or</span>
+                    <Separator className="flex-1" />
+                  </div>
+                )}
               </>
             )}
 
-            {/* Password login form */}
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="username">Username</Label>
-                <Input
-                  id="username"
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="admin"
-                  autoComplete="username"
-                  required
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
-                <Input
-                  id="password"
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  autoComplete="current-password"
-                  required
-                />
-              </div>
-
-              {error && (
-                <div className="flex items-start gap-2">
-                  <Badge variant="destructive" className="break-words whitespace-normal text-left leading-relaxed">
-                    {error}
-                  </Badge>
+            {/* Password login form (hidden when disabled) */}
+            {passwordLoginEnabled && (
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="username">Username</Label>
+                  <Input
+                    id="username"
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="admin"
+                    autoComplete="username"
+                    required
+                  />
                 </div>
-              )}
 
-              <Button type="submit" disabled={loading} variant={oidcEnabled ? "outline" : "default"} className="w-full">
-                {loading ? 'Signing in...' : 'Sign In'}
-              </Button>
-            </form>
+                <div className="space-y-2">
+                  <Label htmlFor="password">Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    autoComplete="current-password"
+                    required
+                  />
+                </div>
+
+                {error && (
+                  <div className="flex items-start gap-2">
+                    <Badge variant="destructive" className="break-words whitespace-normal text-left leading-relaxed">
+                      {error}
+                    </Badge>
+                  </div>
+                )}
+
+                <Button type="submit" disabled={loading} variant={oidcEnabled ? "outline" : "default"} className="w-full">
+                  {loading ? 'Signing in...' : 'Sign In'}
+                </Button>
+              </form>
+            )}
+
+            {/* SSO-only message */}
+            {!passwordLoginEnabled && oidcEnabled && (
+              <p className="text-center text-sm text-muted-foreground py-2">
+                Password login is disabled. Use SSO to continue.
+              </p>
+            )}
           </CardContent>
         </Card>
 
-        {!oidcEnabled && (
+        {passwordLoginEnabled && !oidcEnabled && (
           <p className="text-center text-xs text-muted-foreground mt-5 sm:mt-6 px-4">
             Default credentials: admin / admin (set MCP_PROXY_ADMIN_PASS to change)
           </p>

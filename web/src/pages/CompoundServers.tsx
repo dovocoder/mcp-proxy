@@ -13,8 +13,15 @@ import {
   Link as LinkIcon,
   Copy,
   Check,
+  Ban,
 } from 'lucide-react';
-import { compounds as compoundsApi, servers as serversApi, type Server } from '@/api/client';
+import {
+  compounds as compoundsApi,
+  servers as serversApi,
+  tools as toolsApi,
+  disabledTools as disabledToolsApi,
+  type Server,
+} from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardAction } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -103,10 +110,41 @@ export default function CompoundServers() {
     },
   });
 
+  const [newDisabledTool, setNewDisabledTool] = useState('');
+
+  const { data: allTools } = useQuery({ queryKey: ['tools'], queryFn: toolsApi.list });
+
+  const { data: compoundDisabledTools } = useQuery({
+    queryKey: ['disabled-tools', selectedId],
+    queryFn: () => disabledToolsApi.list(selectedId!),
+    enabled: !!selectedId,
+  });
+
+  const disableToolMutation = useMutation({
+    mutationFn: ({ toolName, compoundId }: { toolName: string; compoundId: string }) =>
+      disabledToolsApi.create({ tool_name: toolName, compound_id: compoundId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['disabled-tools', selectedId] });
+      setNewDisabledTool('');
+    },
+  });
+
+  const enableToolMutation = useMutation({
+    mutationFn: (id: string) => disabledToolsApi.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['disabled-tools', selectedId] });
+    },
+  });
+
   // --- Detail view ---
   if (selectedId && detail) {
     const memberIds = new Set(detail.members.map((m) => m.id));
     const availableServers = allServers?.filter((s) => !memberIds.has(s.id)) || [];
+
+    // Namespaced tool names available in this compound (for autocomplete)
+    const compoundToolNames = (allTools || [])
+      .filter((t) => memberIds.has(t.server_id))
+      .map((t) => `${t.server_name}__${t.name}`);
 
     const origin = window.location.origin;
     const mcpUrl = `${origin}/api/compounds/${selectedId}/mcp`;
@@ -315,6 +353,87 @@ export default function CompoundServers() {
                   Tool names use <code className="text-foreground">serverName__toolName</code> format.
                   Memory tools use <code className="text-foreground">memory__toolName</code>.
                 </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Disabled Tools */}
+        <Card>
+          <CardHeader className="border-b">
+            <div className="flex items-center gap-2">
+              <Ban className="size-4 text-muted-foreground shrink-0" />
+              <div>
+                <CardTitle>Disabled Tools</CardTitle>
+                <CardDescription>
+                  Hide specific tools from clients accessing this compound. Tool names use{' '}
+                  <code className="text-foreground">serverName__toolName</code> format.
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4 pt-4">
+            {/* Add new disabled tool */}
+            <div className="flex gap-2">
+              <Input
+                list="compound-tool-names"
+                value={newDisabledTool}
+                onChange={(e) => setNewDisabledTool(e.target.value)}
+                placeholder="serverName__toolName"
+                className="font-mono text-sm"
+              />
+              <datalist id="compound-tool-names">
+                {compoundToolNames.map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+              <Button
+                onClick={() => {
+                  if (newDisabledTool.trim()) {
+                    disableToolMutation.mutate({
+                      toolName: newDisabledTool.trim(),
+                      compoundId: selectedId,
+                    });
+                  }
+                }}
+                disabled={!newDisabledTool.trim() || disableToolMutation.isPending}
+                className="shrink-0"
+              >
+                <Ban className="size-4" />
+                <span className="hidden sm:inline">Disable</span>
+              </Button>
+            </div>
+
+            {/* List of disabled tools */}
+            {(compoundDisabledTools || []).length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No tools disabled for this compound
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {(compoundDisabledTools || []).map((dt) => (
+                  <div
+                    key={dt.id}
+                    className="flex items-center justify-between gap-2 rounded-lg bg-muted px-4 py-2.5"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Ban className="size-3.5 text-destructive shrink-0" />
+                      <code className="text-sm text-foreground font-mono truncate">
+                        {dt.tool_name}
+                      </code>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => enableToolMutation.mutate(dt.id)}
+                      disabled={enableToolMutation.isPending}
+                      className="shrink-0"
+                    >
+                      <Check className="size-3.5" />
+                      <span className="hidden sm:inline">Enable</span>
+                    </Button>
+                  </div>
+                ))}
               </div>
             )}
           </CardContent>

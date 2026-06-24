@@ -172,6 +172,11 @@ export default function ServerDetail() {
   const srv = data.server;
   const serverTools = allTools?.filter((t) => t.server_id === id) || [];
 
+  // Map of namespaced tool name → disabled tool entry (global only, server_id is null)
+  const globalDisabledMap = new Map(
+    (disabledToolsList || []).filter((t) => !t.server_id).map((t) => [t.tool_name, t]),
+  );
+
   const origin = window.location.origin;
   const mcpUrl = `${origin}/api/servers/${id}/mcp`;
   const sseUrl = `${origin}/api/servers/${id}/sse`;
@@ -465,19 +470,53 @@ export default function ServerDetail() {
                   No tools discovered
                 </p>
               ) : (
-                serverTools.map((tool) => (
-                  <div
-                    key={tool.name}
-                    className="rounded-lg bg-muted px-4 py-3 break-words"
-                  >
-                    <div className="font-medium text-foreground text-sm truncate">{tool.name}</div>
-                    {tool.description && (
-                      <div className="text-xs text-muted-foreground mt-1 break-words">
-                        {tool.description}
+                serverTools.map((tool) => {
+                  const namespacedName = `${srv.name}__${tool.name}`;
+                  const disabledEntry = globalDisabledMap.get(namespacedName);
+                  const isDisabled = !!disabledEntry;
+                  return (
+                    <div
+                      key={tool.name}
+                      className="rounded-lg bg-muted px-4 py-3 break-words"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium text-foreground text-sm truncate">
+                          {tool.name}
+                        </div>
+                        {isDisabled ? (
+                          <div className="flex items-center gap-2 shrink-0">
+                            <Badge variant="destructive" className="text-[10px]">disabled</Badge>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => enableMutation.mutate(disabledEntry!.id)}
+                              disabled={enableMutation.isPending}
+                            >
+                              <Check className="size-3.5" />
+                              <span className="hidden sm:inline">Enable</span>
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => disableMutation.mutate(namespacedName)}
+                            disabled={disableMutation.isPending}
+                            className="shrink-0 text-muted-foreground hover:text-destructive"
+                          >
+                            <Ban className="size-3.5" />
+                            <span className="hidden sm:inline">Disable</span>
+                          </Button>
+                        )}
                       </div>
-                    )}
-                  </div>
-                ))
+                      {tool.description && (
+                        <div className="text-xs text-muted-foreground mt-1 break-words">
+                          {tool.description}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </div>
           </CardContent>

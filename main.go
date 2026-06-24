@@ -39,9 +39,13 @@ func main() {
 	// Initialize auth
 	authSvc := auth.New(dbStore, cfg.JWTSecret)
 
-	// Ensure default admin user exists (for password login fallback)
-	if err := authSvc.EnsureDefaultAdmin(cfg.AdminUsername, cfg.AdminPassword); err != nil {
-		log.Printf("Warning: failed to ensure default admin: %v", err)
+	// Ensure default admin user exists (only if password login is enabled)
+	if cfg.AdminLoginEnabled {
+		if err := authSvc.EnsureDefaultAdmin(cfg.AdminUsername, cfg.AdminPassword); err != nil {
+			log.Printf("Warning: failed to ensure default admin: %v", err)
+		}
+	} else {
+		log.Println("Password login disabled (MCP_PROXY_ADMIN_LOGIN=false) — SSO only")
 	}
 
 	// Initialize OIDC if configured
@@ -65,7 +69,7 @@ func main() {
 	proxyMgr.StartAll()
 
 	// Initialize API handlers
-	handlers := api.New(dbStore, proxyMgr, authSvc)
+	handlers := api.New(dbStore, proxyMgr, authSvc, cfg.AdminLoginEnabled)
 
 	// Build root mux
 	mux := http.NewServeMux()

@@ -13,6 +13,7 @@ type Config struct {
 	JWTSecret      string
 	AdminUsername  string
 	AdminPassword  string
+	AdminLoginEnabled bool // if false, password login is disabled (OIDC only)
 	WebDistPath    string
 	AllowedOrigins []string
 	EncryptionKey  string // global encryption key for env vars at rest
@@ -30,8 +31,9 @@ func Load() (*Config, error) {
 		Port:           envOrDefault("MCP_PROXY_PORT", "8080"),
 		DBPath:         envOrDefault("MCP_PROXY_DB", "mcp-proxy.db"),
 		JWTSecret:      envOrDefault("MCP_PROXY_JWT_SECRET", ""),
-		AdminUsername:  envOrDefault("MCP_PROXY_ADMIN_USER", "admin"),
-		AdminPassword:  envOrDefault("MCP_PROXY_ADMIN_PASS", ""),
+		AdminUsername:    envOrDefault("MCP_PROXY_ADMIN_USER", "admin"),
+		AdminPassword:    envOrDefault("MCP_PROXY_ADMIN_PASS", ""),
+		AdminLoginEnabled: envOrDefault("MCP_PROXY_ADMIN_LOGIN", "true") != "false" && envOrDefault("MCP_PROXY_ADMIN_LOGIN", "true") != "0",
 		WebDistPath:    envOrDefault("MCP_PROXY_WEB_DIST", "web/dist"),
 		AllowedOrigins: []string{"http://localhost:5173", "http://localhost:8080"},
 		// OIDC
