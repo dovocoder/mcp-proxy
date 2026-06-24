@@ -1764,23 +1764,40 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse the request body to extract the client's requested redirect_uris.
-	// The redirect_uri is always the PROXY's callback URL.
-	// The proxy receives the callback from the upstream OIDC provider and
-	// forwards the authorization code to the client's actual redirect_uri
-	// (which is stored in a signed state JWT during the authorize step).
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
+	// We echo the client's redirect_uris back so the client uses its OWN
+	// redirect_uri (e.g. http://localhost:PORT/callback). The proxy handles
+	// the mismatch with PocketID's registered redirect_uri internally:
+	// - Authorize: stores client's redirect_uri in a signed state JWT,
+	//   redirects to PocketID with the proxy's callback URL
+	// - Token: replaces redirect_uri with the proxy's callback URL before
+	//   forwarding to PocketID
+	clientRedirectURIs := []string{}
+	if r.Body != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err == nil && len(bodyBytes) > 0 {
+			var reg struct {
+				RedirectURIs []string `json:"redirect_uris"`
+				ClientName   string   `json:"client_name"`
+			}
+			if err := json.Unmarshal(bodyBytes, &reg); err == nil && len(reg.RedirectURIs) > 0 {
+				clientRedirectURIs = reg.RedirectURIs
+			}
+		}
 	}
-	proxyCallbackURL := fmt.Sprintf("%s://%s/api/oauth/callback", scheme, r.Host)
 
 	resp := map[string]interface{}{
 		"client_id":                   clientID,
 		"client_id_issued_at":         time.Now().Unix(),
-		"redirect_uris":               []string{proxyCallbackURL},
 		"grant_types":                 []string{"authorization_code", "refresh_token"},
 		"response_types":              []string{"code"},
 		"token_endpoint_auth_method":  "none",
+	}
+
+	// Echo the client's redirect_uris, or use a sensible default
+	if len(clientRedirectURIs) > 0 {
+		resp["redirect_uris"] = clientRedirectURIs
+	} else {
+		resp["redirect_uris"] = []string{"http://localhost/callback"}
 	}
 
 	// Only include client_secret for confidential clients
