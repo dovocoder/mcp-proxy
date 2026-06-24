@@ -202,23 +202,61 @@ func (a *AuthService) JWTMiddleware(next http.Handler) http.Handler {
 }
 
 // APIKeyMiddleware protects MCP proxy routes requiring API key auth.
+// Also accepts OIDC access tokens (Bearer) when OIDC is configured.
 func (a *AuthService) APIKeyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Try API key first (X-API-Key, Bearer mcp_*, query param)
 		keyString := ExtractAPIKey(r)
-		if keyString == "" {
-			writeAuthError(w, "Missing API key")
+		if keyString != "" {
+			apiKey, err := a.ValidateAPIKey(keyString)
+			if err != nil {
+				a.writeMCPAuthError(w, r, "Invalid or expired API key")
+				return
+			}
+			ctx := WithAPIKey(r.Context(), apiKey)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
-		apiKey, err := a.ValidateAPIKey(keyString)
-		if err != nil {
-			writeAuthError(w, "Invalid or expired API key")
-			return
+		// Try OIDC access token (Bearer without mcp_ prefix)
+		if a.HasOIDC() {
+			bearerToken := ExtractToken(r)
+			if bearerToken != "" {
+				user, err := a.oidc.ValidateAccessToken(bearerToken)
+				if err == nil {
+					// Create synthetic API key with full access
+					syntheticKey := &models.APIKey{
+						ID:     "oidc:" + user.Subject,
+						Name:   user.Username,
+						Scopes: []string{"read", "write", "admin"},
+						Active: true,
+					}
+					ctx := WithAPIKey(r.Context(), syntheticKey)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
 		}
 
-		ctx := WithAPIKey(r.Context(), apiKey)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		a.writeMCPAuthError(w, r, "Missing or invalid API key")
 	})
+}
+
+// writeMCPAuthError writes a 401 with WWW-Authenticate header for MCP client discovery.
+func (a *AuthService) writeMCPAuthError(w http.ResponseWriter, r *http.Request, message string) {
+	// If OIDC is configured, add resource_metadata hint for MCP clients
+	if a.HasOIDC() {
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		metadataURL := fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", scheme, r.Host)
+		w.Header().Set("WWW-Authenticate",
+			fmt.Sprintf(`Bearer resource_metadata="%s"`, metadataURL))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 // AdminUserFromContext extracts the admin user info from JWT claims in context.

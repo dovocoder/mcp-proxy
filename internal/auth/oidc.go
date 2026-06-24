@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/agentic/mcp-proxy/internal/models"
 	"golang.org/x/oauth2"
@@ -33,15 +34,25 @@ type OIDCConfig struct {
 
 // OIDCProvider manages OIDC discovery and OAuth2 flow.
 type OIDCProvider struct {
-	config   OIDCConfig
-	discovery *OIDCProviderConfig
-	oauth2   *oauth2.Config
-	mu       sync.RWMutex
+	config     OIDCConfig
+	discovery  *OIDCProviderConfig
+	oauth2     *oauth2.Config
+	mu         sync.RWMutex
+	tokenCache map[string]cachedToken // access_token → user info (5-min TTL)
+	cacheMu    sync.RWMutex
+}
+
+type cachedToken struct {
+	user      ProviderUser
+	expiresAt time.Time
 }
 
 // NewOIDCProvider creates a new OIDC provider and fetches discovery metadata.
 func NewOIDCProvider(cfg OIDCConfig) (*OIDCProvider, error) {
-	p := &OIDCProvider{config: cfg}
+	p := &OIDCProvider{
+		config:     cfg,
+		tokenCache: make(map[string]cachedToken),
+	}
 	if err := p.discover(); err != nil {
 		return nil, fmt.Errorf("OIDC discovery failed: %w", err)
 	}
@@ -169,6 +180,55 @@ func (p *OIDCProvider) UserInfo(accessToken string) (map[string]interface{}, err
 	}
 
 	return info, nil
+}
+
+// ValidateAccessToken validates an OIDC access token and returns the user.
+// Uses a 5-minute cache to avoid calling userinfo on every request.
+func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, error) {
+	// Check cache first
+	p.cacheMu.RLock()
+	if cached, ok := p.tokenCache[accessToken]; ok && time.Now().Before(cached.expiresAt) {
+		p.cacheMu.RUnlock()
+		return cached.user, nil
+	}
+	p.cacheMu.RUnlock()
+
+	// Call userinfo
+	info, err := p.UserInfo(accessToken)
+	if err != nil {
+		return ProviderUser{}, err
+	}
+
+	user := ExtractUser(info)
+	if user.Subject == "" {
+		return ProviderUser{}, fmt.Errorf("no subject in userinfo response")
+	}
+
+	// Cache for 5 minutes
+	p.cacheMu.Lock()
+	p.tokenCache[accessToken] = cachedToken{
+		user:      user,
+		expiresAt: time.Now().Add(5 * time.Minute),
+	}
+	// Prune expired entries
+	for k, v := range p.tokenCache {
+		if time.Now().After(v.expiresAt) {
+			delete(p.tokenCache, k)
+		}
+	}
+	p.cacheMu.Unlock()
+
+	return user, nil
+}
+
+// Issuer returns the OIDC issuer URL.
+func (p *OIDCProvider) Issuer() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.discovery != nil {
+		return p.discovery.Issuer
+	}
+	return p.config.Issuer
 }
 
 // ProviderUser represents the extracted user info from OIDC.

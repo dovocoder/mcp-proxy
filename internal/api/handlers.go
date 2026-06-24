@@ -68,6 +68,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/oidc/login", h.handleOIDCLogin)
 	mux.HandleFunc("GET /api/auth/oidc/callback", h.handleOIDCCallback)
 
+	// Protected Resource Metadata (RFC 9728) — for MCP client OAuth discovery
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", h.handleProtectedResourceMetadata)
+
 	// --- MCP client endpoints (API key auth) ---
 	// Global (all servers)
 	mux.Handle("POST /api/mcp", h.auth.APIKeyMiddleware(http.HandlerFunc(h.handleMCPProxyGlobal)))
@@ -1278,4 +1281,26 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// The frontend will read the token from the URL and store it
 	frontendURL := "/?token=" + jwtToken
 	http.Redirect(w, r, frontendURL, http.StatusFound)
+}
+
+// handleProtectedResourceMetadata returns RFC 9728 Protected Resource Metadata.
+// MCP clients use this to discover the authorization server (OIDC issuer).
+func (h *Handlers) handleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	resourceURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+
+	resp := map[string]interface{}{
+		"resource": resourceURL,
+	}
+
+	if h.auth.HasOIDC() {
+		resp["authorization_servers"] = []string{h.auth.OIDC().Issuer()}
+		// Also include OAuth2 metadata for clients that expect it
+		resp["bearer_methods"] = []string{"header"}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
