@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
+	"github.com/agentic/mcp-proxy/internal/crypto"
 	"github.com/agentic/mcp-proxy/internal/mcp"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/google/uuid"
@@ -16,7 +18,9 @@ import (
 
 // Store is the SQLite data access layer.
 type Store struct {
-	db *sql.DB
+	db         *sql.DB
+	encKey     [32]byte
+	encEnabled bool
 }
 
 // New creates a new Store, opening the database and running migrations.
@@ -33,6 +37,40 @@ func New(dbPath string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+// SetEncryptionKey enables at-rest encryption for sensitive fields (e.g. bearer tokens).
+func (s *Store) SetEncryptionKey(key [32]byte) {
+	s.encKey = key
+	s.encEnabled = true
+}
+
+// encryptToken encrypts a plaintext token for at-rest storage.
+// Returns the input as-is when empty or when encryption is not configured.
+func (s *Store) encryptToken(plaintext string) string {
+	if plaintext == "" || !s.encEnabled {
+		return plaintext
+	}
+	encrypted, err := crypto.Encrypt(s.encKey, plaintext)
+	if err != nil {
+		log.Printf("Warning: failed to encrypt bearer token: %v — storing as-is", err)
+		return plaintext
+	}
+	return encrypted
+}
+
+// decryptToken decrypts a stored token value.
+// Falls back to the raw value for legacy plaintext data or when encryption is not configured.
+func (s *Store) decryptToken(stored string) string {
+	if stored == "" || !s.encEnabled {
+		return stored
+	}
+	decrypted, err := crypto.Decrypt(s.encKey, stored)
+	if err != nil {
+		// Likely legacy plaintext data — return as-is
+		return stored
+	}
+	return decrypted
 }
 
 // Close closes the database connection.
@@ -241,7 +279,7 @@ func (s *Store) CreateServer(srv *models.Server) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		srv.ID, srv.Name, srv.Transport, srv.Command, string(argsJSON),
-		srv.URL, string(headersJSON), string(envJSON), srv.AuthToken,
+		srv.URL, string(headersJSON), string(envJSON), s.encryptToken(srv.AuthToken),
 		srv.AuthMethod, srv.BearerTokenEnv,
 		srv.Timeout, srv.ConnectTimeout, enabled, logsEnabled, srv.Status,
 		srv.CreatedAt, srv.UpdatedAt,
@@ -252,13 +290,13 @@ func (s *Store) CreateServer(srv *models.Server) error {
 // GetServer retrieves a server by ID.
 func (s *Store) GetServer(id string) (*models.Server, error) {
 	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers WHERE id = ?`, id)
-	return scanServer(row)
+	return s.scanServer(row)
 }
 
 // GetServerByName retrieves a server by name.
 func (s *Store) GetServerByName(name string) (*models.Server, error) {
 	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers WHERE name = ?`, name)
-	return scanServer(row)
+	return s.scanServer(row)
 }
 
 // ListServers returns all servers.
@@ -271,7 +309,7 @@ func (s *Store) ListServers() ([]*models.Server, error) {
 
 	var servers []*models.Server
 	for rows.Next() {
-		srv, err := scanServerRows(rows)
+		srv, err := s.scanServerRows(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +340,7 @@ func (s *Store) UpdateServer(srv *models.Server) error {
 		WHERE id = ?
 	`,
 		srv.Name, srv.Transport, srv.Command, string(argsJSON),
-		srv.URL, string(headersJSON), string(envJSON), srv.AuthToken,
+		srv.URL, string(headersJSON), string(envJSON), s.encryptToken(srv.AuthToken),
 		srv.AuthMethod, srv.BearerTokenEnv,
 		srv.Timeout, srv.ConnectTimeout, enabled, logsEnabled,
 		time.Now(), srv.ID,
@@ -538,22 +576,22 @@ type rowScanner interface {
 	Scan(dest ...interface{}) error
 }
 
-func scanServer(row *sql.Row) (*models.Server, error) {
-	return scanServerImpl(row)
+func (s *Store) scanServer(row *sql.Row) (*models.Server, error) {
+	return s.scanServerImpl(row)
 }
 
-func scanServerRows(rows *sql.Rows) (*models.Server, error) {
-	return scanServerImpl(rows)
+func (s *Store) scanServerRows(rows *sql.Rows) (*models.Server, error) {
+	return s.scanServerImpl(rows)
 }
 
-func scanServerImpl(s rowScanner) (*models.Server, error) {
+func (s *Store) scanServerImpl(sc rowScanner) (*models.Server, error) {
 	var srv models.Server
 	var argsJSON, headersJSON, envJSON string
 	var enabled, logsEnabled int
 	var lastSeen sql.NullTime
 	var createdAt, updatedAt string
 
-	err := s.Scan(
+	err := sc.Scan(
 		&srv.ID, &srv.Name, &srv.Transport, &srv.Command, &argsJSON,
 		&srv.URL, &headersJSON, &envJSON, &srv.AuthToken,
 		&srv.AuthMethod, &srv.BearerTokenEnv,
@@ -563,6 +601,11 @@ func scanServerImpl(s rowScanner) (*models.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Decrypt the bearer token (transparent to callers).
+	// Falls back to plaintext for legacy data.
+	srv.AuthToken = s.decryptToken(srv.AuthToken)
+	srv.HasAuthToken = srv.AuthToken != ""
 
 	srv.Enabled = enabled == 1
 	srv.LogsEnabled = logsEnabled == 1

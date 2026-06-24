@@ -15,6 +15,7 @@ import (
 	"github.com/agentic/mcp-proxy/internal/api"
 	"github.com/agentic/mcp-proxy/internal/auth"
 	"github.com/agentic/mcp-proxy/internal/config"
+	"github.com/agentic/mcp-proxy/internal/crypto"
 	"github.com/agentic/mcp-proxy/internal/proxy"
 	"github.com/agentic/mcp-proxy/internal/store"
 )
@@ -35,6 +36,14 @@ func main() {
 		log.Fatalf("Failed to initialize store: %v", err)
 	}
 	defer dbStore.Close()
+
+	// Enable at-rest encryption for bearer tokens using the same key derivation
+	// as the env-var encryption (ENCRYPTION_KEY, falling back to JWT secret).
+	encKeySource := cfg.EncryptionKey
+	if encKeySource == "" {
+		encKeySource = cfg.JWTSecret
+	}
+	dbStore.SetEncryptionKey(crypto.DeriveKey(encKeySource))
 
 	// Initialize auth
 	authSvc := auth.New(dbStore, cfg.JWTSecret)

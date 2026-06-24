@@ -475,9 +475,9 @@ function ServerForm({
       ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n')
       : '',
   );
-  const [authToken, setAuthToken] = useState(server?.auth_token || '');
-  const [authMethod, setAuthMethod] = useState(server?.auth_method || (server?.auth_token ? 'bearer' : 'none'));
-  const [bearerToken, setBearerToken] = useState(server?.auth_token || '');
+  const [authToken, setAuthToken] = useState('');
+  const [authMethod, setAuthMethod] = useState(server?.auth_method || 'none');
+  const [bearerToken, setBearerToken] = useState('');
   const [bearerTokenEnv, setBearerTokenEnv] = useState(server?.bearer_token_env || '');
   const [showToken, setShowToken] = useState(false);
   const [timeout, setTimeout] = useState(server?.timeout ?? 120);
@@ -549,7 +549,8 @@ function ServerForm({
         // For OAuth, auth_token is the client_id
         if (authToken) data.auth_token = authToken;
       } else if (authMethod === 'bearer') {
-        data.auth_token = bearerToken;
+        // Only send when a new token is entered — preserves existing token on edit
+        if (bearerToken) data.auth_token = bearerToken;
       } else if (authMethod === 'env_bearer') {
         data.bearer_token_env = bearerTokenEnv;
       }
@@ -793,7 +794,7 @@ function ServerForm({
                   id="srv-bearer"
                   value={bearerToken}
                   onChange={(e) => setBearerToken(e.target.value)}
-                  placeholder="Paste bearer token..."
+                  placeholder={isEdit && server?.has_auth_token ? '•••••••• (token already set — enter new token to replace)' : 'Paste bearer token...'}
                   className={`font-mono text-xs pr-10 ${!showToken ? '[-webkit-text-security:disc] [text-security:disc]' : ''}`}
                   rows={2}
                 />
@@ -807,7 +808,11 @@ function ServerForm({
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Pre-obtained bearer token sent as <code className="font-mono">Authorization: Bearer ...</code> header.
+                {isEdit && server?.has_auth_token ? (
+                  'A bearer token is already configured. Leave empty to keep the existing token.'
+                ) : (
+                  <>Pre-obtained bearer token sent as <code className="font-mono">Authorization: Bearer ***</code> header.</>
+                )}
               </p>
             </div>
           )}

@@ -65,6 +65,7 @@ export interface Server {
   headers?: Record<string, string>;
   env?: Record<string, string>;
   auth_token?: string;
+  has_auth_token?: boolean;
   auth_method?: string;
   bearer_token_env?: string;
   enabled: boolean;

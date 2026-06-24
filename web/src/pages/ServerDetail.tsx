@@ -270,7 +270,7 @@ export default function ServerDetail() {
     </div>
   );
 
-  const authMethod = authStatus?.auth_method || (srv.auth_token ? 'bearer' : 'none');
+  const authMethod = authStatus?.auth_method || srv.auth_method || 'none';
 
   const authStatusLabel =
     authStatus?.status === 'valid'

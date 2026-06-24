@@ -14,7 +14,8 @@ type Server struct {
 	URL            string            `json:"url,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
-	AuthToken      string            `json:"auth_token,omitempty"`
+	AuthToken      string            `json:"-"`               // never serialized — write-only via API
+	HasAuthToken   bool              `json:"has_auth_token"`  // indicates a token is set (never exposes the value)
 	AuthMethod     string            `json:"auth_method"`              // "none", "oauth", "bearer", "env_bearer"
 	BearerTokenEnv string            `json:"bearer_token_env,omitempty"` // env var name for env_bearer method
 	Timeout        int               `json:"timeout"`

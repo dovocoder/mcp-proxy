@@ -1601,12 +1601,17 @@ func (h *Handlers) handleGetRegistration(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Check for pre-registered client ID (auth_token)
+	// Check for pre-registered client ID (auth_token).
+	// Only expose when NOT used as a bearer token — the auth_token field is
+	// overloaded: it holds either a secret bearer token or a public OAuth client_id.
 	srv, err := h.store.GetServer(id)
 	if err == nil && srv != nil && srv.AuthToken != "" {
-		resp["status"] = "pre-registered"
-		resp["client_id"] = srv.AuthToken
-		resp["registration_method"] = "pre-registration"
+		effectiveAuthMethod := h.proxy.GetServerAuthMethod(id)
+		if effectiveAuthMethod != "bearer" {
+			resp["status"] = "pre-registered"
+			resp["client_id"] = srv.AuthToken
+			resp["registration_method"] = "pre-registration"
+		}
 	}
 
 	// If CIMD is supported, report it as available
