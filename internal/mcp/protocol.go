@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -417,9 +416,35 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	contentType := resp.Header.Get("Content-Type")
 
+	// Read the full body with a timeout — the server may keep the stream open
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(resp.Body)
+		ch <- readResult{data, err}
+	}()
+
+	var respBody []byte
+	select {
+	case res := <-ch:
+		respBody = res.data
+		if res.err != nil {
+			log.Printf("[MCP] ✗ %s (id=%d) read error: %v", method, reqID, res.err)
+			return nil, fmt.Errorf("failed to read response: %w", res.err)
+		}
+	case <-time.After(c.timeout):
+		log.Printf("[MCP] ✗ %s (id=%d) timeout after %v waiting for response body", method, reqID, c.timeout)
+		return nil, fmt.Errorf("timeout waiting for response body")
+	}
+
+	log.Printf("[MCP] %s (id=%d) body received: %d bytes, first 200: %s", method, reqID, len(respBody), truncateLog(string(respBody), 200))
+
 	// Handle SSE streaming response
 	if strings.Contains(contentType, "text/event-stream") {
-		result, err := c.parseSSEResponse(resp.Body, reqID)
+		result, err := c.parseSSEBytes(respBody, reqID)
 		if err != nil {
 			log.Printf("[MCP] ✗ %s (id=%d) SSE parse error: %v", method, reqID, err)
 		}
@@ -427,11 +452,6 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 	}
 
 	// Handle simple JSON response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
 	var rpcResp JSONRPCResponse
 	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
 		log.Printf("[MCP] ✗ %s (id=%d) JSON parse error: %v (body len=%d)", method, reqID, err, len(respBody))
@@ -447,23 +467,29 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 // parseSSEResponse reads an SSE stream and extracts the JSON-RPC response
 // matching the given request ID.
 func (c *Client) parseSSEResponse(body io.Reader, reqID uint64) (json.RawMessage, error) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read SSE body: %w", err)
+	}
+	return c.parseSSEBytes(data, reqID)
+}
+
+// parseSSEBytes parses SSE event data from a byte slice.
+func (c *Client) parseSSEBytes(data []byte, reqID uint64) (json.RawMessage, error) {
+	lines := strings.Split(string(data), "\n")
 
 	var dataLines []string
 
-	tryMatch := func(data string) (json.RawMessage, bool, error) {
+	tryMatch := func(d string) (json.RawMessage, bool, error) {
 		var rpcResp JSONRPCResponse
-		if err := json.Unmarshal([]byte(data), &rpcResp); err != nil {
-			return nil, false, nil // not valid JSON yet
+		if err := json.Unmarshal([]byte(d), &rpcResp); err != nil {
+			return nil, false, nil
 		}
-		// Try to match the request ID (handle both numeric and string IDs)
 		matched := false
 		switch id := rpcResp.ID.(type) {
 		case float64:
 			matched = uint64(id) == reqID
 		case string:
-			// Some servers send ID as string
 			var parsed uint64
 			if _, err := fmt.Sscanf(id, "%d", &parsed); err == nil {
 				matched = parsed == reqID
@@ -474,7 +500,7 @@ func (c *Client) parseSSEResponse(body io.Reader, reqID uint64) (json.RawMessage
 			}
 		}
 		if !matched {
-			return nil, false, nil // not our response
+			return nil, false, nil
 		}
 		if rpcResp.Error != nil {
 			return nil, true, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
@@ -482,16 +508,15 @@ func (c *Client) parseSSEResponse(body io.Reader, reqID uint64) (json.RawMessage
 		return rpcResp.Result, true, nil
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
 
-		if line == "" || line == "\r" {
-			// Empty line = event boundary — process the event
+		if line == "" {
 			if len(dataLines) > 0 {
-				data := strings.Join(dataLines, "\n")
+				d := strings.Join(dataLines, "\n")
 				dataLines = nil
-				if result, found, err := tryMatch(data); found {
-					log.Printf("[MCP] SSE: matched response for reqID=%d (data len=%d)", reqID, len(data))
+				if result, found, err := tryMatch(d); found {
+					log.Printf("[MCP] SSE: matched response for reqID=%d (data len=%d)", reqID, len(d))
 					return result, err
 				}
 			}
@@ -499,31 +524,41 @@ func (c *Client) parseSSEResponse(body io.Reader, reqID uint64) (json.RawMessage
 		}
 
 		if strings.HasPrefix(line, "data:") {
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			dataLines = append(dataLines, data)
+			d := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			dataLines = append(dataLines, d)
 
-			// Try to match immediately — some servers don't send a trailing empty line
-			// but the JSON is already complete
-			if len(dataLines) > 0 {
-				data := strings.Join(dataLines, "\n")
-				if result, found, err := tryMatch(data); found {
-					log.Printf("[MCP] SSE: matched response for reqID=%d (immediate, data len=%d)", reqID, len(data))
-					return result, err
-				}
+			combined := strings.Join(dataLines, "\n")
+			if result, found, err := tryMatch(combined); found {
+				log.Printf("[MCP] SSE: matched response for reqID=%d (immediate, data len=%d)", reqID, len(combined))
+				return result, err
 			}
 		}
-		// Ignore event:, id:, comments, and retry fields
 	}
 
-	// Process any remaining data after stream ends
 	if len(dataLines) > 0 {
-		data := strings.Join(dataLines, "\n")
-		if result, found, err := tryMatch(data); found {
-			log.Printf("[MCP] SSE: matched response for reqID=%d (stream end, data len=%d)", reqID, len(data))
+		d := strings.Join(dataLines, "\n")
+		if result, found, err := tryMatch(d); found {
+			log.Printf("[MCP] SSE: matched response for reqID=%d (stream end, data len=%d)", reqID, len(d))
 			return result, err
 		}
 	}
 
-	log.Printf("[MCP] SSE: no matching response found for reqID=%d (scanner err=%v)", reqID, scanner.Err())
+	// Last resort: try parsing the entire body as JSON (some servers set
+	// content-type: text/event-stream but send a plain JSON response)
+	if result, found, err := tryMatch(string(data)); found {
+		log.Printf("[MCP] SSE: matched response for reqID=%d (raw JSON fallback, len=%d)", reqID, len(data))
+		return result, err
+	}
+
+	log.Printf("[MCP] SSE: no matching response found for reqID=%d (body len=%d)", reqID, len(data))
 	return nil, fmt.Errorf("no matching response found in SSE stream")
+}
+
+func truncateLog(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }
