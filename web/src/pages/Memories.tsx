@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import {
   Dialog,
   DialogTrigger,
@@ -31,6 +32,7 @@ export default function Memories() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newSetOpen, setNewSetOpen] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+  const [deleteSetOpen, setDeleteSetOpen] = useState(false);
 
   const { data: sets } = useQuery({ queryKey: ['memory-sets'], queryFn: setsApi.list });
 
@@ -296,17 +298,33 @@ export default function Memories() {
             variant="ghost"
             size="sm"
             className="text-destructive hover:text-destructive"
-            onClick={() => {
-              if (confirm(`Delete memory set "${currentSet.name}"? All memories in this set will be permanently deleted.`)) {
-                deleteSetMutation.mutate(currentSet.id);
-              }
-            }}
+            onClick={() => setDeleteSetOpen(true)}
           >
             <Trash2 className="size-4" />
             Delete "{currentSet.name}" set
           </Button>
         </div>
       )}
+
+      <ConfirmDialog
+        open={deleteSetOpen}
+        onOpenChange={setDeleteSetOpen}
+        title="Delete Memory Set"
+        description="Delete"
+        itemName={currentSet?.name}
+        confirmText="Delete Set"
+        loading={deleteSetMutation.isPending}
+        onConfirm={() => {
+          if (currentSet) {
+            deleteSetMutation.mutate(currentSet.id, {
+              onSuccess: () => {
+                setDeleteSetOpen(false);
+                setSelectedSet('default');
+              },
+            });
+          }
+        }}
+      />
     </div>
   );
 }
@@ -320,9 +338,10 @@ function MemoryCard({
   onDelete: () => void;
   onEdit: () => void;
 }) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   return (
+    <>
     <Card>
       <CardContent className="space-y-3">
         {/* Top row: palace, room, importance */}
@@ -342,20 +361,14 @@ function MemoryCard({
             <Button variant="ghost" size="icon-sm" onClick={onEdit}>
               <Pencil className="size-3.5" />
             </Button>
-            {confirmDelete ? (
-              <div className="flex items-center gap-1">
-                <Button variant="destructive" size="xs" onClick={onDelete}>
-                  <Check className="size-3" />
-                </Button>
-                <Button variant="ghost" size="icon-sm" onClick={() => setConfirmDelete(false)}>
-                  <X className="size-3.5" />
-                </Button>
-              </div>
-            ) : (
-              <Button variant="ghost" size="icon-sm" onClick={() => setConfirmDelete(true)}>
-                <Trash2 className="size-3.5" />
-              </Button>
-            )}
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => setDeleteOpen(true)}
+              className="text-muted-foreground hover:text-destructive"
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
           </div>
         </div>
 
@@ -396,6 +409,19 @@ function MemoryCard({
         </div>
       </CardContent>
     </Card>
+    <ConfirmDialog
+      open={deleteOpen}
+      onOpenChange={setDeleteOpen}
+      title="Delete Memory"
+      description="Delete"
+      itemName={memory.content.slice(0, 60) + (memory.content.length > 60 ? '…' : '')}
+      confirmText="Delete"
+      onConfirm={() => {
+        onDelete();
+        setDeleteOpen(false);
+      }}
+    />
+    </>
   );
 }
 

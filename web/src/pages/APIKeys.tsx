@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, KeyRound, Copy, Check, AlertCircle, Layers } from 'lucide-react';
-import { apiKeys as apiKeysApi, compounds as compoundsApi, type APIKeyWithSecret } from '@/api/client';
+import { apiKeys as apiKeysApi, compounds as compoundsApi, type APIKeyWithSecret, type APIKey } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import {
   Select,
   SelectTrigger,
@@ -35,6 +36,7 @@ export default function APIKeys() {
   const [showForm, setShowForm] = useState(false);
   const [newKey, setNewKey] = useState<APIKeyWithSecret | null>(null);
   const [copied, setCopied] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<APIKey | null>(null);
 
   const deleteMutation = useMutation({
     mutationFn: apiKeysApi.delete,
@@ -169,7 +171,7 @@ export default function APIKeys() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => deleteMutation.mutate(key.id)}
+                      onClick={() => setDeleteTarget(key)}
                       aria-label="Delete key"
                       className="text-muted-foreground hover:text-destructive"
                     >
@@ -182,6 +184,22 @@ export default function APIKeys() {
           )}
         </CardContent>
       </Card>
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete API Key"
+        description="Are you sure you want to delete"
+        itemName={deleteTarget?.name}
+        confirmText="Delete Key"
+        loading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deleteTarget) {
+            deleteMutation.mutate(deleteTarget.id, {
+              onSuccess: () => setDeleteTarget(null),
+            });
+          }
+        }}
+      />
     </div>
   );
 }

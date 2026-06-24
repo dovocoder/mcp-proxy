@@ -22,6 +22,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import {
   Select,
   SelectTrigger,
@@ -67,6 +68,7 @@ export default function EnvVars() {
   const [showValues, setShowValues] = useState<Record<string, boolean>>({});
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<EnvVar | null>(null);
 
   const { data: projects } = useQuery({
     queryKey: ['env-var-projects'],
@@ -484,7 +486,7 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        onClick={() => deleteMutation.mutate(ev.id)}
+                        onClick={() => setDeleteTarget(ev)}
                         aria-label="Delete variable"
                         className="text-muted-foreground hover:text-destructive"
                       >
@@ -582,6 +584,23 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
           </div>
         </CardContent>
       </Card>
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete Environment Variable"
+        description="Are you sure you want to delete"
+        itemName={deleteTarget?.key}
+        confirmText="Delete Variable"
+        loading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deleteTarget) {
+            deleteMutation.mutate(deleteTarget.id, {
+              onSuccess: () => setDeleteTarget(null),
+            });
+          }
+        }}
+      />
     </div>
   );
 }

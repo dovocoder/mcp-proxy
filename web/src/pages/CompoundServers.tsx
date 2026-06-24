@@ -29,6 +29,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import {
   Select,
   SelectTrigger,
@@ -54,6 +55,8 @@ export default function CompoundServers() {
   const [showCreate, setShowCreate] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [addServerId, setAddServerId] = useState<string | null>(null);
+  const [deleteCompoundOpen, setDeleteCompoundOpen] = useState(false);
+  const [removeMemberTarget, setRemoveMemberTarget] = useState<Server | null>(null);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -230,9 +233,7 @@ export default function CompoundServers() {
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() =>
-                        removeMemberMutation.mutate({ compoundId: selectedId, serverId: m.id })
-                      }
+                      onClick={() => setRemoveMemberTarget(m)}
                       aria-label="Remove member"
                       className="text-muted-foreground hover:text-destructive shrink-0"
                     >
@@ -451,16 +452,48 @@ export default function CompoundServers() {
           <CardContent>
             <Button
               variant="destructive"
-              onClick={() => {
-                deleteMutation.mutate(selectedId);
-                navigate('/compounds');
-              }}
+              onClick={() => setDeleteCompoundOpen(true)}
             >
               <Trash2 />
               Delete Compound
             </Button>
           </CardContent>
         </Card>
+
+        <ConfirmDialog
+          open={deleteCompoundOpen}
+          onOpenChange={setDeleteCompoundOpen}
+          title="Delete Compound"
+          description="Are you sure you want to delete"
+          itemName={detail?.name}
+          confirmText="Delete Compound"
+          loading={deleteMutation.isPending}
+          onConfirm={() => {
+            deleteMutation.mutate(selectedId, {
+              onSuccess: () => {
+                setDeleteCompoundOpen(false);
+                navigate('/compounds');
+              },
+            });
+          }}
+        />
+        <ConfirmDialog
+          open={!!removeMemberTarget}
+          onOpenChange={(open) => !open && setRemoveMemberTarget(null)}
+          title="Remove Server"
+          description="Remove"
+          itemName={removeMemberTarget?.name}
+          confirmText="Remove"
+          loading={removeMemberMutation.isPending}
+          onConfirm={() => {
+            if (removeMemberTarget) {
+              removeMemberMutation.mutate(
+                { compoundId: selectedId, serverId: removeMemberTarget.id },
+                { onSuccess: () => setRemoveMemberTarget(null) },
+              );
+            }
+          }}
+        />
       </div>
     );
   }
