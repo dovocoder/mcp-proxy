@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -48,13 +50,27 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.JWTSecret == "" {
-		cfg.JWTSecret = "dev-secret-change-in-production"
-		log.Printf("WARNING: MCP_PROXY_JWT_SECRET not set — using insecure default. Set it to a strong random value in production.")
+		// Generate a random secret if none is provided.
+		// This is more secure than a hardcoded default — each deployment
+		// gets a unique key, making forged JWTs impossible without the key.
+		// The downside: tokens don't survive restarts (users must re-login).
+		secretBytes := make([]byte, 32)
+		if _, err := rand.Read(secretBytes); err != nil {
+			return nil, fmt.Errorf("failed to generate JWT secret: %w", err)
+		}
+		cfg.JWTSecret = hex.EncodeToString(secretBytes)
+		log.Printf("WARNING: MCP_PROXY_JWT_SECRET not set — generated random secret. Tokens will not survive restarts. Set MCP_PROXY_JWT_SECRET in production for persistence.")
 	}
 
 	if cfg.AdminPassword == "" {
-		cfg.AdminPassword = "admin"
-		log.Printf("WARNING: MCP_PROXY_ADMIN_PASS not set — using default password 'admin'. Change it in production.")
+		// Generate a random password if none is provided.
+		// This prevents the well-known "admin/admin" login attack.
+		passBytes := make([]byte, 12)
+		if _, err := rand.Read(passBytes); err != nil {
+			return nil, fmt.Errorf("failed to generate admin password: %w", err)
+		}
+		cfg.AdminPassword = hex.EncodeToString(passBytes)
+		log.Printf("WARNING: MCP_PROXY_ADMIN_PASS not set — generated random password: %s", cfg.AdminPassword)
 	}
 
 	return cfg, nil

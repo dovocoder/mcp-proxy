@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -1026,7 +1027,7 @@ func (h *Handlers) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[OAuth-Callback] MCP server auth callback failed: %v", err)
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, err.Error())
+			fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, html.EscapeString(err.Error()))
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
@@ -2139,7 +2140,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	//   forwarding to PocketID
 	clientRedirectURIs := []string{}
 	if r.Body != nil {
-		bodyBytes, err := io.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err == nil && len(bodyBytes) > 0 {
 			var reg struct {
 				RedirectURIs []string `json:"redirect_uris"`
@@ -2242,7 +2243,7 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 	// the authorize step.
 	var bodyReader io.Reader
 	if r.URL.Path == "/api/oauth/token" && r.Method == "POST" {
-		bodyBytes, err := io.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "Failed to read request body")
 			return
@@ -2334,7 +2335,7 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 
 	// For token requests, log the upstream response status
 	if r.URL.Path == "/api/oauth/token" {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		respBodyStr := string(respBody)
 		// Log whether token exchange succeeded (don't log token values)
 		hasToken := strings.Contains(respBodyStr, "\"access_token\"")

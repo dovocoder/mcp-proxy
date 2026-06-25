@@ -117,7 +117,7 @@ func (p *OIDCProvider) discover() error {
 		return fmt.Errorf("OIDC discovery returned %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return err
 	}
@@ -218,11 +218,11 @@ func (p *OIDCProvider) UserInfo(accessToken string) (map[string]interface{}, err
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("userinfo returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func (p *OIDCProvider) fetchJWKS() (map[string]*rsa.PublicKey, error) {
 		return nil, fmt.Errorf("JWKS endpoint returned %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -532,11 +532,11 @@ func (p *OIDCProvider) IntrospectToken(accessToken string) (ProviderUser, error)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return ProviderUser{}, fmt.Errorf("introspection returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return ProviderUser{}, err
 	}

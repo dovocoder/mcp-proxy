@@ -120,27 +120,32 @@ func (a *AuthService) LoginRateLimitMiddleware(next http.Handler) http.Handler {
 }
 
 // clientIP extracts the real client IP from the request, accounting for reverse proxies.
+// Only trusts X-Forwarded-For / X-Real-IP when the direct connection is from a loopback
+// address (i.e. the request came through a reverse proxy like Traefik/nginx).
+// This prevents rate-limit bypass via spoofed X-Forwarded-For headers from direct clients.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP in the list
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
+	// Check if the direct connection is from a loopback address (reverse proxy)
+	remoteHost := r.RemoteAddr
+	if colonIdx := strings.LastIndex(remoteHost, ":"); colonIdx >= 0 {
+		remoteHost = remoteHost[:colonIdx]
+	}
+	isLoopback := remoteHost == "127.0.0.1" || remoteHost == "::1" || remoteHost == "[::1]" || remoteHost == "localhost"
+
+	if isLoopback {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Take the first IP in the list
+			for i := 0; i < len(xff); i++ {
+				if xff[i] == ',' {
+					return strings.TrimSpace(xff[:i])
+				}
 			}
+			return strings.TrimSpace(xff)
 		}
-		return xff
-	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-	// Fall back to RemoteAddr (strip port)
-	host := r.RemoteAddr
-	for i := len(host) - 1; i >= 0; i-- {
-		if host[i] == ':' {
-			return host[:i]
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return strings.TrimSpace(xri)
 		}
 	}
-	return host
+	return remoteHost
 }
 
 // SecurityHeadersMiddleware adds security headers to all responses.

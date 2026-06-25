@@ -13,6 +13,22 @@ import (
 	"time"
 )
 
+// oauthHTTPClient is a shared HTTP client for all OAuth discovery/token operations.
+// Has connection pooling and reasonable timeouts to prevent resource exhaustion.
+var oauthHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+// maxOAuthBodySize limits response bodies from OAuth metadata/token endpoints
+// to 1MB. These endpoints return small JSON documents — larger responses
+// indicate either a bug or a malicious server trying to exhaust memory.
+const maxOAuthBodySize = 1 << 20
+
 // OAuthServerMetadata represents the OAuth 2.0 Authorization Server Metadata (RFC8414).
 type OAuthServerMetadata struct {
 	Issuer                 string   `json:"issuer"`
@@ -178,7 +194,7 @@ func fetchProtectedResourceMetadata(metadataURL string) (*ProtectedResourceMetad
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("MCP-Protocol-Version", ProtocolVersionLatest)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -189,8 +205,13 @@ func fetchProtectedResourceMetadata(metadataURL string) (*ProtectedResourceMetad
 		return nil, fmt.Errorf("resource metadata returned HTTP %d", resp.StatusCode)
 	}
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
+	if err != nil {
+		return nil, err
+	}
+
 	var prm ProtectedResourceMetadata
-	if err := json.NewDecoder(resp.Body).Decode(&prm); err != nil {
+	if err := json.Unmarshal(body, &prm); err != nil {
 		return nil, fmt.Errorf("failed to parse resource metadata: %w", err)
 	}
 
@@ -250,7 +271,7 @@ func discoverAuthServerMetadata(authServerURL string) *OAuthServerMetadata {
 		}
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 
 	for _, endpoint := range endpoints {
 		req, err := http.NewRequest("GET", endpoint, nil)
@@ -269,7 +290,7 @@ func discoverAuthServerMetadata(authServerURL string) *OAuthServerMetadata {
 			continue
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
 		resp.Body.Close()
 		if err != nil {
 			continue
@@ -306,7 +327,7 @@ func discoverViaProtectedResource(serverURL string) (*OAuthServerMetadata, error
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("MCP-Protocol-Version", ProtocolVersionLatest)
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -385,14 +406,14 @@ func RegisterClient(registrationEndpoint string, redirectURIs []string) (*Client
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("client registration failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("registration failed (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
@@ -455,14 +476,14 @@ func ExchangeCodeForToken(tokenEndpoint, clientID, clientSecret, code, redirectU
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token exchange failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
@@ -517,14 +538,14 @@ func RefreshToken(tokenEndpoint, clientID, clientSecret, refreshToken string) (*
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token refresh failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read refresh response: %w", err)
 	}
@@ -649,14 +670,14 @@ func RequestDeviceCode(metadata *OAuthServerMetadata, clientID, scope, resource 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("device code request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("device code request failed (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
@@ -695,14 +716,14 @@ func PollDeviceToken(tokenEndpoint, clientID, deviceCode, resource string) (*OAu
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := oauthHTTPClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token poll failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
 
 	if resp.StatusCode != http.StatusOK {
 		// Parse error to check if it's "authorization_pending"
