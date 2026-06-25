@@ -15,20 +15,54 @@ interface LayoutProps {
     total_compounds: number;
     total_memories: number;
     total_skills: number;
+    total_tasks: number;
   };
 }
 
-const navItems = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
-  { to: '/servers', label: 'Servers', icon: Server, end: false },
-  { to: '/compounds', label: 'Compounds', icon: Layers, end: false },
-  { to: '/keys', label: 'API Keys', icon: KeyRound, end: false },
-  { to: '/tools', label: 'Tools', icon: Wrench, end: false },
-  { to: '/memories', label: 'Memories', icon: Brain, end: false },
-  { to: '/skills', label: 'Skills', icon: BookOpen, end: false },
-  { to: '/taskboard', label: 'Tasks', icon: KanbanSquare, end: false },
-  { to: '/env-vars', label: 'Env Vars', icon: Lock, end: false },
+interface NavItem {
+  to: string;
+  label: string;
+  icon: typeof Server;
+  end?: boolean;
+}
+
+interface NavSection {
+  title?: string;
+  items: NavItem[];
+}
+
+const navSections: NavSection[] = [
+  {
+    items: [
+      { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+    ],
+  },
+  {
+    title: 'Infrastructure',
+    items: [
+      { to: '/servers', label: 'Servers', icon: Server },
+      { to: '/compounds', label: 'Compounds', icon: Layers },
+      { to: '/keys', label: 'API Keys', icon: KeyRound },
+      { to: '/tools', label: 'Tools', icon: Wrench },
+    ],
+  },
+  {
+    title: 'Built-in MCP',
+    items: [
+      { to: '/memories', label: 'Memories', icon: Brain },
+      { to: '/skills', label: 'Skills', icon: BookOpen },
+      { to: '/taskboard', label: 'Tasks', icon: KanbanSquare },
+    ],
+  },
+  {
+    title: 'Settings',
+    items: [
+      { to: '/env-vars', label: 'Env Vars', icon: Lock },
+    ],
+  },
 ];
+
+const allNavItems = navSections.flatMap(s => s.items);
 
 export default function Layout({ stats }: LayoutProps) {
   const navigate = useNavigate();
@@ -38,6 +72,81 @@ export default function Layout({ stats }: LayoutProps) {
     clearToken();
     navigate('/login');
   };
+
+  const renderNavItems = (onNavigate?: () => void) => (
+    <>
+      {navSections.map((section, si) => (
+        <div key={si} className={si > 0 ? 'mt-3' : ''}>
+          {section.title && (
+            <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+              {section.title}
+            </div>
+          )}
+          {section.items.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              onClick={onNavigate}
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-sidebar-primary text-sidebar-primary-foreground'
+                    : 'text-muted-foreground hover:text-sidebar-foreground hover:bg-sidebar-accent'
+                )
+              }
+            >
+              <item.icon className="size-4" />
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      ))}
+    </>
+  );
+
+  const sidebarStats = stats ? (
+    <div className="px-3 py-3 border-t border-sidebar-border space-y-1.5">
+      <div className="flex justify-between text-xs">
+        <span className="text-muted-foreground">Servers</span>
+        <span className="text-sidebar-foreground font-medium">
+          {stats.connected_servers}/{stats.total_servers}
+        </span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="text-muted-foreground">Tools</span>
+        <span className="text-sidebar-foreground font-medium">{stats.total_tools}</span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="text-muted-foreground">API Keys</span>
+        <span className="text-sidebar-foreground font-medium">{stats.total_api_keys}</span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="text-muted-foreground">Compounds</span>
+        <span className="text-sidebar-foreground font-medium">{stats.total_compounds}</span>
+      </div>
+      <div className="border-t border-sidebar-border/50 my-1.5" />
+      <div className="flex justify-between text-xs">
+        <span className="inline-flex items-center gap-1 text-violet-400/80">
+          <Brain className="size-3" /> Memories
+        </span>
+        <span className="text-sidebar-foreground font-medium">{stats.total_memories}</span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="inline-flex items-center gap-1 text-blue-400/80">
+          <BookOpen className="size-3" /> Skills
+        </span>
+        <span className="text-sidebar-foreground font-medium">{stats.total_skills}</span>
+      </div>
+      <div className="flex justify-between text-xs">
+        <span className="inline-flex items-center gap-1 text-orange-400/80">
+          <KanbanSquare className="size-3" /> Tasks
+        </span>
+        <span className="text-sidebar-foreground font-medium">{stats.total_tasks}</span>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="min-h-screen bg-background flex flex-col lg:flex-row">
@@ -55,57 +164,11 @@ export default function Layout({ stats }: LayoutProps) {
           </div>
         </div>
 
-        <nav className="flex-1 px-2 py-3 space-y-0.5">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-sidebar-primary text-sidebar-primary-foreground'
-                    : 'text-muted-foreground hover:text-sidebar-foreground hover:bg-sidebar-accent'
-                )
-              }
-            >
-              <item.icon className="size-4" />
-              {item.label}
-            </NavLink>
-          ))}
+        <nav className="flex-1 px-2 py-2 overflow-y-auto">
+          {renderNavItems()}
         </nav>
 
-        {stats && (
-          <div className="px-3 py-3 border-t border-sidebar-border space-y-1.5">
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">Servers</span>
-              <span className="text-sidebar-foreground font-medium">
-                {stats.connected_servers}/{stats.total_servers}
-              </span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">Tools</span>
-              <span className="text-sidebar-foreground font-medium">{stats.total_tools}</span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">API Keys</span>
-              <span className="text-sidebar-foreground font-medium">{stats.total_api_keys}</span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">Compounds</span>
-              <span className="text-sidebar-foreground font-medium">{stats.total_compounds}</span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">Memories</span>
-              <span className="text-sidebar-foreground font-medium">{stats.total_memories}</span>
-            </div>
-            <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">Skills</span>
-              <span className="text-sidebar-foreground font-medium">{stats.total_skills}</span>
-            </div>
-          </div>
-        )}
+        {sidebarStats}
 
         <div className="p-2 border-t border-sidebar-border">
           <Button
@@ -145,27 +208,37 @@ export default function Layout({ stats }: LayoutProps) {
                 </div>
               </div>
             </div>
-            <nav className="px-2 py-3 space-y-0.5">
-              {navItems.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  onClick={() => setSheetOpen(false)}
-                  className={({ isActive }) =>
-                    cn(
-                      'flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                      isActive
-                        ? 'bg-primary text-primary-foreground'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-                    )
-                  }
-                >
-                  <item.icon className="size-4" />
-                  {item.label}
-                </NavLink>
+            <nav className="px-2 py-2 overflow-y-auto">
+              {navSections.map((section, si) => (
+                <div key={si} className={si > 0 ? 'mt-3' : ''}>
+                  {section.title && (
+                    <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                      {section.title}
+                    </div>
+                  )}
+                  {section.items.map((item) => (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.end}
+                      onClick={() => setSheetOpen(false)}
+                      className={({ isActive }) =>
+                        cn(
+                          'flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors',
+                          isActive
+                            ? 'bg-primary text-primary-foreground'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                        )
+                      }
+                    >
+                      <item.icon className="size-4" />
+                      {item.label}
+                    </NavLink>
+                  ))}
+                </div>
               ))}
             </nav>
+            {sidebarStats}
             <div className="p-2 border-t border-border mt-auto">
               <SheetClose render={
                 <Button
@@ -190,15 +263,15 @@ export default function Layout({ stats }: LayoutProps) {
       </main>
 
       {/* Mobile bottom nav */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-card border-t border-border flex items-center justify-around h-14 z-40">
-        {navItems.map((item) => (
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-card border-t border-border flex items-center justify-around h-14 z-40 overflow-x-auto">
+        {allNavItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
             end={item.end}
             className={({ isActive }) =>
               cn(
-                'flex flex-col items-center justify-center gap-0.5 flex-1 h-full transition-colors',
+                'flex flex-col items-center justify-center gap-0.5 flex-1 h-full min-w-[44px] transition-colors',
                 isActive ? 'text-primary' : 'text-muted-foreground'
               )
             }

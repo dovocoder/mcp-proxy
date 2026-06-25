@@ -251,6 +251,7 @@ export interface DashboardStats {
   total_compounds: number;
   total_memories: number;
   total_skills: number;
+  total_tasks: number;
 }
 
 export const dashboard = {

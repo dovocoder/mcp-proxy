@@ -24,6 +24,9 @@ import {
   Variable,
   Eye,
   EyeOff,
+  Brain,
+  BookOpen,
+  KanbanSquare,
 } from 'lucide-react';
 import { servers as serversApi, type Server, registry as registryApi, type RegistryServer } from '../api/client';
 import { cn } from '../lib/utils';
@@ -63,6 +66,14 @@ import {
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 type Transport = 'stdio' | 'streamable-http' | 'http';
+
+// Builtin server metadata — maps server ID patterns to icon + color
+function getBuiltinIcon(id: string): { icon: typeof Brain; color: string; bg: string } | null {
+  if (id.startsWith('memory')) return { icon: Brain, color: 'text-violet-400', bg: 'bg-violet-500/10' };
+  if (id.startsWith('skills') || id.startsWith('skill')) return { icon: BookOpen, color: 'text-blue-400', bg: 'bg-blue-500/10' };
+  if (id === 'tasks' || id.startsWith('taskboard')) return { icon: KanbanSquare, color: 'text-orange-400', bg: 'bg-orange-500/10' };
+  return null;
+}
 
 function statusBadge(status: string) {
   if (status === 'connected') return <Badge variant="default">{status}</Badge>;
@@ -199,6 +210,17 @@ export default function Servers() {
             <CardHeader>
               <Link to={`/servers/${srv.id}`} className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
+                  {srv.is_builtin && (() => {
+                    const meta = getBuiltinIcon(srv.id);
+                    if (meta) {
+                      return (
+                        <div className={cn('inline-flex items-center justify-center w-6 h-6 rounded-md shrink-0', meta.bg)}>
+                          <meta.icon className={cn('size-3.5', meta.color)} />
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
                   <span
                     className={cn(
                       'size-2.5 shrink-0 rounded-full',
@@ -220,9 +242,17 @@ export default function Servers() {
                 </CardDescription>
               </Link>
               <CardAction className="flex items-center gap-1.5">
-                {srv.is_builtin ? (
-                  <Badge variant="secondary">builtin</Badge>
-                ) : null}
+                {srv.is_builtin && (() => {
+                  const meta = getBuiltinIcon(srv.id);
+                  return (
+                    <Badge
+                      variant="secondary"
+                      className={meta ? cn(meta.bg, meta.color, 'border-transparent') : ''}
+                    >
+                      builtin
+                    </Badge>
+                  );
+                })()}
                 {statusBadge(srv.status)}
                 {!srv.is_builtin && (
                   <>
