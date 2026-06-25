@@ -327,6 +327,17 @@ func migrate(db *sql.DB) error {
 		// Column already exists
 	}
 
+	// Migration: add labels column to servers
+	_, err = db.Exec(`ALTER TABLE servers ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`)
+	if err != nil {
+		// Column already exists
+	}
+	// Migration: add tags column to servers
+	_, err = db.Exec(`ALTER TABLE servers ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`)
+	if err != nil {
+		// Column already exists
+	}
+
 	// Create default memory set if it doesn't exist
 	_, _ = db.Exec(`INSERT OR IGNORE INTO memory_sets (id, name, slug, description, is_default, created_at) VALUES ('default', 'Default', '', '', 1, datetime('now'))`)
 
@@ -359,6 +370,8 @@ func (s *Store) CreateServer(srv *models.Server) error {
 	argsJSON, _ := json.Marshal(srv.Args)
 	headersJSON, _ := json.Marshal(srv.Headers)
 	envJSON, _ := json.Marshal(srv.Env)
+	labelsJSON, _ := json.Marshal(srv.Labels)
+	tagsJSON, _ := json.Marshal(srv.Tags)
 	enabled := 0
 	if srv.Enabled {
 		enabled = 1
@@ -369,13 +382,15 @@ func (s *Store) CreateServer(srv *models.Server) error {
 	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO servers (id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO servers (id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, labels, tags, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		srv.ID, srv.Name, srv.Transport, srv.Command, string(argsJSON),
 		srv.URL, string(headersJSON), string(envJSON), s.encryptToken(srv.AuthToken),
 		srv.AuthMethod, srv.BearerTokenEnv,
-		srv.Timeout, srv.ConnectTimeout, enabled, logsEnabled, srv.Status,
+		srv.Timeout, srv.ConnectTimeout, enabled, logsEnabled,
+		string(labelsJSON), string(tagsJSON),
+		srv.Status,
 		srv.CreatedAt, srv.UpdatedAt,
 	)
 	return err
@@ -383,19 +398,19 @@ func (s *Store) CreateServer(srv *models.Server) error {
 
 // GetServer retrieves a server by ID.
 func (s *Store) GetServer(id string) (*models.Server, error) {
-	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, labels, tags, status, last_seen, created_at, updated_at FROM servers WHERE id = ?`, id)
 	return s.scanServer(row)
 }
 
 // GetServerByName retrieves a server by name.
 func (s *Store) GetServerByName(name string) (*models.Server, error) {
-	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers WHERE name = ?`, name)
+	row := s.db.QueryRow(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, labels, tags, status, last_seen, created_at, updated_at FROM servers WHERE name = ?`, name)
 	return s.scanServer(row)
 }
 
 // ListServers returns all servers.
 func (s *Store) ListServers() ([]*models.Server, error) {
-	rows, err := s.db.Query(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, status, last_seen, created_at, updated_at FROM servers ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, transport, command, args, url, headers, env, auth_token, auth_method, bearer_token_env, timeout, connect_timeout, enabled, logs_enabled, labels, tags, status, last_seen, created_at, updated_at FROM servers ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -420,6 +435,8 @@ func (s *Store) UpdateServer(srv *models.Server) error {
 	argsJSON, _ := json.Marshal(srv.Args)
 	headersJSON, _ := json.Marshal(srv.Headers)
 	envJSON, _ := json.Marshal(srv.Env)
+	labelsJSON, _ := json.Marshal(srv.Labels)
+	tagsJSON, _ := json.Marshal(srv.Tags)
 	enabled := 0
 	if srv.Enabled {
 		enabled = 1
@@ -433,13 +450,14 @@ func (s *Store) UpdateServer(srv *models.Server) error {
 		UPDATE servers SET
 			name = ?, transport = ?, command = ?, args = ?, url = ?,
 			headers = ?, env = ?, auth_token = ?, auth_method = ?, bearer_token_env = ?, timeout = ?, connect_timeout = ?,
-			enabled = ?, logs_enabled = ?, updated_at = ?
+			enabled = ?, logs_enabled = ?, labels = ?, tags = ?, updated_at = ?
 		WHERE id = ?
 	`,
 		srv.Name, srv.Transport, srv.Command, string(argsJSON),
 		srv.URL, string(headersJSON), string(envJSON), s.encryptToken(srv.AuthToken),
 		srv.AuthMethod, srv.BearerTokenEnv,
 		srv.Timeout, srv.ConnectTimeout, enabled, logsEnabled,
+		string(labelsJSON), string(tagsJSON),
 		time.Now(), srv.ID,
 	)
 	return err
@@ -686,7 +704,7 @@ func (s *Store) scanServerRows(rows *sql.Rows) (*models.Server, error) {
 
 func (s *Store) scanServerImpl(sc rowScanner) (*models.Server, error) {
 	var srv models.Server
-	var argsJSON, headersJSON, envJSON string
+	var argsJSON, headersJSON, envJSON, labelsJSON, tagsJSON string
 	var enabled, logsEnabled int
 	var lastSeen sql.NullTime
 	var createdAt, updatedAt string
@@ -695,7 +713,9 @@ func (s *Store) scanServerImpl(sc rowScanner) (*models.Server, error) {
 		&srv.ID, &srv.Name, &srv.Transport, &srv.Command, &argsJSON,
 		&srv.URL, &headersJSON, &envJSON, &srv.AuthToken,
 		&srv.AuthMethod, &srv.BearerTokenEnv,
-		&srv.Timeout, &srv.ConnectTimeout, &enabled, &logsEnabled, &srv.Status,
+		&srv.Timeout, &srv.ConnectTimeout, &enabled, &logsEnabled,
+		&labelsJSON, &tagsJSON,
+		&srv.Status,
 		&lastSeen, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -720,6 +740,18 @@ func (s *Store) scanServerImpl(sc rowScanner) (*models.Server, error) {
 	}
 	if err := json.Unmarshal([]byte(envJSON), &srv.Env); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal server env: %w", err)
+	}
+	if err := json.Unmarshal([]byte(labelsJSON), &srv.Labels); err != nil {
+		srv.Labels = []string{}
+	}
+	if err := json.Unmarshal([]byte(tagsJSON), &srv.Tags); err != nil {
+		srv.Tags = []string{}
+	}
+	if srv.Labels == nil {
+		srv.Labels = []string{}
+	}
+	if srv.Tags == nil {
+		srv.Tags = []string{}
 	}
 	srv.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
 	srv.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)

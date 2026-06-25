@@ -27,6 +27,7 @@ import {
   Brain,
   BookOpen,
   KanbanSquare,
+  Tag,
 } from 'lucide-react';
 import { servers as serversApi, type Server, registry as registryApi, type RegistryServer } from '../api/client';
 import { cn } from '../lib/utils';
@@ -258,6 +259,17 @@ export default function Servers() {
                   );
                 })()}
                 {statusBadge(srv.status)}
+                {srv.labels && srv.labels.length > 0 && srv.labels.map((label) => (
+                  <Badge key={label} variant="outline" className="text-xs bg-primary/10 text-primary border-primary/20">
+                    {label}
+                  </Badge>
+                ))}
+                {srv.tags && srv.tags.length > 0 && srv.tags.map((tag) => (
+                  <Badge key={tag} variant="outline" className="text-xs bg-muted text-muted-foreground border-border">
+                    <Tag className="size-2.5 mr-0.5" />
+                    {tag}
+                  </Badge>
+                ))}
                 {!srv.is_builtin && (
                   <>
                     <Button
@@ -519,6 +531,8 @@ function ServerForm({
   const [connectTimeout, setConnectTimeout] = useState(server?.connect_timeout ?? 60);
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
   const [logsEnabled, setLogsEnabled] = useState(server?.logs_enabled ?? true);
+  const [labels, setLabels] = useState((server?.labels ?? []).join(', '));
+  const [tags, setTags] = useState((server?.tags ?? []).join(', '));
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -562,6 +576,8 @@ function ServerForm({
         logs_enabled: logsEnabled,
         timeout,
         connect_timeout: connectTimeout,
+        labels: labels.split(',').map((l) => l.trim()).filter(Boolean),
+        tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
       };
 
       if (transport === 'stdio') {
@@ -967,6 +983,30 @@ function ServerForm({
               className="shrink-0"
             />
           </div>
+        </div>
+      </div>
+
+      {/* Labels & Tags */}
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="server-labels">Labels (comma-separated)</Label>
+          <Input
+            id="server-labels"
+            value={labels}
+            onChange={(e) => setLabels(e.target.value)}
+            placeholder="production, critical, east-us"
+          />
+          <p className="text-xs text-muted-foreground">User-facing labels for categorization</p>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="server-tags">Tags (comma-separated)</Label>
+          <Input
+            id="server-tags"
+            value={tags}
+            onChange={(e) => setTags(e.target.value)}
+            placeholder="internal, mcp-official, verified"
+          />
+          <p className="text-xs text-muted-foreground">System tags for internal identification</p>
         </div>
       </div>
 

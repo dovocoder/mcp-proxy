@@ -587,7 +587,9 @@ func (m *Manager) AddServer(req *models.CreateServerRequest) (*models.Server, er
 		Timeout:        timeout,
 		ConnectTimeout: connTimeout,
 		Enabled:        enabled,
-		LogsEnabled:    logsEnabled,
+		LogsEnabled:     logsEnabled,
+		Labels:         req.Labels,
+		Tags:           req.Tags,
 		Status:         "disconnected",
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
@@ -652,6 +654,12 @@ func (m *Manager) UpdateServer(id string, req *models.UpdateServerRequest) (*mod
 	}
 	if req.LogsEnabled != nil {
 		srv.LogsEnabled = *req.LogsEnabled
+	}
+	if req.Labels != nil {
+		srv.Labels = *req.Labels
+	}
+	if req.Tags != nil {
+		srv.Tags = *req.Tags
 	}
 	srv.UpdatedAt = time.Now()
 

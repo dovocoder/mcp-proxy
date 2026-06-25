@@ -72,6 +72,8 @@ export interface Server {
   logs_enabled: boolean;
   is_builtin?: boolean;
   builtin_type?: string;
+  labels?: string[];
+  tags?: string[];
   timeout: number;
   connect_timeout: number;
   status: string;
