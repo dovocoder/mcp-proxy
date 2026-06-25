@@ -176,7 +176,7 @@ func fetchProtectedResourceMetadata(metadataURL string) (*ProtectedResourceMetad
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("MCP-Protocol-Version", "2025-03-26")
+	req.Header.Set("MCP-Protocol-Version", ProtocolVersionLatest)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -297,14 +297,14 @@ func discoverAuthServerMetadata(authServerURL string) *OAuthServerMetadata {
 // OAuth metadata via the Protected Resource Metadata approach (RFC 9728).
 func discoverViaProtectedResource(serverURL string) (*OAuthServerMetadata, error) {
 	// Make a test MCP initialize request to trigger a 401
-	reqBody := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mcp-proxy","version":"1.0.0"}}}`)
+	reqBody := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":%q,"capabilities":{},"clientInfo":{"name":"mcp-proxy","version":"1.0.0"}}}`, ProtocolVersionLatest)
 	req, err := http.NewRequest("POST", serverURL, strings.NewReader(reqBody))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("MCP-Protocol-Version", "2025-03-26")
+	req.Header.Set("MCP-Protocol-Version", ProtocolVersionLatest)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)

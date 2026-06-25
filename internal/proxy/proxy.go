@@ -99,7 +99,7 @@ type Manager struct {
 	deviceAuths    map[string]*DeviceAuthResult // serverID -> pending device code flow
 	logMu          sync.RWMutex
 	serverLogs     map[string]*serverLog               // serverID -> stderr log ring buffer
-	oauthMetaCache map[string]*mcp.OAuthServerMetadata // serverID -> cached discovery result
+	oauthMetaCache map[string]*oauthMetaEntry // serverID -> cached discovery result (with TTL)
 	oauthMetaMu    sync.RWMutex
 }
 
@@ -113,10 +113,42 @@ func New(s *store.Store) *Manager {
 		authStates:     make(map[string]*mcp.AuthState),
 		deviceAuths:    make(map[string]*DeviceAuthResult),
 		serverLogs:     make(map[string]*serverLog),
-		oauthMetaCache: make(map[string]*mcp.OAuthServerMetadata),
+		oauthMetaCache: make(map[string]*oauthMetaEntry),
 	}
 	m.InitMemorySets()
+	// Start cleanup goroutine for stale OAuth states and device auths.
+	// authStates entries expire after 10 minutes (OAuth flows left incomplete).
+	// deviceAuths entries expire after 15 minutes (device code flows left pending).
+	go m.cleanupStaleAuthStates()
 	return m
+}
+
+// authStateTTL is the maximum lifetime of an incomplete OAuth state.
+const authStateTTL = 10 * time.Minute
+
+// deviceAuthTTL is the maximum lifetime of a pending device auth flow.
+const deviceAuthTTL = 15 * time.Minute
+
+// cleanupStaleAuthStates periodically removes expired OAuth states and device
+// auth flows to prevent unbounded memory growth from abandoned OAuth flows.
+func (m *Manager) cleanupStaleAuthStates() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		m.mu.Lock()
+		for state, as := range m.authStates {
+			if now.Sub(as.CreatedAt) > authStateTTL {
+				delete(m.authStates, state)
+			}
+		}
+		for serverID, da := range m.deviceAuths {
+			if da.ExpiresIn > 0 && now.Sub(da.CreatedAt) > deviceAuthTTL {
+				delete(m.deviceAuths, serverID)
+			}
+		}
+		m.mu.Unlock()
+	}
 }
 
 // InitMemorySets loads all memory sets from the store and creates a memory.Server for each.
@@ -192,7 +224,25 @@ func (m *Manager) StartAll() {
 }
 
 // connectServer establishes a connection to a backend server.
+// On failure, it schedules automatic reconnection with exponential backoff.
 func (m *Manager) connectServer(srv *models.Server) {
+	m.connectServerWithRetry(srv, 0)
+}
+
+// connectServerWithRetry connects to a backend server and, on failure,
+// schedules a reconnection attempt with exponential backoff.
+// retryCount is the number of failed attempts so far (0 for first try).
+func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
+	// Check if a connection already exists for this server (e.g., from a
+	// concurrent reconnect call). Skip if already connected.
+	m.mu.RLock()
+	_, exists := m.clients[srv.ID]
+	m.mu.RUnlock()
+	if exists {
+		log.Printf("Server %s: skipping connect — already connected", srv.Name)
+		return
+	}
+
 	// Determine auth token based on auth method
 	authToken := ""
 
@@ -340,6 +390,20 @@ func (m *Manager) connectServer(srv *models.Server) {
 		m.mu.Unlock()
 		if err := m.store.UpdateServerStatus(srv.ID, "error"); err != nil {
 			log.Printf("[Proxy] Warning: failed to update server status to 'error' for %s: %v", srv.ID, err)
+		}
+
+		// Schedule reconnection with exponential backoff (max 5 attempts, max 5 min delay)
+		if retryCount < 5 {
+			backoff := time.Duration(1<<retryCount) * time.Second
+			if backoff > 5*time.Minute {
+				backoff = 5 * time.Minute
+			}
+			log.Printf("Server %s: scheduling reconnection attempt %d in %v", srv.Name, retryCount+1, backoff)
+			time.AfterFunc(backoff, func() {
+				m.connectServerWithRetry(srv, retryCount+1)
+			})
+		} else {
+			log.Printf("Server %s: max reconnection attempts reached — giving up. Use the reconnect button to retry.", srv.Name)
 		}
 		return
 	}
@@ -584,21 +648,36 @@ func (m *Manager) ListToolsForCompound(compoundID string) []models.Tool {
 // listToolsFiltered returns tools from connected servers. If filter is non-nil,
 // only servers whose ID is in the filter set are included.
 func (m *Manager) listToolsFiltered(filter map[string]bool) []models.Tool {
+	// Snapshot clients and their tools under the lock, then release.
+	// This avoids holding the lock during DB queries (GetServer).
+	type clientInfo struct {
+		id     string
+		tools  []mcp.Tool
+		client *mcp.Client
+	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var tools []models.Tool
+	infos := make([]clientInfo, 0, len(m.clients))
 	for id, client := range m.clients {
 		if filter != nil && !filter[id] {
 			continue
 		}
-		srv, err := m.store.GetServer(id)
+		infos = append(infos, clientInfo{
+			id:     id,
+			tools:  client.Tools(),
+			client: client,
+		})
+	}
+	m.mu.RUnlock()
+
+	var tools []models.Tool
+	for _, ci := range infos {
+		srv, err := m.store.GetServer(ci.id)
 		if err != nil {
 			continue
 		}
-		for _, t := range client.Tools() {
+		for _, t := range ci.tools {
 			tool := models.Tool{
-				ServerID:    id,
+				ServerID:    ci.id,
 				ServerName:  srv.Name,
 				Name:        t.Name,
 				Description: t.Description,
@@ -622,6 +701,13 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 		// No response needed for notifications — the SSE handler already
 		// returns 202 for notifications without an ID. Return nil result.
 		return nil, nil
+	case "notifications/cancelled":
+		// Process cancellation notification — forward to the relevant backend.
+		// For now we just acknowledge it; the context deadline handles timeouts.
+		return nil, nil
+	case "ping":
+		// Ping is a keepalive — return an empty result per spec.
+		return json.Marshal(map[string]interface{}{})
 	case "tools/list":
 		return m.handleToolsList(req, scope)
 	case "tools/call":
@@ -652,17 +738,13 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 	}
 
 	// Negotiate the highest protocol version both client and server support.
-	// The proxy currently supports "2025-03-26".
-	const supportedVersion = "2025-03-26"
-	negotiatedVersion := supportedVersion
-	if clientVersion == supportedVersion {
-		negotiatedVersion = clientVersion
-	}
+	negotiatedVersion := mcp.NegotiateProtocolVersion(clientVersion)
 
 	// Build instructions: static guidance + auto-injected top memories
 	instructions := memoryInstructions
 
-	// Auto-inject top memories so LLMs see them without calling any tools
+	// Auto-inject top memories so LLMs see them without calling any tools.
+	// Limited to top 5 to avoid bloating the initialize response.
 	memorySetIDs := m.getMemorySetIDs(scope)
 	if len(memorySetIDs) > 0 {
 		var memorySummary strings.Builder
@@ -674,11 +756,11 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 				continue
 			}
 			// Sort by importance (highest first) — simple insertion sort for top N
-			maxInject := 15
+			maxInject := 5
 			topMems := make([]*models.Memory, 0, maxInject)
 			for _, mem := range memories {
-				if mem.Importance < 40 {
-					continue // Skip low-importance memories
+				if mem.Importance < 60 {
+					continue // Skip low-importance memories in init response
 				}
 				// Insert sorted by importance
 				inserted := false
@@ -722,9 +804,10 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 	result := map[string]interface{}{
 		"protocolVersion": negotiatedVersion,
 		"capabilities": map[string]interface{}{
-			"tools":     map[string]interface{}{},
-			"resources": map[string]interface{}{},
-			"prompts":   map[string]interface{}{},
+			"tools":     map[string]interface{}{"listChanged": true},
+			"resources": map[string]interface{}{"subscribe": true, "listChanged": true},
+			"prompts":   map[string]interface{}{"listChanged": true},
+			"logging":   map[string]interface{}{},
 		},
 		"serverInfo": map[string]interface{}{
 			"name":    "mcp-proxy",
@@ -1492,14 +1575,24 @@ func (m *Manager) ClearAuth(serverID string) error {
 	return nil
 }
 
+// oauthMetaEntry wraps cached OAuth metadata with a timestamp for TTL expiry.
+type oauthMetaEntry struct {
+	meta      *mcp.OAuthServerMetadata
+	cachedAt  time.Time
+}
+
+// oauthMetaCacheTTL is the maximum lifetime of cached OAuth metadata.
+const oauthMetaCacheTTL = 30 * time.Minute
+
 // GetOAuthMetadata returns cached OAuth metadata for a server, discovering it
-// on first access and caching the result.
+// on first access and caching the result. Cache entries expire after 30 minutes
+// to ensure stale metadata doesn't cause auth failures when upstream changes.
 func (m *Manager) GetOAuthMetadata(serverID string) *mcp.OAuthServerMetadata {
 	// Check cache first
 	m.oauthMetaMu.RLock()
-	if meta, ok := m.oauthMetaCache[serverID]; ok {
+	if entry, ok := m.oauthMetaCache[serverID]; ok && time.Since(entry.cachedAt) < oauthMetaCacheTTL {
 		m.oauthMetaMu.RUnlock()
-		return meta
+		return entry.meta
 	}
 	m.oauthMetaMu.RUnlock()
 
@@ -1515,7 +1608,7 @@ func (m *Manager) GetOAuthMetadata(serverID string) *mcp.OAuthServerMetadata {
 	}
 
 	m.oauthMetaMu.Lock()
-	m.oauthMetaCache[serverID] = meta
+	m.oauthMetaCache[serverID] = &oauthMetaEntry{meta: meta, cachedAt: time.Now()}
 	m.oauthMetaMu.Unlock()
 
 	return meta
@@ -1527,6 +1620,8 @@ func (m *Manager) InvalidateOAuthMetadataCache(serverID string) {
 	delete(m.oauthMetaCache, serverID)
 	m.oauthMetaMu.Unlock()
 }
+
+// oauthMetaEntry and oauthMetaCacheTTL are defined above with GetOAuthMetadata.
 
 // DeviceAuthResult holds the result of initiating a device code flow.
 type DeviceAuthResult struct {
@@ -1540,6 +1635,7 @@ type DeviceAuthResult struct {
 	ClientID        string `json:"-"`
 	TokenEndpoint   string `json:"-"`
 	Resource        string `json:"-"`
+	CreatedAt       time.Time `json:"-"`
 }
 
 // InitiateDeviceAuth starts a device code flow for a server. This is the preferred
@@ -1641,6 +1737,7 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 		ClientID:        clientID,
 		TokenEndpoint:   metadata.TokenEndpoint,
 		Resource:        resource,
+		CreatedAt:       time.Now(),
 	}
 
 	// Store for polling

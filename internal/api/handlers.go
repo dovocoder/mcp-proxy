@@ -1669,7 +1669,7 @@ func (h *Handlers) handleRegistrySearch(w http.ResponseWriter, r *http.Request) 
 		targetURL += "?search=" + url.QueryEscape(q)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := sharedOAuthProxyClient
 	resp, err := client.Get(targetURL)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Failed to reach registry"})
@@ -1860,6 +1860,24 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 // handleOAuthProxy forwards OAuth requests to the upstream OIDC provider (PocketID).
 // This ensures all endpoints in the auth server metadata are on the proxy's domain,
 // matching the issuer URL. Routes: /api/oauth/token, /jwks, /userinfo, /revoke, /introspect.
+// sharedOAuthProxyClient is a pooled HTTP client for all upstream OAuth requests.
+// Using a shared client with a shared Transport enables connection reuse (keep-alive)
+// and prevents the resource leak of creating a new Transport per request.
+var sharedOAuthProxyClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     90 * time.Second,
+	},
+	// Don't follow redirects — OAuth endpoints should not redirect POST requests.
+	// A 301/302 redirect would convert POST→GET, causing upstream to return 404.
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		log.Printf("[OAuth-Proxy] Redirect blocked: %s -> %s (method=%s)", req.URL.Host, req.URL.String(), req.Method)
+		return http.ErrUseLastResponse
+	},
+}
+
 func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 	if !h.auth.HasOIDC() {
 		writeError(w, http.StatusBadRequest, "OAuth not configured")
@@ -1959,15 +1977,9 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward the request to the upstream provider
-	// Don't follow redirects — OAuth endpoints should not redirect POST requests.
-	// A 301/302 redirect would convert POST→GET, causing PocketID to return 404.
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			log.Printf("[OAuth-Proxy] Redirect blocked: %s -> %s (method=%s)", upstreamURL, req.URL.String(), req.Method)
-			return http.ErrUseLastResponse
-		},
-	}
+	// Using shared pooled client — prevents resource leak from per-request Transport creation.
+	// Redirects are blocked via CheckRedirect (see sharedOAuthProxyClient definition).
+
 	// Always use POST for token requests — never let a redirect change the method
 	method := r.Method
 	if r.URL.Path == "/api/oauth/token" {
@@ -1991,7 +2003,7 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := client.Do(upstreamReq)
+	resp, err := sharedOAuthProxyClient.Do(upstreamReq)
 	if err != nil {
 		log.Printf("[OAuth-Proxy] Failed to reach upstream %s: %v", upstreamURL, err)
 		writeError(w, http.StatusBadGateway, "Failed to reach upstream OAuth provider")

@@ -69,8 +69,40 @@ func newStdioConn(command string, args []string, env map[string]string, connectT
 	go conn.readLoop()
 	// Start reading stderr for debugging
 	go conn.readStderr()
+	// Start health monitor — detects process exit and cleans up pending requests
+	go conn.healthMonitor()
 
 	return conn, nil
+}
+
+// healthMonitor waits for the subprocess to exit, then marks the connection
+// as closed and fails any pending requests. This prevents callers from
+// hanging indefinitely when a stdio process crashes.
+func (c *stdioConn) healthMonitor() {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return
+	}
+	c.cmd.Wait()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.closed = true
+	// Fail all pending requests with an error
+	for id, ch := range c.pending {
+		select {
+		case ch <- JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error:   &RPCError{Code: ErrCodeInternalError, Message: "backend process exited"},
+		}:
+		default:
+		}
+		delete(c.pending, id)
+	}
+	c.mu.Unlock()
 }
 
 func (c *stdioConn) nextID() uint64 {
@@ -161,9 +193,15 @@ func (c *stdioConn) readLoop() {
 		ch, ok := c.pending[id]
 		c.mu.Unlock()
 		if ok {
-			ch <- resp
+			// Non-blocking send: if the caller has already timed out and
+			// removed themselves from pending, the channel buffer (size 1)
+			// absorbs the response. If buffer is full, the response is dropped.
+			select {
+			case ch <- resp:
+			default:
+			}
 		}
-	}
+		}
 }
 
 func (c *stdioConn) readStderr() {
@@ -178,8 +216,8 @@ func (c *stdioConn) readStderr() {
 
 func (c *stdioConn) close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return
 	}
 	c.closed = true
@@ -188,8 +226,10 @@ func (c *stdioConn) close() {
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
-		c.cmd.Wait()
+		// Note: cmd.Wait() is called by healthMonitor goroutine.
+		// We don't call it here to avoid "wait: no child process" panic.
 	}
+	c.mu.Unlock()
 }
 
 // safeEnv returns a filtered list of safe environment variables for subprocesses.

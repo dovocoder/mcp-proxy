@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -99,11 +100,15 @@ func main() {
 	auth.StartCleanupRoutine()
 
 	// Create server
+	// Note: WriteTimeout is intentionally 0 (unlimited). A finite WriteTimeout
+	// would kill long-lived SSE streams (GET /api/mcp, GET /api/sse) and
+	// long-running tool calls. Per-request timeouts are handled via context
+	// deadlines in the handlers themselves.
 	srv := &http.Server{
 		Addr:           cfg.ListenAddr(),
 		Handler:        finalHandler,
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   120 * time.Second,
+		WriteTimeout:   0, // unlimited — SSE streams need this
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20, // 1MB — prevents header-based DoS
 	}
@@ -114,8 +119,17 @@ func main() {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down...")
+
+		// Disconnect all backend MCP servers
 		proxyMgr.StopAll()
-		srv.Close()
+
+		// Gracefully shutdown HTTP server with 15-second timeout
+		// for in-flight requests to complete
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
 	}()
 
 	log.Printf("MCP Proxy starting on http://0.0.0.0:%s", cfg.Port)

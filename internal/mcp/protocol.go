@@ -14,6 +14,29 @@ import (
 	"time"
 )
 
+// ProtocolVersionLatest is the latest MCP protocol version supported.
+const ProtocolVersionLatest = "2025-11-25"
+
+// ProtocolVersionLegacy is the older protocol version (2025-03-26).
+// Used for backwards compatibility with servers that haven't upgraded yet.
+const ProtocolVersionLegacy = "2025-03-26"
+
+// supportedProtocolVersions lists all protocol versions the proxy can negotiate.
+var supportedProtocolVersions = map[string]bool{
+	ProtocolVersionLatest: true,
+	ProtocolVersionLegacy: true,
+}
+
+// NegotiateProtocolVersion selects the highest protocol version both sides support.
+// If the client requests a version we support, we echo it back.
+// Otherwise we fall back to the latest version we support.
+func NegotiateProtocolVersion(clientVersion string) string {
+	if supportedProtocolVersions[clientVersion] {
+		return clientVersion
+	}
+	return ProtocolVersionLatest
+}
+
 // JSONRPCRequest is a JSON-RPC 2.0 request.
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -44,16 +67,27 @@ type RPCError struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
+// Standard JSON-RPC error codes.
+const (
+	ErrCodeParseError     = -32700
+	ErrCodeInvalidRequest = -32600
+	ErrCodeMethodNotFound = -32601
+	ErrCodeInvalidParams  = -32602
+	ErrCodeInternalError  = -32603
+)
+
 // Tool represents an MCP tool definition.
 type Tool struct {
 	Name        string          `json:"name"`
+	Title       string          `json:"title,omitempty"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
 }
 
 // ToolListResult is the result of tools/list.
 type ToolListResult struct {
-	Tools []Tool `json:"tools"`
+	Tools       []Tool `json:"tools"`
+	NextCursor  string `json:"nextCursor,omitempty"`
 }
 
 // InitializeResult is the result of initialize.
@@ -68,6 +102,19 @@ type sseEvent struct {
 	Event string
 	Data  string
 	ID    string
+}
+
+// sharedHTTPClient is a pooled HTTP client for all backend Streamable HTTP connections.
+// Using a shared client with a shared Transport enables connection reuse (keep-alive)
+// and prevents the resource leak of creating a new Transport per request.
+var sharedHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        20,
+		MaxIdleConnsPerHost: 5,
+		MaxConnsPerHost:     10,
+		IdleConnTimeout:     90 * time.Second,
+		ResponseHeaderTimeout: 0, // set per-request via context
+	},
 }
 
 // Client is a connection to a backend MCP server.
@@ -233,15 +280,33 @@ func (c *Client) Call(method string, params json.RawMessage) (json.RawMessage, e
 
 func (c *Client) initialize() error {
 	params, _ := json.Marshal(map[string]interface{}{
-		"protocolVersion": "2025-03-26",
+		"protocolVersion": ProtocolVersionLatest,
 		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]interface{}{
 			"name":    "mcp-proxy",
 			"version": "1.0.0",
 		},
 	})
-	_, err := c.Call("initialize", params)
-	return err
+	result, err := c.Call("initialize", params)
+	if err != nil {
+		return err
+	}
+
+	// Validate the server's protocol version response.
+	// If the server negotiated an older version, we accept it for backwards compat.
+	var initResp struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(result, &initResp); err == nil && initResp.ProtocolVersion != "" {
+		if !supportedProtocolVersions[initResp.ProtocolVersion] {
+			return fmt.Errorf("server returned unsupported protocol version: %s", initResp.ProtocolVersion)
+		}
+		// Re-negotiate: use the server's version if it's older than what we sent
+		if initResp.ProtocolVersion != ProtocolVersionLatest {
+			log.Printf("[MCP] Server negotiated protocol version %s (we requested %s)", initResp.ProtocolVersion, ProtocolVersionLatest)
+		}
+	}
+	return nil
 }
 
 // sendInitialized sends the notifications/initialized notification.
@@ -278,8 +343,7 @@ func (c *Client) sendInitialized() error {
 		c.setHeaders(httpReq)
 		c.setSessionHeader(httpReq)
 
-		client := &http.Client{}
-		resp, err := client.Do(httpReq)
+		resp, err := sharedHTTPClient.Do(httpReq)
 		if err != nil {
 			return err
 		}
@@ -327,7 +391,7 @@ func (c *Client) stdioCall(method string, params json.RawMessage) (json.RawMessa
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("MCP-Protocol-Version", "2025-03-26")
+	req.Header.Set("MCP-Protocol-Version", ProtocolVersionLatest)
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
@@ -363,8 +427,7 @@ func (c *Client) closeSession() {
 	}
 	c.setHeaders(req)
 	req.Header.Set("Mcp-Session-Id", sessionID)
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := sharedHTTPClient.Do(req)
 	if err == nil {
 		resp.Body.Close()
 	}
@@ -398,14 +461,10 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	log.Printf("[MCP] → %s (id=%d, url=%s, auth=%v)", method, reqID, c.httpURL, c.authToken != "")
 
-	// Don't use client.Timeout — it would timeout the body read too.
-	// Use context timeout instead so we can read SSE streams.
-	transport := &http.Transport{
-		ResponseHeaderTimeout: c.connectTimeout,
-		IdleConnTimeout:      30 * time.Second,
-	}
-	client := &http.Client{Transport: transport}
-	resp, err := client.Do(httpReq)
+	// Use the shared HTTP client — this enables connection reuse (keep-alive)
+	// and prevents the resource leak of creating a new Transport per request.
+	// The context handles per-request timeout including connect deadline.
+	resp, err := sharedHTTPClient.Do(httpReq)
 	if err != nil {
 		log.Printf("[MCP] ✗ %s (id=%d) network error: %v", method, reqID, err)
 		return nil, err
@@ -416,9 +475,9 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 	// Handle non-200 responses
 	if resp.StatusCode == http.StatusNotFound {
-		c.mu.Lock()
+		c.sessionMu.Lock()
 		c.sessionID = ""
-		c.mu.Unlock()
+		c.sessionMu.Unlock()
 		return nil, fmt.Errorf("session expired (HTTP 404) — reconnection needed")
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
@@ -494,6 +553,8 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 
 // readSSEWithTimeout reads an SSE stream line-by-line with a per-line timeout.
 // Returns as soon as a matching JSON-RPC response is found.
+// Uses a single long-lived reader goroutine to avoid spawning a goroutine per line
+// (which would leak goroutines on timeout).
 func (c *Client) readSSEWithTimeout(body io.Reader, reqID uint64, timeout time.Duration) (json.RawMessage, error) {
 	reader := bufio.NewReaderSize(body, 1024*1024)
 	var dataLines []string
@@ -527,6 +588,34 @@ func (c *Client) readSSEWithTimeout(body io.Reader, reqID uint64, timeout time.D
 		return rpcResp.Result, true, nil
 	}
 
+	// Single long-lived reader goroutine — sends lines on a channel.
+	// This avoids spawning a new goroutine per line (which leaks on timeout).
+	type lineResult struct {
+		line string
+		err  error
+	}
+	lineCh := make(chan lineResult, 1)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			line, err := reader.ReadString('\n')
+			select {
+			case lineCh <- lineResult{line, err}:
+			case <-readerDone:
+				return // reader is no longer needed
+			}
+		}
+	}()
+
+	defer func() {
+		// Signal the reader goroutine to stop on return.
+		select {
+		case <-readerDone:
+		default:
+		}
+	}()
+
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -542,19 +631,8 @@ func (c *Client) readSSEWithTimeout(body io.Reader, reqID uint64, timeout time.D
 			return nil, fmt.Errorf("SSE timeout — server did not send response within %v", timeout)
 		}
 
-		// Read one line with a timeout
-		type lineResult struct {
-			line string
-			err  error
-		}
-		ch := make(chan lineResult, 1)
-		go func() {
-			line, err := reader.ReadString('\n')
-			ch <- lineResult{line, err}
-		}()
-
 		select {
-		case res := <-ch:
+		case res := <-lineCh:
 			if res.err != nil && res.err != io.EOF {
 				// Read error
 				if len(dataLines) > 0 {

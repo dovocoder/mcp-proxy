@@ -32,6 +32,22 @@ func New(dbPath string) (*Store, error) {
 
 	db.SetMaxOpenConns(1) // SQLite doesn't handle concurrent writes well
 
+	// Enable WAL mode for better crash resilience and concurrent read performance.
+	// WAL (Write-Ahead Logging) allows readers to proceed concurrently with a single writer,
+	// and provides better durability guarantees than the default rollback journal.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+	}
+	// Set busy timeout to 5 seconds — prevents "database is locked" errors
+	// when multiple goroutines compete for write access.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
+	// Enable foreign keys for data integrity
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
+	}
+
 	if err := migrate(db); err != nil {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}

@@ -51,6 +51,7 @@ type OIDCProvider struct {
 	cacheMu    sync.RWMutex
 	jwksCache  *jwksKeySet // cached JWKS keys
 	jwksMu     sync.Mutex  // protects jwksCache refresh
+	httpClient *http.Client // shared HTTP client for all OIDC HTTP calls
 }
 
 type jwksKeySet struct {
@@ -68,18 +69,44 @@ func NewOIDCProvider(cfg OIDCConfig) (*OIDCProvider, error) {
 	p := &OIDCProvider{
 		config:     cfg,
 		tokenCache: make(map[string]cachedToken),
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        10,
+				MaxIdleConnsPerHost: 5,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
+	// Start periodic cleanup of expired token cache entries
+	go p.cleanupTokenCache()
 	if err := p.discover(); err != nil {
 		return nil, fmt.Errorf("OIDC discovery failed: %w", err)
 	}
 	return p, nil
 }
 
+// cleanupTokenCache periodically removes expired entries from the token cache
+// to prevent unbounded memory growth from long-running sessions.
+func (p *OIDCProvider) cleanupTokenCache() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		p.cacheMu.Lock()
+		for k, v := range p.tokenCache {
+			if time.Now().After(v.expiresAt) {
+				delete(p.tokenCache, k)
+			}
+		}
+		p.cacheMu.Unlock()
+	}
+}
+
 // discover fetches the OIDC well-known configuration.
 func (p *OIDCProvider) discover() error {
 	wellKnown := strings.TrimSuffix(p.config.Issuer, "/") + "/.well-known/openid-configuration"
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := p.httpClient
 	resp, err := client.Get(wellKnown)
 	if err != nil {
 		return fmt.Errorf("failed to fetch OIDC discovery: %w", err)
@@ -184,8 +211,7 @@ func (p *OIDCProvider) UserInfo(accessToken string) (map[string]interface{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch userinfo: %w", err)
 	}
@@ -230,8 +256,7 @@ func (p *OIDCProvider) fetchJWKS() (map[string]*rsa.PublicKey, error) {
 		return p.jwksCache.keys, nil
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(jwksURI)
+	resp, err := p.httpClient.Get(jwksURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
@@ -500,8 +525,7 @@ func (p *OIDCProvider) IntrospectToken(accessToken string) (ProviderUser, error)
 		req.SetBasicAuth(clientID, clientSecret)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return ProviderUser{}, fmt.Errorf("introspection request failed: %w", err)
 	}
@@ -609,7 +633,11 @@ func ExtractUser(info map[string]interface{}) ProviderUser {
 	}
 	// Fallback: use subject
 	if u.Username == "" {
-		u.Username = "oidc-" + u.Subject[:8]
+		if len(u.Subject) >= 8 {
+			u.Username = "oidc-" + u.Subject[:8]
+		} else {
+			u.Username = "oidc-" + u.Subject
+		}
 	}
 	return u
 }

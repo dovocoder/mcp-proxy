@@ -33,7 +33,25 @@ type sseSessionManager struct {
 }
 
 func newSSESessionManager() *sseSessionManager {
-	return &sseSessionManager{sessions: make(map[string]*sseSession)}
+	sm := &sseSessionManager{sessions: make(map[string]*sseSession)}
+	go sm.cleanupLoop()
+	return sm
+}
+
+// cleanupLoop periodically removes expired SSE sessions to prevent memory leaks.
+func (sm *sseSessionManager) cleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		sm.mu.Lock()
+		for id, s := range sm.sessions {
+			if time.Since(s.createdAt) > sessionTTL {
+				close(s.done)
+				delete(sm.sessions, id)
+			}
+		}
+		sm.mu.Unlock()
+	}
 }
 
 func (sm *sseSessionManager) generateID() string {
@@ -216,6 +234,13 @@ func (h *Handlers) sseMessage(w http.ResponseWriter, r *http.Request, fallbackSc
 	}
 
 	// Use the session's scope
+	// Notifications (no ID) get 202 Accepted — process asynchronously, no response on SSE
+	if req.ID == nil {
+		go h.proxy.HandleJSONRPC(r.Context(), req, sess.scope)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
 	result, err := h.proxy.HandleJSONRPC(r.Context(), req, sess.scope)
 
 	var resp mcp.JSONRPCResponse
@@ -223,7 +248,7 @@ func (h *Handlers) sseMessage(w http.ResponseWriter, r *http.Request, fallbackSc
 		resp = mcp.JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Error:   &mcp.RPCError{Code: -32603, Message: err.Error()},
+			Error:   &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()},
 		}
 	} else {
 		resp = mcp.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
@@ -239,16 +264,41 @@ func (h *Handlers) sseMessage(w http.ResponseWriter, r *http.Request, fallbackSc
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// --- Streamable HTTP transport (MCP spec 2025-03-26) ---
+// --- Streamable HTTP transport (MCP spec 2025-11-25) ---
 // POST   /api/mcp                    — global
 // POST   /api/servers/{id}/mcp       — per-server
 // POST   /api/compounds/{id}/mcp     — per-compound
 // GET    same paths                  — SSE notification stream
 // DELETE same paths                  — terminate session
 
+// sessionTTL is the maximum lifetime of an idle stream session.
+const sessionTTL = 30 * time.Minute
+
+// validProtocolVersions lists MCP protocol versions the proxy accepts.
+var validProtocolVersions = map[string]bool{
+	mcp.ProtocolVersionLatest:  true,
+	mcp.ProtocolVersionLegacy:  true,
+}
+
 func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, scope proxy.Scope) {
 	// Set MCP-Protocol-Version on ALL responses (POST, GET, DELETE)
-	w.Header().Set("MCP-Protocol-Version", "2025-03-26")
+	w.Header().Set("MCP-Protocol-Version", mcp.ProtocolVersionLatest)
+
+	// --- Origin header validation (DNS rebinding prevention, spec §Streamable HTTP Security) ---
+	if origin := r.Header.Get("Origin"); origin != "" {
+		scheme := "https"
+		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+			scheme = "http"
+		}
+		allowedOrigin := scheme + "://" + r.Host
+		if origin != allowedOrigin {
+			// Reject invalid Origin with 403 Forbidden
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid Origin header"})
+			return
+		}
+	}
 
 	// DELETE — terminate session
 	if r.Method == http.MethodDelete {
@@ -290,34 +340,61 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// POST — process JSON-RPC request
+
+	// Validate MCP-Protocol-Version header on non-initialize requests.
+	// Per spec: if the server receives a request with an invalid/unsupported
+	// MCP-Protocol-Version, it MUST respond with 400 Bad Request.
+	// For backwards compat, if no header is present, assume 2025-03-26.
+	protocolVersion := r.Header.Get("MCP-Protocol-Version")
+	if protocolVersion == "" {
+		protocolVersion = mcp.ProtocolVersionLegacy
+	}
+	if !validProtocolVersions[protocolVersion] {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported MCP-Protocol-Version: %s", protocolVersion))
+		return
+	}
+
 	var req mcp.JSONRPCRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON-RPC request")
 		return
 	}
 
-	// JSON-RPC notifications (no id) — return 202 Accepted with no body
+	// Session management: validate Mcp-Session-Id for non-initialize requests.
+	// Per spec: servers that require a session ID SHOULD respond to requests
+	// without one (other than initialization) with HTTP 400 Bad Request.
+	sessionID := r.Header.Get("Mcp-Session-Id")
+	isInitialize := req.Method == "initialize"
+	if !isInitialize && sessionID == "" && req.ID != nil {
+		// This is a request (not notification) without a session — require one.
+		writeError(w, http.StatusBadRequest, "Missing Mcp-Session-Id header")
+		return
+	}
+
+	// JSON-RPC notifications (no id) — return 202 Accepted with no body.
+	// Per spec: if the input is a JSON-RPC response or notification and the
+	// server accepts it, return 202 Accepted.
 	if req.ID == nil {
+		// Process the notification (e.g. notifications/initialized, notifications/cancelled)
+		go h.proxy.HandleJSONRPC(r.Context(), req, scope)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
 	result, err := h.proxy.HandleJSONRPC(r.Context(), req, scope)
-
 	var resp mcp.JSONRPCResponse
 	if err != nil {
 		resp = mcp.JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Error:   &mcp.RPCError{Code: -32603, Message: err.Error()},
+			Error:   &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()},
 		}
 	} else {
 		resp = mcp.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
 	}
 
 	// Echo or create session ID
-	sessionID := r.Header.Get("Mcp-Session-Id")
-	if req.Method == "initialize" && sessionID == "" {
+	if isInitialize && sessionID == "" {
 		sessionID = h.streamManager.generateID()
 	}
 	if sessionID != "" {
@@ -342,7 +419,9 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 		}
 
 		respBytes, _ := json.Marshal(resp)
-		fmt.Fprintf(w, "data: %s\n\n", string(respBytes))
+		// Send SSE event with ID for resumability support (spec §Resumability).
+		eventID := h.streamManager.generateID()
+		fmt.Fprintf(w, "id: %s\ndata: %s\n\n", eventID, string(respBytes))
 		flusher.Flush()
 	} else {
 		writeJSON(w, http.StatusOK, resp)
@@ -366,7 +445,29 @@ type streamSessionManager struct {
 }
 
 func newStreamSessionManager() *streamSessionManager {
-	return &streamSessionManager{sessions: make(map[string]*streamSession)}
+	sm := &streamSessionManager{sessions: make(map[string]*streamSession)}
+	go sm.cleanupLoop()
+	return sm
+}
+
+// cleanupLoop periodically removes expired sessions to prevent memory leaks.
+func (sm *streamSessionManager) cleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		sm.mu.Lock()
+		for id, s := range sm.sessions {
+			if time.Since(s.createdAt) > sessionTTL {
+				select {
+				case <-s.done:
+				default:
+					close(s.done)
+				}
+				delete(sm.sessions, id)
+			}
+		}
+		sm.mu.Unlock()
+	}
 }
 
 func (sm *streamSessionManager) generateID() string {
