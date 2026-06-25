@@ -15,6 +15,7 @@ import (
 	"github.com/agentic/mcp-proxy/internal/mcp"
 	"github.com/agentic/mcp-proxy/internal/memory"
 	"github.com/agentic/mcp-proxy/internal/models"
+	"github.com/agentic/mcp-proxy/internal/skills"
 	"github.com/agentic/mcp-proxy/internal/store"
 	"github.com/google/uuid"
 )
@@ -92,6 +93,8 @@ type Manager struct {
 	store          *store.Store
 	memorySets     map[string]*memory.Server // setID -> memory server
 	memoryMu       sync.RWMutex              // protects memorySets
+	skillSets      map[string]*skills.Server // setID -> skill server
+	skillMu        sync.RWMutex              // protects skillSets
 	mu             sync.RWMutex
 	clients        map[string]*mcp.Client       // serverID -> client
 	errors         map[string]string            // serverID -> last error message
@@ -108,6 +111,7 @@ func New(s *store.Store) *Manager {
 	m := &Manager{
 		store:          s,
 		memorySets:     make(map[string]*memory.Server),
+		skillSets:      make(map[string]*skills.Server),
 		clients:        make(map[string]*mcp.Client),
 		errors:         make(map[string]string),
 		authStates:     make(map[string]*mcp.AuthState),
@@ -116,6 +120,7 @@ func New(s *store.Store) *Manager {
 		oauthMetaCache: make(map[string]*oauthMetaEntry),
 	}
 	m.InitMemorySets()
+	m.InitSkillSets()
 	// Start cleanup goroutine for stale OAuth states and device auths.
 	// authStates entries expire after 10 minutes (OAuth flows left incomplete).
 	// deviceAuths entries expire after 15 minutes (device code flows left pending).
@@ -177,6 +182,106 @@ func (m *Manager) InitMemorySets() {
 		m.memorySets["default"] = memory.New(m.store, "default", "")
 	}
 	m.memoryMu.Unlock()
+}
+
+// InitSkillSets loads all skill sets from the store and creates a skills.Server for each.
+func (m *Manager) InitSkillSets() {
+	sets, err := m.store.ListSkillSets()
+	if err != nil {
+		log.Printf("Failed to list skill sets: %v", err)
+		return
+	}
+	m.skillMu.Lock()
+	for _, ss := range sets {
+		m.skillSets[ss.ID] = skills.New(m.store, ss.ID, ss.Slug)
+	}
+	// Ensure default set exists
+	if _, ok := m.skillSets["default"]; !ok {
+		defaultSet := &models.SkillSet{
+			ID:        "default",
+			Name:      "Default",
+			Slug:      "",
+			IsDefault: true,
+			CreatedAt: time.Now(),
+		}
+		if err := m.store.CreateSkillSet(defaultSet); err != nil {
+			log.Printf("Failed to create default skill set: %v", err)
+		}
+		m.skillSets["default"] = skills.New(m.store, "default", "")
+	}
+	m.skillMu.Unlock()
+}
+
+// skillServerID returns the virtual server ID for a skill set.
+// "default" → "builtin-skills", other sets → "builtin-skills:{set_id}".
+func skillServerID(setID string) string {
+	if setID == "default" {
+		return models.BuiltinSkillServerID
+	}
+	return models.BuiltinSkillServerID + ":" + setID
+}
+
+// GetSkillServer returns the skill server instance for a given set ID.
+func (m *Manager) GetSkillServer(setID string) *skills.Server {
+	m.skillMu.RLock()
+	defer m.skillMu.RUnlock()
+	return m.skillSets[setID]
+}
+
+// findSkillServerBySlug returns the skill server with the given slug.
+func (m *Manager) findSkillServerBySlug(slug string) *skills.Server {
+	m.skillMu.RLock()
+	defer m.skillMu.RUnlock()
+	for _, srv := range m.skillSets {
+		if srv.Slug() == slug {
+			return srv
+		}
+	}
+	return nil
+}
+
+// ListSkillSets returns all skill sets (exported for API handlers).
+func (m *Manager) ListSkillSets() []*models.SkillSet {
+	sets, err := m.store.ListSkillSets()
+	if err != nil {
+		log.Printf("Failed to list skill sets: %v", err)
+		return nil
+	}
+	return sets
+}
+
+// IsSkillCompoundMember returns the set IDs of all skill sets that are
+// members of the specified compound.
+func (m *Manager) IsSkillCompoundMember(compoundID string) []string {
+	memberIDs, err := m.store.GetCompoundMemberIDs(compoundID)
+	if err != nil {
+		return nil
+	}
+	var setIDs []string
+	for _, mid := range memberIDs {
+		if mid == models.BuiltinSkillServerID {
+			setIDs = append(setIDs, "default")
+		} else if strings.HasPrefix(mid, models.BuiltinSkillServerID+":") {
+			setID := strings.TrimPrefix(mid, models.BuiltinSkillServerID+":")
+			setIDs = append(setIDs, setID)
+		}
+	}
+	return setIDs
+}
+
+// getSkillSetIDs returns the skill set IDs accessible in the given scope.
+func (m *Manager) getSkillSetIDs(scope Scope) []string {
+	if scope.CompoundID != "" {
+		return m.IsSkillCompoundMember(scope.CompoundID)
+	}
+	// Global scope — all skill sets
+	m.skillMu.RLock()
+	defer m.skillMu.RUnlock()
+	var ids []string
+	for setID := range m.skillSets {
+		ids = append(ids, setID)
+	}
+	return ids
 }
 
 // MemoryServerID returns the virtual server ID for a memory set.
@@ -617,6 +722,19 @@ func (m *Manager) ListTools() []models.Tool {
 		}
 	}
 	m.memoryMu.RUnlock()
+	// Add skill tools from all skill sets
+	m.skillMu.RLock()
+	for _, srv := range m.skillSets {
+		for _, st := range srv.Tools() {
+			tools = append(tools, models.Tool{
+				ServerID:    skillServerID(srv.SetID()),
+				ServerName:  "skills",
+				Name:        st.Name,
+				Description: st.Description,
+			})
+		}
+	}
+	m.skillMu.RUnlock()
 	return tools
 }
 
@@ -743,6 +861,9 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 	// Build instructions: static guidance + auto-injected top memories
 	instructions := memoryInstructions
 
+	// Add skill instructions
+	instructions += "\n\n" + skillInstructions
+
 	// Auto-inject top memories so LLMs see them without calling any tools.
 	// Limited to top 5 to avoid bloating the initialize response.
 	memorySetIDs := m.getMemorySetIDs(scope)
@@ -847,6 +968,28 @@ const memoryInstructions = `This server provides persistent memory tools (memory
 2. When recalling: use memory_recall for palace browsing, memory_search for specific lookups
 3. Periodically: use memory_reflect to see what's being used and what's stale
 4. When facts change: update the existing memory (memory_update) rather than creating a new one`
+
+// skillInstructions provides guidance to LLM clients on how to use the
+// built-in skill tools effectively. Returned in the MCP initialize response.
+const skillInstructions = `This server also provides skill tools (skill_list, skill_load, skill_search, skill_create, skill_update, skill_delete). Skills are reusable procedures — documented workflows with steps, commands, and pitfalls.
+
+## When to use skills
+- Before starting a task: search (skill_search) or list (skill_list) to check if a procedure exists
+- When executing a procedure: load it (skill_load) to get the full content with exact commands
+- After learning a new workflow: create a skill (skill_create) so it can be reused next time
+- When a procedure has issues: update the skill (skill_update) with new pitfalls or corrected steps
+
+## How skills differ from memories
+- Memories store facts (what, why, context) — skills store procedures (how, steps, commands)
+- Use memory_search for "what do I know about X" — use skill_search for "how do I do X"
+- A skill should contain numbered steps with exact commands, not prose descriptions
+
+## Good skill structure
+1. Trigger conditions: when to use this skill
+2. Prerequisites: what needs to be set up first
+3. Numbered steps with exact commands
+4. Pitfalls and common errors
+5. Verification steps to confirm success`
 
 // getMemorySetIDs returns the memory set IDs accessible in the given scope.
 func (m *Manager) getMemorySetIDs(scope Scope) []string {
@@ -1162,6 +1305,41 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 		}
 	}
 
+	// Add built-in skill tools from all skill sets
+	var skillSetIDs []string
+	if scope.CompoundID != "" {
+		skillSetIDs = m.IsSkillCompoundMember(scope.CompoundID)
+	} else {
+		m.skillMu.RLock()
+		for setID := range m.skillSets {
+			skillSetIDs = append(skillSetIDs, setID)
+		}
+		m.skillMu.RUnlock()
+	}
+	for _, setID := range skillSetIDs {
+		srv := m.GetSkillServer(setID)
+		if srv != nil {
+			setSuffix := ""
+			if srv.Slug() != "" {
+				if ss, err := m.store.GetSkillSet(setID); err == nil && ss.Name != "" {
+					setSuffix = fmt.Sprintf(" [%s]", ss.Name)
+				} else {
+					setSuffix = fmt.Sprintf(" [%s]", srv.Slug())
+				}
+			}
+			for _, st := range srv.Tools() {
+				tool := mcp.Tool{
+					Name:        srv.NamespacedName(st.Name),
+					Description: fmt.Sprintf("[skills%s] %s", setSuffix, st.Description),
+				}
+				if len(st.InputSchema) > 0 {
+					tool.InputSchema = st.InputSchema
+				}
+				mcpTools = append(mcpTools, tool)
+			}
+		}
+	}
+
 	if mcpTools == nil {
 		mcpTools = []mcp.Tool{}
 	}
@@ -1224,6 +1402,29 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 			}
 		}
 		return memSrv.HandleToolCall(baseName, params.Arguments)
+	}
+
+	// Check if this is a built-in skill tool
+	if slug, baseName, ok := skills.ParseNamespaced(params.Name); ok {
+		skillSrv := m.findSkillServerBySlug(slug)
+		if skillSrv == nil {
+			return nil, fmt.Errorf("skill set not found for slug: %s", slug)
+		}
+		// For compound scope, verify this skill set is a compound member
+		if scope.CompoundID != "" {
+			memberSetIDs := m.IsSkillCompoundMember(scope.CompoundID)
+			allowed := false
+			for _, sid := range memberSetIDs {
+				if sid == skillSrv.SetID() {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return nil, fmt.Errorf("skill tools are not available in this compound — add the skill server as a member")
+			}
+		}
+		return skillSrv.HandleToolCall(baseName, params.Arguments)
 	}
 
 	// Check if this is a dictionary tool call (compound dictionary mode)

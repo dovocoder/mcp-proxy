@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useNavigate, Outlet } from 'react-router-dom';
-import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, Brain, Lock } from 'lucide-react';
+import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, Brain, Lock, BookOpen } from 'lucide-react';
 import { clearToken } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger, SheetClose } from '@/components/ui/sheet';
@@ -14,6 +14,7 @@ interface LayoutProps {
     total_api_keys: number;
     total_compounds: number;
     total_memories: number;
+    total_skills: number;
   };
 }
 
@@ -24,6 +25,7 @@ const navItems = [
   { to: '/keys', label: 'API Keys', icon: KeyRound, end: false },
   { to: '/tools', label: 'Tools', icon: Wrench, end: false },
   { to: '/memories', label: 'Memories', icon: Brain, end: false },
+  { to: '/skills', label: 'Skills', icon: BookOpen, end: false },
   { to: '/env-vars', label: 'Env Vars', icon: Lock, end: false },
 ];
 
@@ -96,6 +98,10 @@ export default function Layout({ stats }: LayoutProps) {
             <div className="flex justify-between text-xs">
               <span className="text-muted-foreground">Memories</span>
               <span className="text-sidebar-foreground font-medium">{stats.total_memories}</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-muted-foreground">Skills</span>
+              <span className="text-sidebar-foreground font-medium">{stats.total_skills}</span>
             </div>
           </div>
         )}

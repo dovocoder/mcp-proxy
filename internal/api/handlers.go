@@ -20,6 +20,7 @@ import (
 	"github.com/agentic/mcp-proxy/internal/memory"
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/proxy"
+	"github.com/agentic/mcp-proxy/internal/skills"
 	"github.com/agentic/mcp-proxy/internal/store"
 	"github.com/google/uuid"
 )
@@ -181,6 +182,21 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PATCH /api/memory-sets/{id}", h.handleUpdateMemorySet)
 	adminMux.HandleFunc("DELETE /api/memory-sets/{id}", h.handleDeleteMemorySet)
 
+	// Skill routes
+	adminMux.HandleFunc("GET /api/skills", h.handleListSkills)
+	adminMux.HandleFunc("POST /api/skills", h.handleCreateSkill)
+	adminMux.HandleFunc("GET /api/skills/{id}", h.handleGetSkill)
+	adminMux.HandleFunc("PUT /api/skills/{id}", h.handleUpdateSkill)
+	adminMux.HandleFunc("DELETE /api/skills/{id}", h.handleDeleteSkill)
+	adminMux.HandleFunc("GET /api/skills/categories", h.handleListSkillCategories)
+	adminMux.HandleFunc("GET /api/skills/search", h.handleSearchSkills)
+
+	// Skill set routes
+	adminMux.HandleFunc("GET /api/skill-sets", h.handleListSkillSets)
+	adminMux.HandleFunc("POST /api/skill-sets", h.handleCreateSkillSet)
+	adminMux.HandleFunc("PATCH /api/skill-sets/{id}", h.handleUpdateSkillSet)
+	adminMux.HandleFunc("DELETE /api/skill-sets/{id}", h.handleDeleteSkillSet)
+
 	// Env var routes (admin — JWT auth)
 	// Register more specific paths first for safety.
 	adminMux.HandleFunc("GET /api/env-vars/projects", h.handleListEnvVarProjects)
@@ -321,6 +337,33 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Prepend all skill set servers as virtual builtin servers
+	skillSets := h.proxy.ListSkillSets()
+	for _, ss := range skillSets {
+		sid := ss.ID
+		if sid == "default" {
+			sid = models.BuiltinSkillServerID
+		} else {
+			sid = models.BuiltinSkillServerID + ":" + ss.ID
+		}
+		srv := &models.Server{
+			ID:        sid,
+			Name:      ss.Name,
+			Transport: "builtin",
+			Enabled:   true,
+			IsBuiltin: true,
+			Status:    "connected",
+		}
+		toolsCount := 0
+		if skillSrv := h.proxy.GetSkillServer(ss.ID); skillSrv != nil {
+			toolsCount = len(skillSrv.Tools())
+		}
+		result = append(result, serverWithStatus{
+			Server:     srv,
+			ToolsCount: toolsCount,
+		})
+	}
+
 	for _, srv := range servers {
 		status, toolCount, lastErr := h.proxy.GetServerStatus(srv.ID)
 		srv.Status = status
@@ -392,6 +435,36 @@ func (h *Handlers) handleGetServer(w http.ResponseWriter, r *http.Request) {
 		toolCount := 0
 		if memSrv := h.proxy.GetMemoryServer(setID); memSrv != nil {
 			toolCount = len(memSrv.Tools())
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"server":      srv,
+			"tools_count": toolCount,
+			"live_error":  "",
+		})
+		return
+	}
+
+	// Handle builtin skill servers (virtual — not in the database)
+	if skills.IsSkillServerID(id) {
+		setID := skills.SkillSetIDFromServerID(id)
+		ss, err := h.store.GetSkillSet(setID)
+		var name string
+		if err == nil && ss != nil {
+			name = ss.Name
+		} else {
+			name = "skills" // default set
+		}
+		srv := &models.Server{
+			ID:        id,
+			Name:      name,
+			Transport: "builtin",
+			Enabled:   true,
+			IsBuiltin: true,
+			Status:    "connected",
+		}
+		toolCount := 0
+		if skillSrv := h.proxy.GetSkillServer(setID); skillSrv != nil {
+			toolCount = len(skillSrv.Tools())
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"server":      srv,
@@ -587,6 +660,7 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	keys, _ := h.store.ListAPIKeys()
 	compounds, _ := h.store.ListCompounds()
 	memCount, _ := h.store.CountMemories()
+	skills, _ := h.store.ListSkills("", "")
 	tools := h.proxy.ListTools()
 
 	connected := 0
@@ -604,6 +678,7 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TotalAPIKeys:     len(keys),
 		TotalCompounds:   len(compounds),
 		TotalMemories:    memCount,
+		TotalSkills:      len(skills),
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -1302,6 +1377,252 @@ func (h *Handlers) handleDeleteMemorySet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Skills (admin) ---
+
+func (h *Handlers) handleListSkills(w http.ResponseWriter, r *http.Request) {
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
+	category := r.URL.Query().Get("category")
+	skills, err := h.store.ListSkills(setID, category)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list skills")
+		return
+	}
+	if skills == nil {
+		skills = []*models.Skill{}
+	}
+	writeJSON(w, http.StatusOK, skills)
+}
+
+func (h *Handlers) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateSkillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+	if req.Content == "" {
+		writeError(w, http.StatusBadRequest, "Content is required")
+		return
+	}
+	if req.Category == "" {
+		req.Category = "general"
+	}
+	if req.Version == "" {
+		req.Version = "1.0.0"
+	}
+	if req.Tags == nil {
+		req.Tags = []string{}
+	}
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
+	sk := &models.Skill{
+		SetID:       setID,
+		Name:        req.Name,
+		Description: req.Description,
+		Content:     req.Content,
+		Category:    req.Category,
+		Tags:        req.Tags,
+		Version:     req.Version,
+	}
+	if err := h.store.CreateSkill(sk); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create skill: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, sk)
+}
+
+func (h *Handlers) handleGetSkill(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sk, err := h.store.GetSkill(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Skill not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, sk)
+}
+
+func (h *Handlers) handleUpdateSkill(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req models.UpdateSkillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	sk, err := h.store.GetSkill(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Skill not found")
+		return
+	}
+	if req.Name != nil {
+		sk.Name = *req.Name
+	}
+	if req.Description != nil {
+		sk.Description = *req.Description
+	}
+	if req.Content != nil {
+		sk.Content = *req.Content
+	}
+	if req.Category != nil {
+		sk.Category = *req.Category
+	}
+	if req.Tags != nil {
+		sk.Tags = *req.Tags
+	}
+	if req.Version != nil {
+		sk.Version = *req.Version
+	}
+	if err := h.store.UpdateSkill(sk); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update skill: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, sk)
+}
+
+func (h *Handlers) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteSkill(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to delete skill")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handlers) handleListSkillCategories(w http.ResponseWriter, r *http.Request) {
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
+	cats, err := h.store.ListSkillCategories(setID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list skill categories")
+		return
+	}
+	if cats == nil {
+		cats = []models.SkillCategory{}
+	}
+	writeJSON(w, http.StatusOK, cats)
+}
+
+func (h *Handlers) handleSearchSkills(w http.ResponseWriter, r *http.Request) {
+	setID := r.URL.Query().Get("set_id")
+	if setID == "" {
+		setID = "default"
+	}
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		writeError(w, http.StatusBadRequest, "Query parameter 'q' is required")
+		return
+	}
+	skills, err := h.store.SearchSkills(setID, query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Search failed")
+		return
+	}
+	if skills == nil {
+		skills = []*models.Skill{}
+	}
+	writeJSON(w, http.StatusOK, skills)
+}
+
+// --- Skill Sets (admin) ---
+
+func (h *Handlers) handleListSkillSets(w http.ResponseWriter, r *http.Request) {
+	sets := h.proxy.ListSkillSets()
+	if sets == nil {
+		sets = []*models.SkillSet{}
+	}
+	writeJSON(w, http.StatusOK, sets)
+}
+
+func (h *Handlers) handleCreateSkillSet(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateSkillSetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+	// Generate slug from name
+	slug := slugify(req.Name)
+	ss := &models.SkillSet{
+		Name:        req.Name,
+		Slug:        slug,
+		Description: req.Description,
+	}
+	if err := h.store.CreateSkillSet(ss); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create skill set: %v", err))
+		return
+	}
+	// Initialize the skill server for this set
+	h.proxy.InitSkillSets()
+	writeJSON(w, http.StatusCreated, ss)
+}
+
+func (h *Handlers) handleUpdateSkillSet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req models.UpdateSkillSetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	ss, err := h.store.GetSkillSet(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Skill set not found")
+		return
+	}
+	if req.Name != nil {
+		ss.Name = *req.Name
+		// Update slug too if name changes
+		ss.Slug = slugify(*req.Name)
+	}
+	if req.Description != nil {
+		ss.Description = *req.Description
+	}
+	if err := h.store.UpdateSkillSet(ss); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update skill set: %v", err))
+		return
+	}
+	// Re-initialize skill servers to pick up the updated slug
+	h.proxy.InitSkillSets()
+	writeJSON(w, http.StatusOK, ss)
+}
+
+func (h *Handlers) handleDeleteSkillSet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteSkillSet(id); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete skill set: %v", err))
+		return
+	}
+	// Re-initialize to remove the deleted set from the map
+	h.proxy.InitSkillSets()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// slugify converts a name to a URL-safe slug.
+func slugify(name string) string {
+	s := strings.ToLower(name)
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+	// Remove non-alphanumeric chars (keep hyphens)
+	var result []byte
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			result = append(result, byte(c))
+		}
+	}
+	return strings.Trim(string(result), "-")
 }
 
 // --- Env Vars (admin) ---

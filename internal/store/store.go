@@ -214,6 +214,34 @@ func migrate(db *sql.DB) error {
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS skill_sets (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		slug TEXT UNIQUE,
+		description TEXT,
+		is_default INTEGER DEFAULT 0,
+		created_at TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS skills (
+		id TEXT PRIMARY KEY,
+		set_id TEXT NOT NULL DEFAULT 'default',
+		name TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL,
+		category TEXT NOT NULL DEFAULT 'general',
+		tags TEXT NOT NULL DEFAULT '[]',
+		version TEXT NOT NULL DEFAULT '1.0.0',
+		access_count INTEGER NOT NULL DEFAULT 0,
+		last_accessed DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(set_id, name)
+	);
+	CREATE INDEX IF NOT EXISTS idx_skills_category ON skills(category);
+	CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+	CREATE INDEX IF NOT EXISTS idx_skills_content ON skills(content);
 `
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -270,6 +298,9 @@ func migrate(db *sql.DB) error {
 
 	// Create default memory set if it doesn't exist
 	_, _ = db.Exec(`INSERT OR IGNORE INTO memory_sets (id, name, slug, description, is_default, created_at) VALUES ('default', 'Default', '', '', 1, datetime('now'))`)
+
+	// Create default skill set if it doesn't exist
+	_, _ = db.Exec(`INSERT OR IGNORE INTO skill_sets (id, name, slug, description, is_default, created_at) VALUES ('default', 'Default', '', '', 1, datetime('now'))`)
 
 	return nil
 }
@@ -1409,4 +1440,233 @@ func scanDisabledTools(rows *sql.Rows) ([]*models.DisabledTool, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// --- Skill Sets ---
+
+func (s *Store) ListSkillSets() ([]*models.SkillSet, error) {
+	rows, err := s.db.Query(`SELECT id, name, slug, description, is_default, created_at FROM skill_sets ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.SkillSet
+	for rows.Next() {
+		var ss models.SkillSet
+		var isDefault int
+		var createdAt string
+		if err := rows.Scan(&ss.ID, &ss.Name, &ss.Slug, &ss.Description, &isDefault, &createdAt); err != nil {
+			return nil, err
+		}
+		ss.IsDefault = isDefault == 1
+		ss.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		result = append(result, &ss)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Store) GetSkillSet(id string) (*models.SkillSet, error) {
+	row := s.db.QueryRow(`SELECT id, name, slug, description, is_default, created_at FROM skill_sets WHERE id = ?`, id)
+	var ss models.SkillSet
+	var isDefault int
+	var createdAt string
+	if err := row.Scan(&ss.ID, &ss.Name, &ss.Slug, &ss.Description, &isDefault, &createdAt); err != nil {
+		return nil, err
+	}
+	ss.IsDefault = isDefault == 1
+	ss.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	return &ss, nil
+}
+
+func (s *Store) CreateSkillSet(ss *models.SkillSet) error {
+	ss.ID = uuid.NewString()
+	ss.CreatedAt = time.Now()
+	isDefault := 0
+	if ss.IsDefault {
+		isDefault = 1
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO skill_sets (id, name, slug, description, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		ss.ID, ss.Name, ss.Slug, ss.Description, isDefault, ss.CreatedAt.Format(time.RFC3339),
+	)
+	return err
+}
+
+func (s *Store) UpdateSkillSet(ss *models.SkillSet) error {
+	_, err := s.db.Exec(
+		`UPDATE skill_sets SET name = ?, slug = ?, description = ? WHERE id = ?`,
+		ss.Name, ss.Slug, ss.Description, ss.ID,
+	)
+	return err
+}
+
+func (s *Store) DeleteSkillSet(id string) error {
+	// Delete all skills in the set first
+	_, err := s.db.Exec(`DELETE FROM skills WHERE set_id = ?`, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`DELETE FROM skill_sets WHERE id = ? AND is_default = 0`, id)
+	return err
+}
+
+// --- Skills ---
+
+func (s *Store) CreateSkill(skill *models.Skill) error {
+	skill.ID = "skill_" + uuid.NewString()
+	now := time.Now()
+	skill.CreatedAt = now
+	skill.UpdatedAt = now
+	if skill.Tags == nil {
+		skill.Tags = []string{}
+	}
+	if skill.SetID == "" {
+		skill.SetID = "default"
+	}
+	tagsJSON, _ := json.Marshal(skill.Tags)
+	_, err := s.db.Exec(`
+		INSERT INTO skills (id, set_id, name, description, content, category, tags, version, access_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		skill.ID, skill.SetID, skill.Name, skill.Description, skill.Content,
+		skill.Category, string(tagsJSON), skill.Version, skill.AccessCount,
+		skill.CreatedAt.Format(time.RFC3339), skill.UpdatedAt.Format(time.RFC3339),
+	)
+	return err
+}
+
+func (s *Store) GetSkill(id string) (*models.Skill, error) {
+	row := s.db.QueryRow(`SELECT id, set_id, name, description, content, category, tags, version, access_count, last_accessed, created_at, updated_at FROM skills WHERE id = ?`, id)
+	return scanSkill(row)
+}
+
+func (s *Store) GetSkillByName(setID, name string) (*models.Skill, error) {
+	row := s.db.QueryRow(`SELECT id, set_id, name, description, content, category, tags, version, access_count, last_accessed, created_at, updated_at FROM skills WHERE set_id = ? AND name = ?`, setID, name)
+	return scanSkill(row)
+}
+
+func (s *Store) ListSkills(setID, category string) ([]*models.Skill, error) {
+	q := `SELECT id, set_id, name, description, content, category, tags, version, access_count, last_accessed, created_at, updated_at FROM skills`
+	args := []interface{}{}
+	where := []string{}
+	if setID != "" {
+		where = append(where, "set_id = ?")
+		args = append(args, setID)
+	}
+	if category != "" {
+		where = append(where, "category = ?")
+		args = append(args, category)
+	}
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY category, name"
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.Skill
+	for rows.Next() {
+		sk, err := scanSkill(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, sk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Store) SearchSkills(setID, query string) ([]*models.Skill, error) {
+	likeQuery := "%" + query + "%"
+	rows, err := s.db.Query(
+		`SELECT id, set_id, name, description, content, category, tags, version, access_count, last_accessed, created_at, updated_at FROM skills WHERE set_id = ? AND (content LIKE ? OR name LIKE ? OR tags LIKE ? OR description LIKE ?) ORDER BY updated_at DESC`,
+		setID, likeQuery, likeQuery, likeQuery, likeQuery,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.Skill
+	for rows.Next() {
+		sk, err := scanSkill(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, sk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Store) UpdateSkill(skill *models.Skill) error {
+	skill.UpdatedAt = time.Now()
+	if skill.Tags == nil {
+		skill.Tags = []string{}
+	}
+	tagsJSON, _ := json.Marshal(skill.Tags)
+	_, err := s.db.Exec(`
+		UPDATE skills SET name = ?, description = ?, content = ?, category = ?, tags = ?, version = ?, updated_at = ? WHERE id = ?`,
+		skill.Name, skill.Description, skill.Content, skill.Category, string(tagsJSON), skill.Version,
+		skill.UpdatedAt.Format(time.RFC3339), skill.ID,
+	)
+	return err
+}
+
+func (s *Store) DeleteSkill(id string) error {
+	_, err := s.db.Exec(`DELETE FROM skills WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) TouchSkill(id string) error {
+	_, err := s.db.Exec(`UPDATE skills SET access_count = access_count + 1, last_accessed = ? WHERE id = ?`, time.Now().Format(time.RFC3339), id)
+	return err
+}
+
+func (s *Store) ListSkillCategories(setID string) ([]models.SkillCategory, error) {
+	rows, err := s.db.Query(`SELECT category, COUNT(*) FROM skills WHERE set_id = ? GROUP BY category ORDER BY category`, setID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []models.SkillCategory
+	for rows.Next() {
+		var sc models.SkillCategory
+		if err := rows.Scan(&sc.Category, &sc.Count); err != nil {
+			return nil, err
+		}
+		result = append(result, sc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func scanSkill(s rowScanner) (*models.Skill, error) {
+	var sk models.Skill
+	var tagsJSON string
+	var lastAccessed sql.NullString
+	var createdAt, updatedAt string
+	if err := s.Scan(&sk.ID, &sk.SetID, &sk.Name, &sk.Description, &sk.Content, &sk.Category, &tagsJSON, &sk.Version, &sk.AccessCount, &lastAccessed, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(tagsJSON), &sk.Tags)
+	if sk.Tags == nil {
+		sk.Tags = []string{}
+	}
+	sk.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	sk.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	if lastAccessed.Valid {
+		t, _ := time.Parse(time.RFC3339, lastAccessed.String)
+		sk.LastAccessed = &t
+	}
+	return &sk, nil
 }

@@ -32,6 +32,9 @@ type Server struct {
 // BuiltinMemoryServerID is the virtual server ID for the built-in memory MCP server.
 const BuiltinMemoryServerID = "builtin-memory"
 
+// BuiltinSkillServerID is the virtual server ID for the built-in skill MCP server.
+const BuiltinSkillServerID = "builtin-skills"
+
 // BuiltinServer returns a virtual Server record for the built-in memory server.
 func BuiltinMemoryServer() Server {
 	return Server{
@@ -183,6 +186,7 @@ type DashboardStats struct {
 	TotalAPIKeys     int `json:"total_api_keys"`
 	TotalCompounds   int `json:"total_compounds"`
 	TotalMemories    int `json:"total_memories"`
+	TotalSkills      int `json:"total_skills"`
 }
 
 // Memory represents a stored memory in the built-in memory server.
@@ -284,4 +288,69 @@ type DisabledTool struct {
 	ToolName  string    `json:"tool_name"`           // namespaced tool name (serverName__toolName)
 	ServerID  *string   `json:"server_id,omitempty"` // nil = global, set = compound-specific
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Skill represents a reusable procedure stored in the proxy.
+// Skills are exposed as MCP tools so LLM clients can discover and load them.
+type Skill struct {
+	ID          string    `json:"id"`
+	SetID       string    `json:"set_id"`           // which skill set this belongs to
+	Name        string    `json:"name"`             // unique, kebab-case (e.g. "deploy-dokploy")
+	Description string    `json:"description"`     // short summary
+	Content     string    `json:"content"`          // full SKILL.md body (markdown)
+	Category    string    `json:"category"`         // grouping (e.g. "devops", "data-science")
+	Tags        []string  `json:"tags"`             // searchable tags
+	Version     string    `json:"version"`          // semver-ish (e.g. "1.0.0")
+	AccessCount int       `json:"access_count"`     // times loaded (hindsight-style)
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	LastAccessed *time.Time `json:"last_accessed,omitempty"`
+}
+
+// SkillSet represents a named collection of skills for a specific project/org/context.
+type SkillSet struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"` // URL-safe name used in tool namespace prefix
+	Description string    `json:"description,omitempty"`
+	IsDefault   bool      `json:"is_default"` // default set can't be deleted
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// CreateSkillSetRequest is the payload for creating a skill set.
+type CreateSkillSetRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// UpdateSkillSetRequest is the payload for updating a skill set.
+type UpdateSkillSetRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+}
+
+// CreateSkillRequest is the payload for creating a skill.
+type CreateSkillRequest struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Content     string   `json:"content"`
+	Category    string   `json:"category,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Version     string   `json:"version,omitempty"`
+}
+
+// UpdateSkillRequest is the payload for updating a skill.
+type UpdateSkillRequest struct {
+	Name        *string   `json:"name,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	Content     *string   `json:"content,omitempty"`
+	Category    *string   `json:"category,omitempty"`
+	Tags        *[]string `json:"tags,omitempty"`
+	Version     *string   `json:"version,omitempty"`
+}
+
+// SkillCategory is a category with its skill count (for the UI filter pills).
+type SkillCategory struct {
+	Category string `json:"category"`
+	Count    int    `json:"count"`
 }

@@ -250,6 +250,7 @@ export interface DashboardStats {
   total_api_keys: number;
   total_compounds: number;
   total_memories: number;
+  total_skills: number;
 }
 
 export const dashboard = {
@@ -288,6 +289,64 @@ export const memorySets = {
     request<MemorySet>(`/memory-sets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) =>
     request<{ status: string }>(`/memory-sets/${id}`, { method: 'DELETE' }),
+};
+
+// --- Skills ---
+
+export interface Skill {
+  id: string;
+  set_id: string;
+  name: string;
+  description: string;
+  content: string;
+  category: string;
+  tags: string[];
+  version: string;
+  access_count: number;
+  created_at: string;
+  updated_at: string;
+  last_accessed?: string;
+}
+
+export interface SkillSet {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  is_default: boolean;
+  created_at: string;
+}
+
+export interface SkillCategory {
+  category: string;
+  count: number;
+}
+
+export const skills = {
+  list: (setID: string, category?: string) =>
+    request<Skill[]>(`/skills?set_id=${setID}${category ? `&category=${encodeURIComponent(category)}` : ''}`),
+  get: (id: string) => request<Skill>(`/skills/${id}`),
+  create: (data: { name: string; description?: string; content: string; category?: string; tags?: string[]; version?: string }, setID?: string) =>
+    request<Skill>(`/skills${setID ? `?set_id=${setID}` : ''}`, { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<{ name: string; description: string; content: string; category: string; tags: string[]; version: string }>) =>
+    request<Skill>(`/skills/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/skills/${id}`, { method: 'DELETE' }),
+  categories: (setID: string) => request<SkillCategory[]>(`/skills/categories?set_id=${setID}`),
+  search: (setID: string, query: string) =>
+    request<Skill[]>(`/skills/search?set_id=${setID}&q=${encodeURIComponent(query)}`),
+};
+
+// --- Skill Sets ---
+
+export const skillSets = {
+  list: () => request<SkillSet[]>('/skill-sets'),
+  create: (data: { name: string; description?: string }) =>
+    request<SkillSet>('/skill-sets', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: { name?: string; description?: string }) =>
+    request<SkillSet>(`/skill-sets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/skill-sets/${id}`, { method: 'DELETE' }),
 };
 
 // --- Registry ---
