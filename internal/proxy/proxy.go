@@ -617,7 +617,7 @@ func (m *Manager) listToolsFiltered(filter map[string]bool) []models.Tool {
 func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
 	switch req.Method {
 	case "initialize":
-		return m.handleInitialize(req)
+		return m.handleInitialize(req, scope)
 	case "notifications/initialized":
 		// No response needed for notifications — the SSE handler already
 		// returns 202 for notifications without an ID. Return nil result.
@@ -626,12 +626,20 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 		return m.handleToolsList(req, scope)
 	case "tools/call":
 		return m.handleToolsCall(ctx, req, scope)
+	case "resources/list":
+		return m.handleResourcesList(req, scope)
+	case "resources/read":
+		return m.handleResourcesRead(req, scope)
+	case "prompts/list":
+		return m.handlePromptsList(req)
+	case "prompts/get":
+		return m.handlePromptsGet(req, scope)
 	default:
 		return nil, fmt.Errorf("unsupported method: %s", req.Method)
 	}
 }
 
-func (m *Manager) handleInitialize(req mcp.JSONRPCRequest) (json.RawMessage, error) {
+func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
 	// Read the client's requested protocol version from the initialize params
 	clientVersion := ""
 	if len(req.Params) > 0 {
@@ -651,16 +659,78 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest) (json.RawMessage, err
 		negotiatedVersion = clientVersion
 	}
 
+	// Build instructions: static guidance + auto-injected top memories
+	instructions := memoryInstructions
+
+	// Auto-inject top memories so LLMs see them without calling any tools
+	memorySetIDs := m.getMemorySetIDs(scope)
+	if len(memorySetIDs) > 0 {
+		var memorySummary strings.Builder
+		memorySummary.WriteString("\n\n## Existing Memories (auto-injected — you already know these)\n")
+		totalCount := 0
+		for _, setID := range memorySetIDs {
+			memories, err := m.store.ListMemories(setID, "")
+			if err != nil {
+				continue
+			}
+			// Sort by importance (highest first) — simple insertion sort for top N
+			maxInject := 15
+			topMems := make([]*models.Memory, 0, maxInject)
+			for _, mem := range memories {
+				if mem.Importance < 40 {
+					continue // Skip low-importance memories
+				}
+				// Insert sorted by importance
+				inserted := false
+				for i, t := range topMems {
+					if mem.Importance > t.Importance {
+						topMems = append(topMems, nil)
+						copy(topMems[i+1:], topMems[i:])
+						topMems[i] = mem
+						inserted = true
+						break
+					}
+				}
+				if !inserted && len(topMems) < maxInject {
+					topMems = append(topMems, mem)
+				}
+				if len(topMems) > maxInject {
+					topMems = topMems[:maxInject]
+				}
+			}
+
+			for _, mem := range topMems {
+				tags := ""
+				if len(mem.Tags) > 0 {
+					tags = " [" + strings.Join(mem.Tags, ", ") + "]"
+				}
+				memorySummary.WriteString(fmt.Sprintf("- [%s/%s] (imp:%d) %s%s\n",
+					mem.Palace, mem.Room, mem.Importance, mem.Content, tags))
+				totalCount++
+			}
+
+			// If there are more memories, note it
+			if len(memories) > maxInject {
+				memorySummary.WriteString(fmt.Sprintf("(... and %d more memories — use memory_recall or memory_search to find them)\n", len(memories)-maxInject))
+			}
+		}
+		if totalCount > 0 {
+			instructions += memorySummary.String()
+		}
+	}
+
 	result := map[string]interface{}{
 		"protocolVersion": negotiatedVersion,
 		"capabilities": map[string]interface{}{
-			"tools": map[string]interface{}{},
+			"tools":     map[string]interface{}{},
+			"resources": map[string]interface{}{},
+			"prompts":   map[string]interface{}{},
 		},
 		"serverInfo": map[string]interface{}{
 			"name":    "mcp-proxy",
 			"version": "1.0.0",
 		},
-		"instructions": memoryInstructions,
+		"instructions": instructions,
 	}
 	return json.Marshal(result)
 }
@@ -694,6 +764,246 @@ const memoryInstructions = `This server provides persistent memory tools (memory
 2. When recalling: use memory_recall for palace browsing, memory_search for specific lookups
 3. Periodically: use memory_reflect to see what's being used and what's stale
 4. When facts change: update the existing memory (memory_update) rather than creating a new one`
+
+// getMemorySetIDs returns the memory set IDs accessible in the given scope.
+func (m *Manager) getMemorySetIDs(scope Scope) []string {
+	if scope.CompoundID != "" {
+		return m.isMemoryCompoundMember(scope.CompoundID)
+	}
+	// Global scope — all memory sets
+	m.memoryMu.RLock()
+	defer m.memoryMu.RUnlock()
+	var ids []string
+	for setID := range m.memorySets {
+		ids = append(ids, setID)
+	}
+	return ids
+}
+
+// handleResourcesList exposes memories as MCP resources so clients can auto-discover them.
+func (m *Manager) handleResourcesList(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	type resource struct {
+		URI         string `json:"uri"`
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+		MimeType    string `json:"mimeType,omitempty"`
+	}
+
+	var resources []resource
+
+	memorySetIDs := m.getMemorySetIDs(scope)
+	for _, setID := range memorySetIDs {
+		memories, err := m.store.ListMemories(setID, "")
+		if err != nil {
+			continue
+		}
+		for _, mem := range memories {
+			// Only expose memories with importance >= 30 as resources
+			// (avoid flooding the client with low-value memories)
+			if mem.Importance < 30 {
+				continue
+			}
+			name := mem.Content
+			if len(name) > 60 {
+				name = name[:57] + "..."
+			}
+			resources = append(resources, resource{
+				URI:         fmt.Sprintf("memory://%s/%s", mem.Palace, mem.ID),
+				Name:        name,
+				Description: fmt.Sprintf("[%s/%s] importance:%d", mem.Palace, mem.Room, mem.Importance),
+				MimeType:    "text/plain",
+			})
+		}
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"resources": resources,
+	})
+}
+
+// handleResourcesRead returns the content of a specific memory resource.
+func (m *Manager) handleResourcesRead(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		URI string `json:"uri"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if params.URI == "" {
+		return nil, fmt.Errorf("uri is required")
+	}
+
+	// Parse memory://palace/mem_id
+	var memID string
+	if strings.HasPrefix(params.URI, "memory://") {
+		parts := strings.SplitN(strings.TrimPrefix(params.URI, "memory://"), "/", 2)
+		if len(parts) == 2 {
+			memID = parts[1]
+		}
+	}
+	if memID == "" {
+		return nil, fmt.Errorf("invalid memory URI: %s", params.URI)
+	}
+
+	// Look up the memory across all accessible sets
+	memorySetIDs := m.getMemorySetIDs(scope)
+	for _, setID := range memorySetIDs {
+		mem, err := m.store.GetMemory(memID)
+		if err != nil || mem == nil {
+			continue
+		}
+		// Verify the memory belongs to this set
+		if mem.SetID != setID {
+			continue
+		}
+		_ = m.store.TouchMemory(mem.ID) // increment access count
+
+		// Build the text content
+		text := fmt.Sprintf("Palace: %s\nRoom: %s\nImportance: %d\nTags: %s\nCreated: %s\n\n%s",
+			mem.Palace, mem.Room, mem.Importance,
+			strings.Join(mem.Tags, ", "),
+			mem.CreatedAt.Format(time.RFC3339),
+			mem.Content,
+		)
+
+		return json.Marshal(map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{
+					"uri":      params.URI,
+					"mimeType": "text/plain",
+					"text":     text,
+				},
+			},
+		})
+	}
+
+	return nil, fmt.Errorf("memory not found: %s", params.URI)
+}
+
+// handlePromptsList exposes memory-related prompts for MCP clients.
+func (m *Manager) handlePromptsList(req mcp.JSONRPCRequest) (json.RawMessage, error) {
+	prompts := []map[string]interface{}{
+		{
+			"name":        "recall_context",
+			"description": "Recall all relevant memories for a given topic or task. Auto-searches by keyword and returns matching memories with context.",
+			"arguments": []map[string]interface{}{
+				{
+					"name":        "topic",
+					"description": "The topic, project name, or keyword to search for",
+					"required":    true,
+				},
+			},
+		},
+		{
+			"name":        "memory_overview",
+			"description": "Get an overview of all stored memories — palace distribution, recent additions, and most-accessed entries. Useful for understanding what context is available.",
+			"arguments":   []map[string]interface{}{},
+		},
+	}
+	return json.Marshal(map[string]interface{}{"prompts": prompts})
+}
+
+// handlePromptsGet returns the content of a memory prompt.
+func (m *Manager) handlePromptsGet(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		Name      string            `json:"name"`
+		Arguments map[string]string `json:"arguments"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+
+	switch params.Name {
+	case "recall_context":
+		topic := params.Arguments["topic"]
+		if topic == "" {
+			return nil, fmt.Errorf("topic argument is required")
+		}
+
+		memorySetIDs := m.getMemorySetIDs(scope)
+		var allResults []*models.Memory
+		for _, setID := range memorySetIDs {
+			results, err := m.store.SearchMemories(setID, topic)
+			if err != nil {
+				continue
+			}
+			allResults = append(allResults, results...)
+		}
+
+		var text strings.Builder
+		text.WriteString(fmt.Sprintf("Relevant memories for '%s':\n\n", topic))
+		if len(allResults) == 0 {
+			text.WriteString("No memories found for this topic.\n")
+			text.WriteString("This means there is no prior context stored. You may want to store new memories as you learn.\n")
+		} else {
+			for _, mem := range allResults {
+				tags := ""
+				if len(mem.Tags) > 0 {
+					tags = " [tags: " + strings.Join(mem.Tags, ", ") + "]"
+				}
+				text.WriteString(fmt.Sprintf("- [%s/%s] (importance:%d) %s%s\n", mem.Palace, mem.Room, mem.Importance, mem.Content, tags))
+			}
+		}
+
+		return json.Marshal(map[string]interface{}{
+			"messages": []map[string]interface{}{
+				{
+					"role": "user",
+					"content": map[string]interface{}{
+						"type": "text",
+						"text": text.String(),
+					},
+				},
+			},
+		})
+
+	case "memory_overview":
+		memorySetIDs := m.getMemorySetIDs(scope)
+		var text strings.Builder
+		text.WriteString("Memory Overview:\n\n")
+
+		for _, setID := range memorySetIDs {
+			palaces, err := m.store.ListPalaces(setID)
+			if err != nil {
+				continue
+			}
+			allMemories, err := m.store.ListMemories(setID, "")
+			if err != nil {
+				continue
+			}
+			text.WriteString(fmt.Sprintf("Total memories: %d\n\nPalaces:\n", len(allMemories)))
+			for _, p := range palaces {
+				text.WriteString(fmt.Sprintf("  - %s (%d memories)\n", p["palace"], p["count"]))
+			}
+
+			// Recent memories
+			text.WriteString("\nMost recent:\n")
+			recent := 5
+			if len(allMemories) < recent {
+				recent = len(allMemories)
+			}
+			for i := len(allMemories) - 1; i >= 0 && i >= len(allMemories)-recent; i-- {
+				mem := allMemories[i]
+				text.WriteString(fmt.Sprintf("  - [%s] %s\n", mem.Palace, mem.Content))
+			}
+		}
+
+		return json.Marshal(map[string]interface{}{
+			"messages": []map[string]interface{}{
+				{
+					"role": "user",
+					"content": map[string]interface{}{
+						"type": "text",
+						"text": text.String(),
+					},
+				},
+			},
+		})
+
+	default:
+		return nil, fmt.Errorf("unknown prompt: %s", params.Name)
+	}
+}
 
 func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
 	var allTools []models.Tool
