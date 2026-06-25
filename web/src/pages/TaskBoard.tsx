@@ -92,7 +92,7 @@ export default function TaskBoard() {
 
   const { data: stats } = useQuery({
     queryKey: ['task-stats'],
-    queryFn: tasksApi.stats,
+    queryFn: () => tasksApi.stats(),
   });
 
   const { data: allTasks } = useQuery({

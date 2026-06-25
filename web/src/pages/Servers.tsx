@@ -67,11 +67,15 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 type Transport = 'stdio' | 'streamable-http' | 'http';
 
-// Builtin server metadata — maps server ID patterns to icon + color
-function getBuiltinIcon(id: string): { icon: typeof Brain; color: string; bg: string } | null {
-  if (id.startsWith('memory')) return { icon: Brain, color: 'text-violet-400', bg: 'bg-violet-500/10' };
-  if (id.startsWith('skills') || id.startsWith('skill')) return { icon: BookOpen, color: 'text-blue-400', bg: 'bg-blue-500/10' };
-  if (id === 'tasks' || id.startsWith('taskboard')) return { icon: KanbanSquare, color: 'text-orange-400', bg: 'bg-orange-500/10' };
+// Builtin server metadata — maps builtin_type to icon + color
+function getBuiltinIcon(srv: { is_builtin?: boolean; builtin_type?: string; id: string }): { icon: typeof Brain; color: string; bg: string } | null {
+  if (!srv.is_builtin) return null;
+  if (srv.builtin_type === 'memory' || srv.id.startsWith('memory'))
+    return { icon: Brain, color: 'text-violet-400', bg: 'bg-violet-500/10' };
+  if (srv.builtin_type === 'skills' || srv.id.startsWith('skills') || srv.id.startsWith('skill'))
+    return { icon: BookOpen, color: 'text-blue-400', bg: 'bg-blue-500/10' };
+  if (srv.builtin_type === 'tasks' || srv.id === 'tasks' || srv.id.startsWith('taskboard') || srv.id.startsWith('builtin-tasks'))
+    return { icon: KanbanSquare, color: 'text-orange-400', bg: 'bg-orange-500/10' };
   return null;
 }
 
@@ -211,7 +215,7 @@ export default function Servers() {
               <Link to={`/servers/${srv.id}`} className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   {srv.is_builtin && (() => {
-                    const meta = getBuiltinIcon(srv.id);
+                    const meta = getBuiltinIcon(srv);
                     if (meta) {
                       return (
                         <div className={cn('inline-flex items-center justify-center w-6 h-6 rounded-md shrink-0', meta.bg)}>
@@ -243,7 +247,7 @@ export default function Servers() {
               </Link>
               <CardAction className="flex items-center gap-1.5">
                 {srv.is_builtin && (() => {
-                  const meta = getBuiltinIcon(srv.id);
+                  const meta = getBuiltinIcon(srv);
                   return (
                     <Badge
                       variant="secondary"

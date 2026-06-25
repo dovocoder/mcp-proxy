@@ -202,6 +202,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// Task board routes (admin — JWT auth)
 	adminMux.HandleFunc("GET /api/taskboard/stats", h.handleTaskBoardStats)
 	adminMux.HandleFunc("GET /api/taskboard/search", h.handleSearchTaskItems)
+	adminMux.HandleFunc("GET /api/taskboard/sets", h.handleListTaskBoardSets)
+	adminMux.HandleFunc("POST /api/taskboard/sets", h.handleCreateTaskBoardSet)
+	adminMux.HandleFunc("DELETE /api/taskboard/sets/{id}", h.handleDeleteTaskBoardSet)
 	adminMux.HandleFunc("GET /api/taskboard", h.handleListTaskItems)
 	adminMux.HandleFunc("POST /api/taskboard", h.handleCreateTaskItem)
 	adminMux.HandleFunc("GET /api/taskboard/{id}", h.handleGetTaskItem)
@@ -341,12 +344,13 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 			sid = models.BuiltinMemoryServerID + ":" + ms.ID
 		}
 		srv := &models.Server{
-			ID:        sid,
-			Name:      ms.Name,
-			Transport: "builtin",
-			Enabled:   true,
-			IsBuiltin: true,
-			Status:    "connected",
+			ID:          sid,
+			Name:        ms.Name,
+			Transport:   "builtin",
+			Enabled:     true,
+			IsBuiltin:   true,
+			BuiltinType: "memory",
+			Status:      "connected",
 		}
 		toolsCount := 0
 		if memSrv := h.proxy.GetMemoryServer(ms.ID); memSrv != nil {
@@ -368,12 +372,13 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 			sid = models.BuiltinSkillServerID + ":" + ss.ID
 		}
 		srv := &models.Server{
-			ID:        sid,
-			Name:      ss.Name,
-			Transport: "builtin",
-			Enabled:   true,
-			IsBuiltin: true,
-			Status:    "connected",
+			ID:          sid,
+			Name:        ss.Name,
+			Transport:   "builtin",
+			Enabled:     true,
+			IsBuiltin:   true,
+			BuiltinType: "skills",
+			Status:      "connected",
 		}
 		toolsCount := 0
 		if skillSrv := h.proxy.GetSkillServer(ss.ID); skillSrv != nil {
@@ -388,12 +393,13 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 	// Prepend task board as a virtual builtin server
 	result = append(result, serverWithStatus{
 		Server: &models.Server{
-			ID:        models.BuiltinTaskBoardServerID,
-			Name:      "tasks",
-			Transport: "builtin",
-			Enabled:   true,
-			IsBuiltin: true,
-			Status:    "connected",
+			ID:          models.BuiltinTaskBoardServerID,
+			Name:        "Task Board",
+			Transport:   "builtin",
+			Enabled:     true,
+			IsBuiltin:   true,
+			BuiltinType: "tasks",
+			Status:      "connected",
 		},
 		ToolsCount: 6, // task_create, task_list, task_get, task_update, task_delete, task_search
 	})
@@ -706,7 +712,7 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get task board stats
-	taskStats, _ := h.store.GetTaskBoardStats()
+	taskStats, _ := h.store.GetTaskBoardStats("")
 	taskCount := 0
 	if taskStats != nil {
 		taskCount = taskStats.Total
@@ -2587,9 +2593,10 @@ func (h *Handlers) handleCreateDisabledTool(w http.ResponseWriter, r *http.Reque
 // --- Task Board Handlers ---
 
 func (h *Handlers) handleListTaskItems(w http.ResponseWriter, r *http.Request) {
+	boardID := r.URL.Query().Get("board_id")
 	statusFilter := r.URL.Query().Get("status")
 	priorityFilter := r.URL.Query().Get("priority")
-	tasks, err := h.store.ListTaskItems(statusFilter, priorityFilter)
+	tasks, err := h.store.ListTaskItems(boardID, statusFilter, priorityFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to list tasks")
 		return
@@ -2608,12 +2615,16 @@ func (h *Handlers) handleCreateTaskItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	task := &models.TaskItem{
-		Title:       req.Title,
-		Description: req.Description,
-		Status:      req.Status,
-		Priority:    req.Priority,
-		Assignee:    req.Assignee,
-		Tags:        req.Tags,
+		BoardID:       req.BoardID,
+		Title:         req.Title,
+		Description:   req.Description,
+		Status:        req.Status,
+		Priority:      req.Priority,
+		Assignee:      req.Assignee,
+		Tags:          req.Tags,
+	}
+	if req.PriorityLevel != nil {
+		task.PriorityLevel = *req.PriorityLevel
 	}
 	if req.DueDate != nil && *req.DueDate != "" {
 		t, err := time.Parse(time.RFC3339, *req.DueDate)
@@ -2662,6 +2673,9 @@ func (h *Handlers) handleUpdateTaskItem(w http.ResponseWriter, r *http.Request) 
 	if req.Priority != nil {
 		task.Priority = *req.Priority
 	}
+	if req.PriorityLevel != nil {
+		task.PriorityLevel = *req.PriorityLevel
+	}
 	if req.Assignee != nil {
 		task.Assignee = *req.Assignee
 	}
@@ -2695,7 +2709,8 @@ func (h *Handlers) handleDeleteTaskItem(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handlers) handleTaskBoardStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := h.store.GetTaskBoardStats()
+	boardID := r.URL.Query().Get("board_id")
+	stats, err := h.store.GetTaskBoardStats(boardID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to get stats")
 		return
@@ -2721,6 +2736,55 @@ func (h *Handlers) handleDeleteDisabledTool(w http.ResponseWriter, r *http.Reque
 	id := r.PathValue("id")
 	if err := h.store.DeleteDisabledTool(id); err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to enable tool")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// --- Task Board Sets ---
+
+func (h *Handlers) handleListTaskBoardSets(w http.ResponseWriter, r *http.Request) {
+	sets, err := h.store.ListTaskBoardSets()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list task board sets")
+		return
+	}
+	if sets == nil {
+		sets = []*models.TaskBoardSet{}
+	}
+	writeJSON(w, http.StatusOK, sets)
+}
+
+func (h *Handlers) handleCreateTaskBoardSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name        string `json:"name"`
+		Slug        string `json:"slug"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+	tbs := &models.TaskBoardSet{
+		Name:        req.Name,
+		Slug:        req.Slug,
+		Description: req.Description,
+	}
+	if err := h.store.CreateTaskBoardSet(tbs); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to create task board set")
+		return
+	}
+	writeJSON(w, http.StatusCreated, tbs)
+}
+
+func (h *Handlers) handleDeleteTaskBoardSet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteTaskBoardSet(id); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

@@ -23,6 +23,7 @@ type Server struct {
 	Enabled        bool              `json:"enabled"`
 	LogsEnabled    bool              `json:"logs_enabled"` // capture stderr logs for this server
 	IsBuiltin      bool              `json:"is_builtin"`   // builtin servers can't be edited/deleted
+	BuiltinType    string            `json:"builtin_type,omitempty"` // "memory", "skills", "tasks"
 	Status         string            `json:"status"` // "connected", "disconnected", "error"
 	LastSeen       *time.Time        `json:"last_seen,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
@@ -359,20 +360,33 @@ type SkillCategory struct {
 // BuiltinTaskBoardServerID is the virtual server ID for the built-in task board MCP server.
 const BuiltinTaskBoardServerID = "builtin-tasks"
 
+// TaskBoardSet represents a named task board (like a memory set or skill set).
+// The default board is created automatically on first run.
+type TaskBoardSet struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Slug        string    `json:"slug"`
+	Description string    `json:"description,omitempty"`
+	IsDefault   bool      `json:"is_default"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // TaskItem represents a persistent task on the task board.
 // Unlike the ephemeral MCP protocol tasks (internal/tasks), these are
 // durable project-management tasks stored in SQLite — like a kanban board.
 type TaskItem struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description,omitempty"`
-	Status      string     `json:"status"`   // "todo", "in_progress", "done", "blocked"
-	Priority    string     `json:"priority"` // "low", "medium", "high", "urgent"
-	Assignee    string     `json:"assignee,omitempty"`
-	DueDate     *time.Time `json:"due_date,omitempty"`
-	Tags        []string   `json:"tags"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID            string     `json:"id"`
+	BoardID       string     `json:"board_id"` // references TaskBoardSet.ID
+	Title         string     `json:"title"`
+	Description   string     `json:"description,omitempty"`
+	Status        string     `json:"status"`        // "todo", "in_progress", "done", "blocked"
+	Priority      string     `json:"priority"`      // "low", "medium", "high", "urgent"
+	PriorityLevel int        `json:"priority_level"` // 1-5 (1=highest priority, 5=lowest)
+	Assignee      string     `json:"assignee,omitempty"`
+	DueDate       *time.Time `json:"due_date,omitempty"`
+	Tags          []string   `json:"tags"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // TaskBoardStats represents summary statistics for the task board dashboard.
@@ -386,22 +400,25 @@ type TaskBoardStats struct {
 
 // CreateTaskItemRequest is the payload for creating a task board item.
 type CreateTaskItemRequest struct {
-	Title       string   `json:"title"`
-	Description string   `json:"description,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Priority    string   `json:"priority,omitempty"`
-	Assignee    string   `json:"assignee,omitempty"`
-	DueDate     *string  `json:"due_date,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
+	BoardID       string   `json:"board_id,omitempty"`
+	Title         string   `json:"title"`
+	Description   string   `json:"description,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Priority      string   `json:"priority,omitempty"`
+	PriorityLevel *int     `json:"priority_level,omitempty"`
+	Assignee      string   `json:"assignee,omitempty"`
+	DueDate       *string  `json:"due_date,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
 }
 
 // UpdateTaskItemRequest is the payload for updating a task board item.
 type UpdateTaskItemRequest struct {
-	Title       *string  `json:"title,omitempty"`
-	Description *string  `json:"description,omitempty"`
-	Status      *string  `json:"status,omitempty"`
-	Priority    *string  `json:"priority,omitempty"`
-	Assignee    *string  `json:"assignee,omitempty"`
-	DueDate     *string  `json:"due_date,omitempty"`
-	Tags        *[]string `json:"tags,omitempty"`
+	Title         *string  `json:"title,omitempty"`
+	Description   *string  `json:"description,omitempty"`
+	Status        *string  `json:"status,omitempty"`
+	Priority      *string  `json:"priority,omitempty"`
+	PriorityLevel *int     `json:"priority_level,omitempty"`
+	Assignee      *string  `json:"assignee,omitempty"`
+	DueDate       *string  `json:"due_date,omitempty"`
+	Tags          *[]string `json:"tags,omitempty"`
 }

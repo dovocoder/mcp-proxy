@@ -71,6 +71,7 @@ export interface Server {
   enabled: boolean;
   logs_enabled: boolean;
   is_builtin?: boolean;
+  builtin_type?: string;
   timeout: number;
   connect_timeout: number;
   status: string;
@@ -404,12 +405,23 @@ export const disabledTools = {
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'blocked';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
+export interface TaskBoardSet {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  is_default: boolean;
+  created_at: string;
+}
+
 export interface Task {
   id: string;
+  board_id: string;
   title: string;
   description: string;
   status: TaskStatus;
   priority: TaskPriority;
+  priority_level: number;
   assignee: string;
   due_date: string;
   tags: string[];
@@ -426,9 +438,11 @@ export interface TaskStats {
 }
 
 export interface TaskInput {
+  board_id?: string;
   title: string;
   description?: string;
   priority?: TaskPriority;
+  priority_level?: number;
   status?: TaskStatus;
   assignee?: string;
   due_date?: string;
@@ -436,10 +450,11 @@ export interface TaskInput {
 }
 
 export const tasks = {
-  list: (status?: TaskStatus, priority?: TaskPriority) => {
+  list: (status?: TaskStatus, priority?: TaskPriority, boardId?: string) => {
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     if (priority) params.set('priority', priority);
+    if (boardId) params.set('board_id', boardId);
     const qs = params.toString();
     return request<Task[]>(`/taskboard${qs ? `?${qs}` : ''}`);
   },
@@ -450,7 +465,13 @@ export const tasks = {
     request<Task>(`/taskboard/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: string) =>
     request<{ status: string }>(`/taskboard/${id}`, { method: 'DELETE' }),
-  stats: () => request<TaskStats>('/taskboard/stats'),
+  stats: (boardId?: string) =>
+    request<TaskStats>(`/taskboard/stats${boardId ? `?board_id=${boardId}` : ''}`),
+  listSets: () => request<TaskBoardSet[]>('/taskboard/sets'),
+  createSet: (data: { name: string; slug?: string; description?: string }) =>
+    request<TaskBoardSet>('/taskboard/sets', { method: 'POST', body: JSON.stringify(data) }),
+  deleteSet: (id: string) =>
+    request<{ status: string }>(`/taskboard/sets/${id}`, { method: 'DELETE' }),
 };
 
 // --- Env Variables ---

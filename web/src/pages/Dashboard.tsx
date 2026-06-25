@@ -6,17 +6,20 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
-// Builtin server metadata — maps server ID patterns to display info
+// Builtin server metadata — maps builtin_type to display info
 const builtinMeta: Record<string, { icon: typeof Brain; color: string; bg: string; label: string; link: string }> = {
   memory: { icon: Brain, color: 'text-violet-400', bg: 'bg-violet-500/10', label: 'Memories', link: '/memories' },
   skills: { icon: BookOpen, color: 'text-blue-400', bg: 'bg-blue-500/10', label: 'Skills', link: '/skills' },
   tasks: { icon: KanbanSquare, color: 'text-orange-400', bg: 'bg-orange-500/10', label: 'Tasks', link: '/taskboard' },
 };
 
-function getBuiltinMeta(id: string) {
-  if (id.startsWith('memory')) return builtinMeta.memory;
-  if (id.startsWith('skills') || id.startsWith('skill')) return builtinMeta.skills;
-  if (id === 'tasks' || id.startsWith('taskboard')) return builtinMeta.tasks;
+function getBuiltinMeta(srv: { is_builtin?: boolean; builtin_type?: string; id: string }) {
+  if (!srv.is_builtin) return null;
+  if (srv.builtin_type && builtinMeta[srv.builtin_type]) return builtinMeta[srv.builtin_type];
+  // Fallback to ID-based detection
+  if (srv.id.startsWith('memory')) return builtinMeta.memory;
+  if (srv.id.startsWith('skills') || srv.id.startsWith('skill')) return builtinMeta.skills;
+  if (srv.id === 'tasks' || srv.id.startsWith('taskboard') || srv.id.startsWith('builtin-tasks')) return builtinMeta.tasks;
   return null;
 }
 
@@ -71,7 +74,7 @@ export default function Dashboard() {
           </div>
           <div className="divide-y divide-border">
             {builtinServers.map((srv) => {
-              const meta = getBuiltinMeta(srv.id);
+              const meta = getBuiltinMeta(srv);
               const Icon = meta?.icon ?? Database;
               const link = meta?.link ?? `/servers/${srv.id}`;
               return (

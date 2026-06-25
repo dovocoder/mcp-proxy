@@ -29,10 +29,14 @@ func (s *Server) Tools() []mcp.Tool {
 		{
 			Name:        "task_create",
 			Title:       "Create Task",
-			Description: "Create a new task on the task board. Tasks are persistent (unlike ephemeral MCP protocol tasks). Use this to track work items, TODOs, and action items. Status: todo/in_progress/done/blocked. Priority: low/medium/high/urgent.",
+			Description: "Create a new task on the task board. Tasks are persistent (unlike ephemeral MCP protocol tasks). Use this to track work items, TODOs, and action items. Status: todo/in_progress/done/blocked. Priority: low/medium/high/urgent. Priority level: 1-5 (1=highest). Board: optional board_id to create on a specific board.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"board_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Task board ID (optional, defaults to 'default')",
+					},
 					"title": map[string]interface{}{
 						"type":        "string",
 						"description": "Task title (required)",
@@ -53,6 +57,13 @@ func (s *Server) Tools() []mcp.Tool {
 						"default":     "medium",
 						"description": "Task priority (default: medium)",
 					},
+					"priority_level": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"maximum":     5,
+						"default":     3,
+						"description": "Numeric priority level 1-5 (1=highest, 5=lowest). Used for ordering within a priority category.",
+					},
 					"assignee": map[string]interface{}{
 						"type":        "string",
 						"description": "Who is assigned to this task (optional)",
@@ -69,10 +80,14 @@ func (s *Server) Tools() []mcp.Tool {
 		{
 			Name:        "task_list",
 			Title:       "List Tasks",
-			Description: "List tasks on the task board. Optionally filter by status or priority. Returns tasks sorted by priority (urgent first) then creation date.",
+			Description: "List tasks on the task board. Optionally filter by board, status, or priority. Returns tasks sorted by priority (urgent first) then priority level then creation date.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
+					"board_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Filter by task board ID (optional, omit for all boards)",
+					},
 					"status": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"todo", "in_progress", "done", "blocked"},
@@ -121,6 +136,12 @@ func (s *Server) Tools() []mcp.Tool {
 					"priority": map[string]interface{}{
 						"type": "string",
 						"enum": []string{"low", "medium", "high", "urgent"},
+					},
+					"priority_level": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"maximum":     5,
+						"description": "Numeric priority level 1-5 (1=highest)",
 					},
 					"assignee": map[string]interface{}{"type": "string"},
 					"tags": map[string]interface{}{
@@ -203,12 +224,14 @@ func (s *Server) HandleToolCall(name string, args json.RawMessage) (json.RawMess
 
 func (s *Server) handleCreate(args json.RawMessage) (json.RawMessage, error) {
 	var params struct {
-		Title       string   `json:"title"`
-		Description string   `json:"description"`
-		Status      string   `json:"status"`
-		Priority    string   `json:"priority"`
-		Assignee    string   `json:"assignee"`
-		Tags        []string `json:"tags"`
+		BoardID       string   `json:"board_id"`
+		Title         string   `json:"title"`
+		Description   string   `json:"description"`
+		Status        string   `json:"status"`
+		Priority      string   `json:"priority"`
+		PriorityLevel int      `json:"priority_level"`
+		Assignee      string   `json:"assignee"`
+		Tags          []string `json:"tags"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -220,19 +243,21 @@ func (s *Server) handleCreate(args json.RawMessage) (json.RawMessage, error) {
 		params.Tags = []string{}
 	}
 	task := &models.TaskItem{
-		Title:       params.Title,
-		Description: params.Description,
-		Status:      params.Status,
-		Priority:    params.Priority,
-		Assignee:    params.Assignee,
-		Tags:        params.Tags,
+		BoardID:       params.BoardID,
+		Title:         params.Title,
+		Description:   params.Description,
+		Status:        params.Status,
+		Priority:      params.Priority,
+		PriorityLevel: params.PriorityLevel,
+		Assignee:      params.Assignee,
+		Tags:          params.Tags,
 	}
 	if err := s.store.CreateTaskItem(task); err != nil {
 		return nil, fmt.Errorf("failed to create task: %w", err)
 	}
 	return json.Marshal(map[string]interface{}{
 		"content": []map[string]interface{}{
-			{"type": "text", "text": fmt.Sprintf("Created task **%s** (ID: %s)\nStatus: %s | Priority: %s", task.Title, task.ID, task.Status, task.Priority)},
+			{"type": "text", "text": fmt.Sprintf("Created task **%s** (ID: %s)\nBoard: %s\nStatus: %s | Priority: %s (level %d)", task.Title, task.ID, task.BoardID, task.Status, task.Priority, task.PriorityLevel)},
 		},
 		"isError": false,
 	})
@@ -240,18 +265,19 @@ func (s *Server) handleCreate(args json.RawMessage) (json.RawMessage, error) {
 
 func (s *Server) handleList(args json.RawMessage) (json.RawMessage, error) {
 	var params struct {
+		BoardID   string `json:"board_id"`
 		Status   string `json:"status"`
 		Priority string `json:"priority"`
 	}
 	json.Unmarshal(args, &params)
-	tasks, err := s.store.ListTaskItems(params.Status, params.Priority)
+	tasks, err := s.store.ListTaskItems(params.BoardID, params.Status, params.Priority)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tasks: %w", err)
 	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Found %d task(s):\n\n", len(tasks)))
 	for _, t := range tasks {
-		sb.WriteString(fmt.Sprintf("- **%s** [%s] (%s) — ID: %s", t.Title, t.Status, t.Priority, t.ID))
+		sb.WriteString(fmt.Sprintf("- **%s** [%s] (%s L%d) — ID: %s", t.Title, t.Status, t.Priority, t.PriorityLevel, t.ID))
 		if t.Assignee != "" {
 			sb.WriteString(fmt.Sprintf(" @%s", t.Assignee))
 		}
@@ -282,8 +308,8 @@ func (s *Server) handleGet(args json.RawMessage) (json.RawMessage, error) {
 	}
 	return json.Marshal(map[string]interface{}{
 		"content": []map[string]interface{}{
-			{"type": "text", "text": fmt.Sprintf("**%s**\n\nID: %s\nStatus: %s\nPriority: %s\nAssignee: %s\nTags: %s\nCreated: %s\nUpdated: %s\n\n%s",
-				task.Title, task.ID, task.Status, task.Priority, task.Assignee,
+			{"type": "text", "text": fmt.Sprintf("**%s**\n\nID: %s\nBoard: %s\nStatus: %s\nPriority: %s (level %d)\nAssignee: %s\nTags: %s\nCreated: %s\nUpdated: %s\n\n%s",
+				task.Title, task.ID, task.BoardID, task.Status, task.Priority, task.PriorityLevel, task.Assignee,
 				strings.Join(task.Tags, ", "),
 				task.CreatedAt.Format(time.RFC3339), task.UpdatedAt.Format(time.RFC3339),
 				task.Description)},
@@ -294,13 +320,14 @@ func (s *Server) handleGet(args json.RawMessage) (json.RawMessage, error) {
 
 func (s *Server) handleUpdate(args json.RawMessage) (json.RawMessage, error) {
 	var params struct {
-		ID          string   `json:"id"`
-		Title       *string  `json:"title"`
-		Description *string  `json:"description"`
-		Status      *string  `json:"status"`
-		Priority    *string  `json:"priority"`
-		Assignee    *string  `json:"assignee"`
-		Tags        *[]string `json:"tags"`
+		ID            string   `json:"id"`
+		Title         *string  `json:"title"`
+		Description   *string  `json:"description"`
+		Status        *string  `json:"status"`
+		Priority      *string  `json:"priority"`
+		PriorityLevel *int     `json:"priority_level"`
+		Assignee      *string  `json:"assignee"`
+		Tags          *[]string `json:"tags"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -324,6 +351,9 @@ func (s *Server) handleUpdate(args json.RawMessage) (json.RawMessage, error) {
 	if params.Priority != nil {
 		task.Priority = *params.Priority
 	}
+	if params.PriorityLevel != nil {
+		task.PriorityLevel = *params.PriorityLevel
+	}
 	if params.Assignee != nil {
 		task.Assignee = *params.Assignee
 	}
@@ -335,7 +365,7 @@ func (s *Server) handleUpdate(args json.RawMessage) (json.RawMessage, error) {
 	}
 	return json.Marshal(map[string]interface{}{
 		"content": []map[string]interface{}{
-			{"type": "text", "text": fmt.Sprintf("Updated task **%s** — Status: %s, Priority: %s", task.Title, task.Status, task.Priority)},
+			{"type": "text", "text": fmt.Sprintf("Updated task **%s** — Status: %s, Priority: %s (level %d)", task.Title, task.Status, task.Priority, task.PriorityLevel)},
 		},
 		"isError": false,
 	})
