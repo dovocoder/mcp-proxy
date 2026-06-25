@@ -245,6 +245,22 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_skills_category ON skills(category);
 	CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 	CREATE INDEX IF NOT EXISTS idx_skills_content ON skills(content);
+
+	CREATE TABLE IF NOT EXISTS task_items (
+		id TEXT PRIMARY KEY,
+		title TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'todo',
+		priority TEXT NOT NULL DEFAULT 'medium',
+		assignee TEXT NOT NULL DEFAULT '',
+		due_date TEXT,
+		tags TEXT NOT NULL DEFAULT '[]',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_items_status ON task_items(status);
+	CREATE INDEX IF NOT EXISTS idx_task_items_priority ON task_items(priority);
+	CREATE INDEX IF NOT EXISTS idx_task_items_assignee ON task_items(assignee);
 `
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -1672,4 +1688,169 @@ func scanSkill(s rowScanner) (*models.Skill, error) {
 		sk.LastAccessed = &t
 	}
 	return &sk, nil
+}
+
+// --- Task Board CRUD ---
+
+func (s *Store) CreateTaskItem(task *models.TaskItem) error {
+	task.ID = "task_" + uuid.NewString()
+	now := time.Now()
+	task.CreatedAt = now
+	task.UpdatedAt = now
+	if task.Status == "" {
+		task.Status = "todo"
+	}
+	if task.Priority == "" {
+		task.Priority = "medium"
+	}
+	if task.Tags == nil {
+		task.Tags = []string{}
+	}
+	tagsJSON, _ := json.Marshal(task.Tags)
+	var dueDate interface{}
+	if task.DueDate != nil {
+		dueDate = task.DueDate.Format(time.RFC3339)
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO task_items (id, title, description, status, priority, assignee, due_date, tags, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		task.ID, task.Title, task.Description, task.Status, task.Priority,
+		task.Assignee, dueDate, string(tagsJSON),
+		task.CreatedAt.Format(time.RFC3339), task.UpdatedAt.Format(time.RFC3339),
+	)
+	return err
+}
+
+func (s *Store) GetTaskItem(id string) (*models.TaskItem, error) {
+	row := s.db.QueryRow(`SELECT id, title, description, status, priority, assignee, due_date, tags, created_at, updated_at FROM task_items WHERE id = ?`, id)
+	return scanTaskItem(row)
+}
+
+func (s *Store) ListTaskItems(statusFilter, priorityFilter string) ([]*models.TaskItem, error) {
+	q := `SELECT id, title, description, status, priority, assignee, due_date, tags, created_at, updated_at FROM task_items`
+	args := []interface{}{}
+	where := []string{}
+	if statusFilter != "" {
+		where = append(where, "status = ?")
+		args = append(args, statusFilter)
+	}
+	if priorityFilter != "" {
+		where = append(where, "priority = ?")
+		args = append(args, priorityFilter)
+	}
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 END, created_at DESC"
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.TaskItem
+	for rows.Next() {
+		t, err := scanTaskItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) UpdateTaskItem(task *models.TaskItem) error {
+	task.UpdatedAt = time.Now()
+	if task.Tags == nil {
+		task.Tags = []string{}
+	}
+	tagsJSON, _ := json.Marshal(task.Tags)
+	var dueDate interface{}
+	if task.DueDate != nil {
+		dueDate = task.DueDate.Format(time.RFC3339)
+	}
+	_, err := s.db.Exec(`
+		UPDATE task_items SET title=?, description=?, status=?, priority=?, assignee=?, due_date=?, tags=?, updated_at=? WHERE id=?`,
+		task.Title, task.Description, task.Status, task.Priority,
+		task.Assignee, dueDate, string(tagsJSON),
+		task.UpdatedAt.Format(time.RFC3339), task.ID,
+	)
+	return err
+}
+
+func (s *Store) DeleteTaskItem(id string) error {
+	_, err := s.db.Exec(`DELETE FROM task_items WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) GetTaskBoardStats() (*models.TaskBoardStats, error) {
+	stats := &models.TaskBoardStats{}
+	rows, err := s.db.Query(`SELECT status, COUNT(*) FROM task_items GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		switch status {
+		case "todo":
+			stats.Todo = count
+		case "in_progress":
+			stats.InProgress = count
+		case "done":
+			stats.Done = count
+		case "blocked":
+			stats.Blocked = count
+		}
+		stats.Total += count
+	}
+	return stats, rows.Err()
+}
+
+func (s *Store) SearchTaskItems(query string) ([]*models.TaskItem, error) {
+	likeQuery := "%" + query + "%"
+	rows, err := s.db.Query(
+		`SELECT id, title, description, status, priority, assignee, due_date, tags, created_at, updated_at FROM task_items WHERE title LIKE ? OR description LIKE ? OR assignee LIKE ? OR tags LIKE ? ORDER BY updated_at DESC`,
+		likeQuery, likeQuery, likeQuery, likeQuery,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []*models.TaskItem
+	for rows.Next() {
+		t, err := scanTaskItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+func scanTaskItem(s rowScanner) (*models.TaskItem, error) {
+	var t models.TaskItem
+	var tagsJSON string
+	var dueDate, createdAt, updatedAt sql.NullString
+	if err := s.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.Priority, &t.Assignee, &dueDate, &tagsJSON, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	json.Unmarshal([]byte(tagsJSON), &t.Tags)
+	if t.Tags == nil {
+		t.Tags = []string{}
+	}
+	if dueDate.Valid {
+		tt, _ := time.Parse(time.RFC3339, dueDate.String)
+		t.DueDate = &tt
+	}
+	if createdAt.Valid {
+		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt.String)
+	}
+	if updatedAt.Valid {
+		t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt.String)
+	}
+	return &t, nil
 }

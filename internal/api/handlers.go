@@ -199,6 +199,15 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PATCH /api/skill-sets/{id}", h.handleUpdateSkillSet)
 	adminMux.HandleFunc("DELETE /api/skill-sets/{id}", h.handleDeleteSkillSet)
 
+	// Task board routes (admin — JWT auth)
+	adminMux.HandleFunc("GET /api/taskboard/stats", h.handleTaskBoardStats)
+	adminMux.HandleFunc("GET /api/taskboard/search", h.handleSearchTaskItems)
+	adminMux.HandleFunc("GET /api/taskboard", h.handleListTaskItems)
+	adminMux.HandleFunc("POST /api/taskboard", h.handleCreateTaskItem)
+	adminMux.HandleFunc("GET /api/taskboard/{id}", h.handleGetTaskItem)
+	adminMux.HandleFunc("PUT /api/taskboard/{id}", h.handleUpdateTaskItem)
+	adminMux.HandleFunc("DELETE /api/taskboard/{id}", h.handleDeleteTaskItem)
+
 	// Env var routes (admin — JWT auth)
 	// Register more specific paths first for safety.
 	adminMux.HandleFunc("GET /api/env-vars/projects", h.handleListEnvVarProjects)
@@ -375,6 +384,19 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 			ToolsCount: toolsCount,
 		})
 	}
+
+	// Prepend task board as a virtual builtin server
+	result = append(result, serverWithStatus{
+		Server: &models.Server{
+			ID:        models.BuiltinTaskBoardServerID,
+			Name:      "tasks",
+			Transport: "builtin",
+			Enabled:   true,
+			IsBuiltin: true,
+			Status:    "connected",
+		},
+		ToolsCount: 6, // task_create, task_list, task_get, task_update, task_delete, task_search
+	})
 
 	for _, srv := range servers {
 		status, toolCount, lastErr := h.proxy.GetServerStatus(srv.ID)
@@ -683,14 +705,22 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Get task board stats
+	taskStats, _ := h.store.GetTaskBoardStats()
+	taskCount := 0
+	if taskStats != nil {
+		taskCount = taskStats.Total
+	}
+
 	stats := models.DashboardStats{
 		TotalServers:     len(servers),
 		ConnectedServers: connected,
-		TotalTools:       len(tools),
-		TotalAPIKeys:     len(keys),
-		TotalCompounds:   len(compounds),
-		TotalMemories:    memCount,
-		TotalSkills:      len(skills),
+		TotalTools:        len(tools),
+		TotalAPIKeys:      len(keys),
+		TotalCompounds:    len(compounds),
+		TotalMemories:     memCount,
+		TotalSkills:       len(skills),
+		TotalTasks:        taskCount,
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -2552,6 +2582,139 @@ func (h *Handlers) handleCreateDisabledTool(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusCreated, dt)
+}
+
+// --- Task Board Handlers ---
+
+func (h *Handlers) handleListTaskItems(w http.ResponseWriter, r *http.Request) {
+	statusFilter := r.URL.Query().Get("status")
+	priorityFilter := r.URL.Query().Get("priority")
+	tasks, err := h.store.ListTaskItems(statusFilter, priorityFilter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list tasks")
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (h *Handlers) handleCreateTaskItem(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateTaskItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "Title is required")
+		return
+	}
+	task := &models.TaskItem{
+		Title:       req.Title,
+		Description: req.Description,
+		Status:      req.Status,
+		Priority:    req.Priority,
+		Assignee:    req.Assignee,
+		Tags:        req.Tags,
+	}
+	if req.DueDate != nil && *req.DueDate != "" {
+		t, err := time.Parse(time.RFC3339, *req.DueDate)
+		if err == nil {
+			task.DueDate = &t
+		}
+	}
+	if err := h.store.CreateTaskItem(task); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to create task")
+		return
+	}
+	writeJSON(w, http.StatusCreated, task)
+}
+
+func (h *Handlers) handleGetTaskItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	task, err := h.store.GetTaskItem(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *Handlers) handleUpdateTaskItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	task, err := h.store.GetTaskItem(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "Task not found")
+		return
+	}
+	var req models.UpdateTaskItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Title != nil {
+		task.Title = *req.Title
+	}
+	if req.Description != nil {
+		task.Description = *req.Description
+	}
+	if req.Status != nil {
+		task.Status = *req.Status
+	}
+	if req.Priority != nil {
+		task.Priority = *req.Priority
+	}
+	if req.Assignee != nil {
+		task.Assignee = *req.Assignee
+	}
+	if req.Tags != nil {
+		task.Tags = *req.Tags
+	}
+	if req.DueDate != nil {
+		if *req.DueDate == "" {
+			task.DueDate = nil
+		} else {
+			t, err := time.Parse(time.RFC3339, *req.DueDate)
+			if err == nil {
+				task.DueDate = &t
+			}
+		}
+	}
+	if err := h.store.UpdateTaskItem(task); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to update task")
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (h *Handlers) handleDeleteTaskItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteTaskItem(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to delete task")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handlers) handleTaskBoardStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.store.GetTaskBoardStats()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to get stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (h *Handlers) handleSearchTaskItems(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		writeError(w, http.StatusBadRequest, "Query parameter 'q' is required")
+		return
+	}
+	tasks, err := h.store.SearchTaskItems(q)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Search failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
 }
 
 func (h *Handlers) handleDeleteDisabledTool(w http.ResponseWriter, r *http.Request) {

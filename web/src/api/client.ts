@@ -398,6 +398,60 @@ export const disabledTools = {
     request<{ status: string }>(`/disabled-tools/${id}`, { method: 'DELETE' }),
 };
 
+// --- Task Board ---
+
+export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'blocked';
+export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+  assignee: string;
+  due_date: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskStats {
+  todo: number;
+  in_progress: number;
+  done: number;
+  blocked: number;
+  total: number;
+}
+
+export interface TaskInput {
+  title: string;
+  description?: string;
+  priority?: TaskPriority;
+  status?: TaskStatus;
+  assignee?: string;
+  due_date?: string;
+  tags?: string[];
+}
+
+export const tasks = {
+  list: (status?: TaskStatus, priority?: TaskPriority) => {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (priority) params.set('priority', priority);
+    const qs = params.toString();
+    return request<Task[]>(`/taskboard${qs ? `?${qs}` : ''}`);
+  },
+  get: (id: string) => request<Task>(`/taskboard/${id}`),
+  create: (data: TaskInput) =>
+    request<Task>('/taskboard', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<TaskInput>) =>
+    request<Task>(`/taskboard/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<{ status: string }>(`/taskboard/${id}`, { method: 'DELETE' }),
+  stats: () => request<TaskStats>('/taskboard/stats'),
+};
+
 // --- Env Variables ---
 
 export interface EnvVar {

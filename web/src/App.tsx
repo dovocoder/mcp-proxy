@@ -11,6 +11,7 @@ import ToolsPage from './pages/Tools';
 import MemoriesPage from './pages/Memories';
 import SkillsPage from './pages/Skills';
 import EnvVarsPage from './pages/EnvVars';
+import TaskBoardPage from './pages/TaskBoard';
 import { isAuthenticated, dashboard as dashboardApi } from './api/client';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/memories" element={<MemoriesPage />} />
         <Route path="/skills" element={<SkillsPage />} />
         <Route path="/env-vars" element={<EnvVarsPage />} />
+        <Route path="/taskboard" element={<TaskBoardPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

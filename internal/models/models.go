@@ -187,6 +187,7 @@ type DashboardStats struct {
 	TotalCompounds   int `json:"total_compounds"`
 	TotalMemories    int `json:"total_memories"`
 	TotalSkills      int `json:"total_skills"`
+	TotalTasks       int `json:"total_tasks"`
 }
 
 // Memory represents a stored memory in the built-in memory server.
@@ -353,4 +354,54 @@ type UpdateSkillRequest struct {
 type SkillCategory struct {
 	Category string `json:"category"`
 	Count    int    `json:"count"`
+}
+
+// BuiltinTaskBoardServerID is the virtual server ID for the built-in task board MCP server.
+const BuiltinTaskBoardServerID = "builtin-tasks"
+
+// TaskItem represents a persistent task on the task board.
+// Unlike the ephemeral MCP protocol tasks (internal/tasks), these are
+// durable project-management tasks stored in SQLite — like a kanban board.
+type TaskItem struct {
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Description string     `json:"description,omitempty"`
+	Status      string     `json:"status"`   // "todo", "in_progress", "done", "blocked"
+	Priority    string     `json:"priority"` // "low", "medium", "high", "urgent"
+	Assignee    string     `json:"assignee,omitempty"`
+	DueDate     *time.Time `json:"due_date,omitempty"`
+	Tags        []string   `json:"tags"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// TaskBoardStats represents summary statistics for the task board dashboard.
+type TaskBoardStats struct {
+	Todo        int `json:"todo"`
+	InProgress  int `json:"in_progress"`
+	Done        int `json:"done"`
+	Blocked     int `json:"blocked"`
+	Total       int `json:"total"`
+}
+
+// CreateTaskItemRequest is the payload for creating a task board item.
+type CreateTaskItemRequest struct {
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	Priority    string   `json:"priority,omitempty"`
+	Assignee    string   `json:"assignee,omitempty"`
+	DueDate     *string  `json:"due_date,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// UpdateTaskItemRequest is the payload for updating a task board item.
+type UpdateTaskItemRequest struct {
+	Title       *string  `json:"title,omitempty"`
+	Description *string  `json:"description,omitempty"`
+	Status      *string  `json:"status,omitempty"`
+	Priority    *string  `json:"priority,omitempty"`
+	Assignee    *string  `json:"assignee,omitempty"`
+	DueDate     *string  `json:"due_date,omitempty"`
+	Tags        *[]string `json:"tags,omitempty"`
 }

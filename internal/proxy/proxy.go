@@ -18,6 +18,7 @@ import (
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/skills"
 	"github.com/agentic/mcp-proxy/internal/store"
+	"github.com/agentic/mcp-proxy/internal/taskboard"
 	"github.com/agentic/mcp-proxy/internal/tasks"
 	"github.com/google/uuid"
 )
@@ -111,6 +112,8 @@ type Manager struct {
 	onToolsChanged func()
 	// taskMgr manages task-augmented requests (experimental, 2025-11-25 spec).
 	taskMgr *tasks.Manager
+	// taskBoard is the built-in persistent task board MCP server.
+	taskBoard *taskboard.Server
 }
 
 // New creates a new proxy Manager.
@@ -126,6 +129,7 @@ func New(s *store.Store) *Manager {
 		serverLogs:     make(map[string]*serverLog),
 		oauthMetaCache: make(map[string]*oauthMetaEntry),
 		taskMgr:        tasks.New(),
+		taskBoard:      taskboard.New(s),
 	}
 	m.InitMemorySets()
 	m.InitSkillSets()
@@ -761,6 +765,17 @@ func (m *Manager) ListTools() []models.Tool {
 		}
 	}
 	m.skillMu.RUnlock()
+
+	// Add task board tools (built-in, always available)
+	for _, tt := range m.taskBoard.Tools() {
+		tools = append(tools, models.Tool{
+			ServerID:    models.BuiltinTaskBoardServerID,
+			ServerName:  "tasks",
+			Name:        tt.Name,
+			Description: tt.Description,
+		})
+	}
+
 	return tools
 }
 
@@ -924,6 +939,9 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 	// Add skill instructions
 	instructions += "\n\n" + skillInstructions
 
+	// Add task board instructions
+	instructions += "\n\n" + taskBoardInstructions
+
 	// Auto-inject top memories so LLMs see them without calling any tools.
 	// Limited to top 5 to avoid bloating the initialize response.
 	memorySetIDs := m.getMemorySetIDs(scope)
@@ -1062,6 +1080,28 @@ const skillInstructions = `This server also provides skill tools (skill_list, sk
 3. Numbered steps with exact commands
 4. Pitfalls and common errors
 5. Verification steps to confirm success`
+
+// taskBoardInstructions provides guidance to LLM clients on how to use the
+// built-in task board tools. Returned in the MCP initialize response.
+const taskBoardInstructions = `This server also provides task board tools (task_create, task_list, task_get, task_update, task_delete, task_search). The task board is a persistent kanban-style task list — tasks survive across sessions.
+
+## When to use the task board
+- When the user asks you to "create a task", "add a TODO", "track this", "put that on the board"
+- When working on multi-step projects: break down work into tasks and track them
+- When the user wants to see what's pending: use task_list with status filters
+- When updating progress: mark tasks as in_progress/done/blocked
+
+## Task lifecycle
+- Statuses: todo → in_progress → done (or blocked)
+- Priorities: low, medium, high, urgent
+- Use tags for categorization (e.g. ["frontend", "bug"])
+- Use assignee to track ownership
+
+## Best practices
+- Create tasks proactively when the user mentions future work
+- Update status as you make progress
+- Search before creating to avoid duplicates
+- Keep titles concise — put details in description`
 
 // getMemorySetIDs returns the memory set IDs accessible in the given scope.
 func (m *Manager) getMemorySetIDs(scope Scope) []string {
@@ -1714,6 +1754,11 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 	// Check if this is a task-augmented request
 	if params.Task != nil {
 		return m.handleTaskAugmentedToolCall(ctx, req, scope, params.Name, params.Arguments, params.Task.TTL)
+	}
+
+	// Check if this is a task board tool (built-in)
+	if toolName, ok := taskboard.ParseNamespaced(params.Name); ok {
+		return m.taskBoard.HandleToolCall(toolName, params.Arguments)
 	}
 
 	// Check if this is a built-in memory tool
