@@ -260,12 +260,22 @@ func (h *Handlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // extractScopeFromAPIKey builds a Scope from the API key's compound_id (if any).
 func extractScopeFromAPIKey(r *http.Request) proxy.Scope {
+	scope := proxy.Scope{}
 	if apiKey, ok := auth.APIKeyFromContext(r.Context()).(*models.APIKey); ok && apiKey != nil {
+		scope.AuthKeyID = apiKey.ID
 		if apiKey.CompoundID != nil {
-			return proxy.Scope{CompoundID: *apiKey.CompoundID}
+			scope.CompoundID = *apiKey.CompoundID
 		}
 	}
-	return proxy.Scope{}
+	// For OIDC tokens, use the subject as the auth key ID
+	if scope.AuthKeyID == "" {
+		if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+			if sub, ok := claims["sub"].(string); ok && sub != "" {
+				scope.AuthKeyID = "oidc:" + sub
+			}
+		}
+	}
+	return scope
 }
 
 // handleMCPProxyGlobal handles POST/GET/DELETE /api/mcp (global scope — all servers).

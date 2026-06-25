@@ -18,6 +18,7 @@ import (
 	"github.com/agentic/mcp-proxy/internal/models"
 	"github.com/agentic/mcp-proxy/internal/skills"
 	"github.com/agentic/mcp-proxy/internal/store"
+	"github.com/agentic/mcp-proxy/internal/tasks"
 	"github.com/google/uuid"
 )
 
@@ -108,6 +109,8 @@ type Manager struct {
 	// onToolsChanged is a callback fired when the tool list changes (server connect/disconnect, etc.)
 	// Set by the API layer to broadcast notifications/tools/list_changed to SSE clients.
 	onToolsChanged func()
+	// taskMgr manages task-augmented requests (experimental, 2025-11-25 spec).
+	taskMgr *tasks.Manager
 }
 
 // New creates a new proxy Manager.
@@ -122,6 +125,7 @@ func New(s *store.Store) *Manager {
 		deviceAuths:    make(map[string]*DeviceAuthResult),
 		serverLogs:     make(map[string]*serverLog),
 		oauthMetaCache: make(map[string]*oauthMetaEntry),
+		taskMgr:        tasks.New(),
 	}
 	m.InitMemorySets()
 	m.InitSkillSets()
@@ -725,6 +729,7 @@ func (m *Manager) GetServerStatus(id string) (status string, toolCount int, last
 type Scope struct {
 	ServerID   string
 	CompoundID string
+	AuthKeyID  string // API key ID or OIDC subject — for task auth binding
 }
 
 // ListTools returns all tools from all connected servers plus built-in memory tools.
@@ -885,6 +890,14 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 		return json.Marshal(map[string]interface{}{})
 	case "completion/complete":
 		return m.handleCompletionComplete(req, scope)
+	case "tasks/get":
+		return m.handleTasksGet(req, scope)
+	case "tasks/result":
+		return m.handleTasksResult(ctx, req, scope)
+	case "tasks/list":
+		return m.handleTasksList(req, scope)
+	case "tasks/cancel":
+		return m.handleTasksCancel(req, scope)
 	default:
 		return nil, fmt.Errorf("unsupported method: %s", req.Method)
 	}
@@ -972,11 +985,20 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 	result := map[string]interface{}{
 		"protocolVersion": negotiatedVersion,
 		"capabilities": map[string]interface{}{
-			"tools":     map[string]interface{}{"listChanged": true},
-			"resources": map[string]interface{}{"listChanged": true},
-			"prompts":   map[string]interface{}{"listChanged": true},
-			"logging":   map[string]interface{}{},
+			"tools":       map[string]interface{}{"listChanged": true},
+			"resources":   map[string]interface{}{"listChanged": true},
+			"prompts":     map[string]interface{}{"listChanged": true},
+			"logging":     map[string]interface{}{},
 			"completions": map[string]interface{}{},
+			"tasks": map[string]interface{}{
+				"list":    map[string]interface{}{},
+				"cancel":  map[string]interface{}{},
+				"requests": map[string]interface{}{
+					"tools": map[string]interface{}{
+						"call": map[string]interface{}{},
+					},
+				},
+			},
 		},
 		"serverInfo": map[string]interface{}{
 			"name":        "mcp-proxy",
@@ -1681,9 +1703,17 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		Task      *struct {
+			TTL int64 `json:"ttl"`
+		} `json:"task,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, fmt.Errorf("invalid tools/call params: %w", err)
+	}
+
+	// Check if this is a task-augmented request
+	if params.Task != nil {
+		return m.handleTaskAugmentedToolCall(ctx, req, scope, params.Name, params.Arguments, params.Task.TTL)
 	}
 
 	// Check if this is a built-in memory tool
@@ -1787,6 +1817,186 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 	}
 
 	return client.CallTool(toolName, params.Arguments)
+}
+
+// --- Task handlers (experimental, 2025-11-25 spec) ---
+
+// handleTaskAugmentedToolCall handles a tools/call request with task augmentation.
+// It creates a task in "working" status, executes the tool asynchronously, and
+// returns a CreateTaskResult immediately. The result can be retrieved via tasks/result.
+func (m *Manager) handleTaskAugmentedToolCall(ctx context.Context, req mcp.JSONRPCRequest, scope Scope, toolName string, arguments json.RawMessage, ttlMS int64) (json.RawMessage, error) {
+	// Create the task bound to the caller's auth context
+	task := m.taskMgr.CreateTask(scope.AuthKeyID, ttlMS)
+
+	// Copy the request params WITHOUT the task field for the backend call
+	backendParams, _ := json.Marshal(map[string]interface{}{
+		"name":      toolName,
+		"arguments": arguments,
+	})
+	backendReq := mcp.JSONRPCRequest{
+		JSONRPC: req.JSONRPC,
+		ID:      req.ID,
+		Method:  "tools/call",
+		Params:  backendParams,
+	}
+
+	// Execute the tool call asynchronously
+	go func() {
+		result, err := m.handleToolsCall(ctx, backendReq, scope)
+		if err != nil {
+			m.taskMgr.FailTask(task.TaskID, err)
+		} else {
+			m.taskMgr.CompleteTask(task.TaskID, result)
+		}
+	}()
+
+	// Return CreateTaskResult immediately
+	return m.marshalTaskResult(task.TaskID)
+}
+
+// handleTasksGet returns the current status of a task.
+func (m *Manager) handleTasksGet(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid tasks/get params: %w", err)
+	}
+	if params.TaskID == "" {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: "missing taskId"}
+	}
+
+	task, err := m.taskMgr.Get(params.TaskID, scope.AuthKeyID)
+	if err != nil {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: err.Error()}
+	}
+
+	return m.marshalTask(task)
+}
+
+// handleTasksResult blocks until the task reaches a terminal state, then returns the result.
+func (m *Manager) handleTasksResult(ctx context.Context, req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid tasks/result params: %w", err)
+	}
+	if params.TaskID == "" {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: "missing taskId"}
+	}
+
+	// Verify the task exists and belongs to this auth context
+	_, err := m.taskMgr.Get(params.TaskID, scope.AuthKeyID)
+	if err != nil {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: err.Error()}
+	}
+
+	// Block until terminal or context cancelled
+	result, err := m.taskMgr.WaitForResult(ctx, params.TaskID, scope.AuthKeyID)
+	if err != nil {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()}
+	}
+
+	// Return the result with related-task metadata in _meta
+	resultMap := map[string]interface{}{}
+	if result != nil {
+		json.Unmarshal(result, &resultMap)
+	}
+	// Add _meta with related-task per spec
+	if meta, ok := resultMap["_meta"].(map[string]interface{}); ok {
+		meta["io.modelcontextprotocol/related-task"] = map[string]string{"taskId": params.TaskID}
+		resultMap["_meta"] = meta
+	} else {
+		resultMap["_meta"] = map[string]interface{}{
+			"io.modelcontextprotocol/related-task": map[string]string{"taskId": params.TaskID},
+		}
+	}
+	return json.Marshal(resultMap)
+}
+
+// handleTasksList lists tasks for the current auth context with pagination.
+func (m *Manager) handleTasksList(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		Cursor string `json:"cursor,omitempty"`
+	}
+	if len(req.Params) > 0 {
+		json.Unmarshal(req.Params, &params)
+	}
+
+	tasks, nextCursor, err := m.taskMgr.ListTasks(scope.AuthKeyID, params.Cursor, 50)
+	if err != nil {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()}
+	}
+
+	taskList := make([]map[string]interface{}, 0, len(tasks))
+	for _, t := range tasks {
+		taskList = append(taskList, m.taskToMap(t))
+	}
+
+	result := map[string]interface{}{
+		"tasks": taskList,
+	}
+	if nextCursor != "" {
+		result["nextCursor"] = nextCursor
+	}
+	return json.Marshal(result)
+}
+
+// handleTasksCancel cancels a task by transitioning it to "cancelled" status.
+func (m *Manager) handleTasksCancel(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid tasks/cancel params: %w", err)
+	}
+	if params.TaskID == "" {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: "missing taskId"}
+	}
+
+	task, err := m.taskMgr.CancelTask(params.TaskID, scope.AuthKeyID)
+	if err != nil {
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: err.Error()}
+	}
+
+	return m.marshalTask(task)
+}
+
+// marshalTaskResult creates a CreateTaskResult JSON response from a task ID.
+func (m *Manager) marshalTaskResult(taskID string) (json.RawMessage, error) {
+	task, err := m.taskMgr.Get(taskID, "")
+	if err != nil {
+		return nil, err
+	}
+	return m.marshalTask(task)
+}
+
+// marshalTask serializes a task to JSON.
+func (m *Manager) marshalTask(t *tasks.Task) (json.RawMessage, error) {
+	return json.Marshal(m.taskToMap(t))
+}
+
+// taskToMap converts a task to a map for JSON serialization.
+func (m *Manager) taskToMap(t *tasks.Task) map[string]interface{} {
+	taskMap := map[string]interface{}{
+		"taskId":        t.TaskID,
+		"status":        t.Status,
+		"createdAt":     t.CreatedAt.UTC().Format(time.RFC3339),
+		"lastUpdatedAt": t.LastUpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if t.StatusMessage != "" {
+		taskMap["statusMessage"] = t.StatusMessage
+	}
+	if t.TTL != nil {
+		taskMap["ttl"] = t.TTL.Milliseconds()
+	} else {
+		taskMap["ttl"] = nil
+	}
+	if t.PollInterval != nil {
+		taskMap["pollInterval"] = t.PollInterval.Milliseconds()
+	}
+	return taskMap
 }
 
 // parseNamespacedTool splits "serverName__toolName" into parts.

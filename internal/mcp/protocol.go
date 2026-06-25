@@ -67,6 +67,11 @@ type RPCError struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
+// Error implements the error interface so RPCError can be used as a Go error.
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("JSON-RPC error %d: %s", e.Code, e.Message)
+}
+
 // Standard JSON-RPC error codes.
 const (
 	ErrCodeParseError     = -32700
@@ -97,6 +102,38 @@ type CallToolResult struct {
 	Content          []map[string]interface{} `json:"content"`
 	IsError          bool                     `json:"isError"`
 	StructuredContent json.RawMessage          `json:"structuredContent,omitempty"`
+}
+
+// TaskStatus represents the lifecycle state of a task.
+type TaskStatus string
+
+const (
+	TaskStatusWorking       TaskStatus = "working"
+	TaskStatusInputRequired TaskStatus = "input_required"
+	TaskStatusCompleted     TaskStatus = "completed"
+	TaskStatusFailed        TaskStatus = "failed"
+	TaskStatusCancelled     TaskStatus = "cancelled"
+)
+
+// IsTerminal returns true if the task is in a terminal state.
+func (s TaskStatus) IsTerminal() bool {
+	return s == TaskStatusCompleted || s == TaskStatusFailed || s == TaskStatusCancelled
+}
+
+// Task represents an MCP task (experimental, 2025-11-25 spec).
+type Task struct {
+	TaskID        string     `json:"taskId"`
+	Status        TaskStatus `json:"status"`
+	StatusMessage string     `json:"statusMessage,omitempty"`
+	CreatedAt     string     `json:"createdAt"`     // ISO 8601
+	LastUpdatedAt string     `json:"lastUpdatedAt"` // ISO 8601
+	TTL           *int64     `json:"ttl"`           // milliseconds, null = unlimited
+	PollInterval  *int64     `json:"pollInterval,omitempty"` // milliseconds
+}
+
+// CreateTaskResult is the response when a task-augmented request is accepted.
+type CreateTaskResult struct {
+	Task Task `json:"task"`
 }
 
 // ResourceTemplate is a parameterized resource template.
