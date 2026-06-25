@@ -261,7 +261,6 @@ func migrate(db *sql.DB) error {
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_task_items_board ON task_items(board_id);
 	CREATE INDEX IF NOT EXISTS idx_task_items_status ON task_items(status);
 	CREATE INDEX IF NOT EXISTS idx_task_items_priority ON task_items(priority);
 	CREATE INDEX IF NOT EXISTS idx_task_items_assignee ON task_items(assignee);
@@ -343,6 +342,8 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		// Column already exists
 	}
+	// Create board_id index after the column is confirmed to exist
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_items_board ON task_items(board_id)`)
 
 	// Create default task board set if it doesn't exist
 	_, _ = db.Exec(`INSERT OR IGNORE INTO task_board_sets (id, name, slug, description, is_default, created_at) VALUES ('default', 'Default', '', '', 1, datetime('now'))`)
