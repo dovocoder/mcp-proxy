@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/agentic/mcp-proxy/internal/mcp"
 	"github.com/agentic/mcp-proxy/internal/models"
+	"github.com/agentic/mcp-proxy/internal/skillsdirectory"
 	"github.com/agentic/mcp-proxy/internal/store"
 	"github.com/google/uuid"
 )
@@ -175,6 +177,37 @@ func (s *Server) Tools() []mcp.Tool {
 				"required": []string{"id"},
 			}),
 		},
+		// Skills.sh directory tools — search and install from the global skills.sh registry
+		{
+			Name:        "skill_search_directory",
+			Title:       "Search Skills Directory",
+			Description: "Search the global skills.sh directory (skills.sh) for community skills. Returns skill name, source repo, install count, and URL. Use this to discover skills from the broader ecosystem — e.g. 'react', 'deploy', 'database', 'testing'.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "Search query (e.g. 'react native', 'deploy', 'database')",
+					},
+				},
+				"required": []string{"query"},
+			}),
+		},
+		{
+			Name:        "skill_get_remote",
+			Title:       "Get Remote Skill Content",
+			Description: "Fetch the full SKILL.md content of a skill from the skills.sh directory. Use the installRef from skill_search_directory results (format: owner/repo@skill-slug). Returns the complete skill content ready to read or save locally.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"install_ref": map[string]interface{}{
+						"type":        "string",
+						"description": "Skill reference in format owner/repo@skill-slug (e.g. 'vercel-labs/agent-skills@vercel-react-best-practices')",
+					},
+				},
+				"required": []string{"install_ref"},
+			}),
+		},
 	}
 }
 
@@ -197,6 +230,10 @@ func (s *Server) HandleToolCall(toolName string, args json.RawMessage) (json.Raw
 		result, err = s.handleUpdate(args)
 	case "skill_delete":
 		result, err = s.handleDelete(args)
+	case "skill_search_directory":
+		result, err = s.handleSearchDirectory(args)
+	case "skill_get_remote":
+		result, err = s.handleGetRemote(args)
 	default:
 		// Unknown tool — protocol error (not a tool execution error)
 		return nil, fmt.Errorf("unknown skill tool: %s", toolName)
@@ -444,6 +481,79 @@ func (s *Server) handleDelete(args json.RawMessage) (interface{}, error) {
 	}, nil
 }
 
+// handleSearchDirectory searches the global skills.sh directory for community skills.
+func (s *Server) handleSearchDirectory(args json.RawMessage) (interface{}, error) {
+	var params struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if params.Query == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), skillsdirectory.DefaultTimeout)
+	defer cancel()
+
+	results, err := skillsdirectory.Search(ctx, params.Query)
+	if err != nil {
+		return nil, fmt.Errorf("skills.sh search failed: %w", err)
+	}
+
+	if len(results) == 0 {
+		return map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": fmt.Sprintf("No skills found for query '%s' on skills.sh", params.Query)},
+			},
+			"isError": false,
+		}, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Found %d skill(s) on skills.sh:\n\n", len(results)))
+	for _, r := range results {
+		sb.WriteString(fmt.Sprintf("- **%s@%s** (%s)\n  Install: `%s`\n  URL: %s\n",
+			r.Source, r.Slug, r.Installs, r.InstallRef, r.URL))
+	}
+	sb.WriteString("\nUse `skill_get_remote` with the install_ref to fetch the full content.\n")
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{"type": "text", "text": sb.String()},
+		},
+		"isError": false,
+	}, nil
+}
+
+// handleGetRemote fetches the full SKILL.md content of a skill from skills.sh.
+func (s *Server) handleGetRemote(args json.RawMessage) (interface{}, error) {
+	var params struct {
+		InstallRef string `json:"install_ref"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if params.InstallRef == "" {
+		return nil, fmt.Errorf("install_ref is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), skillsdirectory.DefaultTimeout)
+	defer cancel()
+
+	detail, err := skillsdirectory.GetSkillContent(ctx, params.InstallRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch skill from skills.sh: %w", err)
+	}
+
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{"type": "text", "text": detail.Content},
+		},
+		"isError": false,
+	}, nil
+}
+
 // ToolNames returns just the tool names (for quick lookup).
 func (s *Server) ToolNames() map[string]bool {
 	names := make(map[string]bool, len(s.Tools()))
@@ -481,7 +591,7 @@ func ParseNamespaced(namespaced string) (setSlug string, base string, ok bool) {
 	if !strings.HasPrefix(namespaced, "skill_") {
 		return "", "", false
 	}
-	knownTools := []string{"skill_list", "skill_load", "skill_search", "skill_create", "skill_update", "skill_delete"}
+	knownTools := []string{"skill_list", "skill_load", "skill_search", "skill_create", "skill_update", "skill_delete", "skill_search_directory", "skill_get_remote"}
 	for _, kt := range knownTools {
 		if namespaced == kt {
 			return "", kt, true // default set, no suffix

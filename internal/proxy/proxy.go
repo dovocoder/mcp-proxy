@@ -1061,7 +1061,7 @@ const memoryInstructions = `This server provides persistent memory tools (memory
 
 // skillInstructions provides guidance to LLM clients on how to use the
 // built-in skill tools effectively. Returned in the MCP initialize response.
-const skillInstructions = `This server also provides skill tools (skill_list, skill_load, skill_search, skill_create, skill_update, skill_delete). Skills are reusable procedures — documented workflows with steps, commands, and pitfalls.
+const skillInstructions = `This server also provides skill tools (skill_list, skill_load, skill_search, skill_create, skill_update, skill_delete, skill_search_directory, skill_get_remote). Skills are reusable procedures — documented workflows with steps, commands, and pitfalls.
 
 ## When to use skills
 - Before starting a task: search (skill_search) or list (skill_list) to check if a procedure exists
@@ -1079,7 +1079,12 @@ const skillInstructions = `This server also provides skill tools (skill_list, sk
 2. Prerequisites: what needs to be set up first
 3. Numbered steps with exact commands
 4. Pitfalls and common errors
-5. Verification steps to confirm success`
+5. Verification steps to confirm success
+
+## Skills.sh directory
+- skill_search_directory: Search the global skills.sh registry for community skills (e.g. "react", "deploy", "database")
+- skill_get_remote: Fetch the full SKILL.md content of a remote skill using its install_ref (e.g. "vercel-labs/agent-skills@vercel-react-best-practices")
+- These tools let you discover and read skills from the broader ecosystem without installing them locally`
 
 // taskBoardInstructions provides guidance to LLM clients on how to use the
 // built-in task board tools. Returned in the MCP initialize response.
