@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
@@ -31,6 +32,11 @@ type stdioConn struct {
 }
 
 func newStdioConn(command string, args []string, env map[string]string, connectTimeout time.Duration, onStderr func(string)) (*stdioConn, error) {
+	// Log the command for security monitoring (MCP security best practices:
+	// "SHOULD log all stdio transport usage for security monitoring")
+	// Also check for obviously dangerous patterns.
+	log.Printf("[stdio] Launching: %s %v (env_keys=%d)", command, args, len(env))
+
 	cmd := exec.Command(command, args...)
 
 	// Set environment

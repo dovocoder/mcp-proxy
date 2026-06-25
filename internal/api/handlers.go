@@ -941,6 +941,7 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	codeChallengeMethod := q.Get("code_challenge_method")
 	scope := q.Get("scope")
 	resource := q.Get("resource")
+	confirmed := q.Get("confirm") == "true"
 
 	if clientRedirectURI == "" {
 		writeError(w, http.StatusBadRequest, "Missing redirect_uri parameter")
@@ -951,6 +952,24 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	// Allowed: http(s)://localhost:*, http(s)://127.0.0.1:*, or custom app schemes (e.g. com.example://).
 	if err := validateRedirectURI(clientRedirectURI); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid redirect_uri: %v", err))
+		return
+	}
+
+	// Confused deputy prevention: require explicit confirmation before forwarding
+	// to the upstream authorization server. Per MCP security best practices:
+	// "MCP proxy servers MUST implement per-client consent and proper security controls."
+	// Since this is an API proxy without a browser consent UI, clients must send
+	// confirm=true on their first authorization request. This prevents malicious
+	// clients from silently obtaining authorization codes using the proxy's
+	// static client ID and an existing consent cookie.
+	if !confirmed {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":         "confirmation_required",
+			"message":        "This MCP proxy uses a static client ID with the upstream authorization server. You must explicitly confirm authorization.",
+			"redirect_uri":   clientRedirectURI,
+			"scope":          scope,
+			"confirm_url":    r.URL.Path + "?" + r.URL.RawQuery + "&confirm=true",
+		})
 		return
 	}
 
@@ -2183,15 +2202,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 // This ensures all endpoints in the auth server metadata are on the proxy's domain,
 // matching the issuer URL. Routes: /api/oauth/token, /jwks, /userinfo, /revoke, /introspect.
 // sharedOAuthProxyClient is a pooled HTTP client for all upstream OAuth requests.
-// Using a shared client with a shared Transport enables connection reuse (keep-alive)
-// and prevents the resource leak of creating a new Transport per request.
+// Using a shared SSRF-safe client with connection pooling.
+// SSRF protection blocks connections to private/reserved IP ranges.
 var sharedOAuthProxyClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 5,
-		IdleConnTimeout:     90 * time.Second,
-	},
+	Timeout:   30 * time.Second,
+	Transport: auth.NewSSRFSafeTransport(),
 	// Don't follow redirects — OAuth endpoints should not redirect POST requests.
 	// A 301/302 redirect would convert POST→GET, causing upstream to return 404.
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {

@@ -69,14 +69,7 @@ func NewOIDCProvider(cfg OIDCConfig) (*OIDCProvider, error) {
 	p := &OIDCProvider{
 		config:     cfg,
 		tokenCache: make(map[string]cachedToken),
-		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 5,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
+		httpClient: newSSRFSafeClient(),
 	}
 	// Start periodic cleanup of expired token cache entries
 	go p.cleanupTokenCache()
@@ -408,6 +401,28 @@ func (p *OIDCProvider) ValidateJWT(accessToken string) (ProviderUser, error) {
 	}
 	if time.Now().Unix() > int64(exp) {
 		return ProviderUser{}, fmt.Errorf("token expired")
+	}
+
+	// Validate audience — token MUST be issued for this MCP server.
+	// Per MCP security best practices: "MCP servers MUST NOT accept any
+	// tokens that were not explicitly issued for the MCP server."
+	// The audience is the proxy's own resource URL (configured via OIDC config).
+	expectedAud := p.config.Issuer
+	if aud, ok := claims["aud"].(string); ok {
+		if aud != expectedAud && aud != p.config.ClientID {
+			return ProviderUser{}, fmt.Errorf("audience mismatch: got %s, expected %s or %s", aud, expectedAud, p.config.ClientID)
+		}
+	} else if audList, ok := claims["aud"].([]interface{}); ok {
+		found := false
+		for _, a := range audList {
+			if s, ok := a.(string); ok && (s == expectedAud || s == p.config.ClientID) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ProviderUser{}, fmt.Errorf("audience mismatch: token audiences do not include %s or %s", expectedAud, p.config.ClientID)
+		}
 	}
 
 	// Extract user info from claims

@@ -546,6 +546,12 @@ func (sm *streamSessionManager) cleanupLoop() {
 }
 
 func (sm *streamSessionManager) generateID() string {
+	// Session IDs are generated using crypto/rand (128 bits) — cryptographically
+	// secure and non-deterministic per MCP spec security best practices.
+	// Sessions are implicitly bound to the API key used to create them:
+	// the API key is validated on every request via APIKeyMiddleware,
+	// so even if a session ID is stolen, the attacker still needs a valid
+	// API key to make authenticated requests.
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
