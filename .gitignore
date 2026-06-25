@@ -17,3 +17,5 @@ web/tsconfig.tsbuildinfo
 
 # OS
 .DS_Store
+mcp-proxy.db-shm
+mcp-proxy.db-wal
