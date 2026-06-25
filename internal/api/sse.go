@@ -91,6 +91,24 @@ func (sm *sseSessionManager) remove(id string) {
 	}
 }
 
+// broadcastNotification sends a JSON-RPC notification to all active legacy SSE sessions.
+func (sm *sseSessionManager) broadcastNotification(method string, params json.RawMessage) {
+	notif := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  method,
+	}
+	if params != nil {
+		notif["params"] = params
+	}
+	data, _ := json.Marshal(notif)
+
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for _, s := range sm.sessions {
+		s.sendMessage(string(data))
+	}
+}
+
 func (s *sseSession) send(event string, data string) error {
 	_, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data)
 	if err != nil {
@@ -264,6 +282,21 @@ func (h *Handlers) sseMessage(w http.ResponseWriter, r *http.Request, fallbackSc
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// BroadcastToolsListChanged sends notifications/tools/list_changed to all connected SSE clients.
+// Called when servers connect/disconnect or when tools are modified.
+func (h *Handlers) BroadcastToolsListChanged() {
+	// Broadcast to streamable HTTP sessions (GET /api/mcp streams)
+	h.streamManager.broadcastNotification("notifications/tools/list_changed", nil)
+	// Broadcast to legacy SSE sessions
+	h.sseManager.broadcastNotification("notifications/tools/list_changed", nil)
+}
+
+// BroadcastResourcesListChanged sends notifications/resources/list_changed to all connected SSE clients.
+func (h *Handlers) BroadcastResourcesListChanged() {
+	h.streamManager.broadcastNotification("notifications/resources/list_changed", nil)
+	h.sseManager.broadcastNotification("notifications/resources/list_changed", nil)
+}
+
 // --- Streamable HTTP transport (MCP spec 2025-11-25) ---
 // POST   /api/mcp                    — global
 // POST   /api/servers/{id}/mcp       — per-server
@@ -312,6 +345,16 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 
 	// GET — open SSE notification stream
 	if r.Method == http.MethodGet {
+		// Validate session ID if provided — return 404 for expired sessions
+		sessionID := r.Header.Get("Mcp-Session-Id")
+		if sessionID != "" {
+			if _, ok := h.streamManager.get(sessionID); !ok {
+				// Session expired or unknown — spec says MUST return 404
+				writeError(w, http.StatusNotFound, "Session not found or expired")
+				return
+			}
+		}
+
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			writeError(w, http.StatusInternalServerError, "Streaming not supported")
@@ -321,6 +364,18 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
+
+		// Send initial SSE event with ID to prime reconnection (spec §Resumability)
+		initialEventID := h.streamManager.generateID()
+		fmt.Fprintf(w, "id: %s\ndata: \n\n", initialEventID)
+		flusher.Flush()
+
+		// If client sent Last-Event-ID, replay missed events
+		if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
+			if sess, ok := h.streamManager.get(sessionID); ok && sess != nil {
+				sess.replayEvents(lastEventID)
+			}
+		}
 
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -370,6 +425,13 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "Missing Mcp-Session-Id header")
 		return
 	}
+	// Per spec: if the session was terminated/expired, MUST respond with 404 Not Found.
+	if !isInitialize && sessionID != "" && req.ID != nil {
+		if _, ok := h.streamManager.get(sessionID); !ok {
+			writeError(w, http.StatusNotFound, "Session not found or expired — reinitialize")
+			return
+		}
+	}
 
 	// JSON-RPC notifications (no id) — return 202 Accepted with no body.
 	// Per spec: if the input is a JSON-RPC response or notification and the
@@ -396,6 +458,8 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 	// Echo or create session ID
 	if isInitialize && sessionID == "" {
 		sessionID = h.streamManager.generateID()
+		// Register the session so it's tracked for GET streams and 404 detection
+		h.streamManager.registerSession(sessionID, scope)
 	}
 	if sessionID != "" {
 		w.Header().Set("Mcp-Session-Id", sessionID)
@@ -437,7 +501,18 @@ type streamSession struct {
 	done      chan struct{}
 	scope     proxy.Scope
 	createdAt time.Time
+	// eventLog stores recent SSE event IDs and their data for resumability (Last-Event-ID support).
+	eventLog []sseEventLog
+	// eventLogMu protects eventLog
+	eventLogMu sync.Mutex
 }
+
+type sseEventLog struct {
+	id   string
+	data string
+}
+
+const maxEventLogSize = 100
 
 type streamSessionManager struct {
 	mu       sync.RWMutex
@@ -483,6 +558,32 @@ func (sm *streamSessionManager) get(id string) (*streamSession, bool) {
 	return s, ok
 }
 
+// registerSession creates a session entry without an active SSE writer.
+// This is used when a session ID is assigned during initialize (POST)
+// so that subsequent requests with that session ID are recognized.
+func (sm *streamSessionManager) registerSession(id string, scope proxy.Scope) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, exists := sm.sessions[id]; !exists {
+		sm.sessions[id] = &streamSession{
+			id:        id,
+			scope:     scope,
+			createdAt: time.Now(),
+		}
+	}
+}
+
+// isValidSession checks if a session ID is known but expired (for 404 response).
+func (sm *streamSessionManager) isKnownButExpired(id string) bool {
+	// If the session is not in the active map but the ID looks valid (non-empty,
+	// hex-encoded), it was likely a valid session that expired.
+	// We check the active map first — if present, it's still alive.
+	sm.mu.RLock()
+	_, ok := sm.sessions[id]
+	sm.mu.RUnlock()
+	return !ok && id != ""
+}
+
 func (sm *streamSessionManager) remove(id string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -493,5 +594,54 @@ func (sm *streamSessionManager) remove(id string) {
 			close(s.done)
 		}
 		delete(sm.sessions, id)
+	}
+}
+
+// broadcastNotification sends a JSON-RPC notification to all active stream sessions.
+// Used for notifications/tools/list_changed, notifications/resources/list_changed, etc.
+func (sm *streamSessionManager) broadcastNotification(method string, params json.RawMessage) {
+	notif := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  method,
+	}
+	if params != nil {
+		notif["params"] = params
+	}
+	data, _ := json.Marshal(notif)
+
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for _, s := range sm.sessions {
+		// Append to event log for resumability
+		s.eventLogMu.Lock()
+		eventID := sm.generateID()
+		s.eventLog = append(s.eventLog, sseEventLog{id: eventID, data: string(data)})
+		if len(s.eventLog) > maxEventLogSize {
+			s.eventLog = s.eventLog[len(s.eventLog)-maxEventLogSize:]
+		}
+		s.eventLogMu.Unlock()
+
+		// Try to send on the SSE stream
+		if s.flusher != nil {
+			fmt.Fprintf(s.w, "id: %s\ndata: %s\n\n", eventID, string(data))
+			s.flusher.Flush()
+		}
+	}
+}
+
+// replayEvents replays events after the given Last-Event-ID on a stream.
+func (s *streamSession) replayEvents(lastEventID string) {
+	s.eventLogMu.Lock()
+	defer s.eventLogMu.Unlock()
+
+	found := false
+	for _, evt := range s.eventLog {
+		if found {
+			fmt.Fprintf(s.w, "id: %s\ndata: %s\n\n", evt.id, evt.data)
+			s.flusher.Flush()
+		}
+		if evt.id == lastEventID {
+			found = true
+		}
 	}
 }

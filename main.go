@@ -81,6 +81,10 @@ func main() {
 	// Initialize API handlers
 	handlers := api.New(dbStore, proxyMgr, authSvc, cfg.AdminLoginEnabled)
 
+	// Wire up the tools-changed callback so the proxy can broadcast
+	// notifications/tools/list_changed to connected SSE clients.
+	proxyMgr.SetOnToolsChanged(handlers.BroadcastToolsListChanged)
+
 	// Build root mux
 	mux := http.NewServeMux()
 

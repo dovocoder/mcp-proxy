@@ -47,6 +47,7 @@ func (s *Server) Tools() []mcp.Tool {
 	return []mcp.Tool{
 		{
 			Name:        "memory_store",
+			Title:       "Store Memory",
 			Description: "Store a new memory. IMPORTANT: Search first (memory_search) to avoid duplicates — update existing memories instead of creating new ones. Memories are organized into 'palaces' (top-level categories) and 'rooms' (sub-categories). Use meaningful palace names like 'projects', 'decisions', 'learnings', 'context', 'preferences'. Importance (0-100) controls recall priority — use 80-100 for critical gotchas/user corrections, 50 for general context, 20-30 for nice-to-know. Keep memories concise: one durable fact per entry, not paragraphs.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -81,6 +82,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "memory_recall",
+			Title:       "Recall Memories",
 			Description: "Recall memories from a specific palace, optionally filtered by room. Returns memories sorted by importance (highest first). Recalling a memory increments its access count (hindsight-style tracking).",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -103,6 +105,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "memory_search",
+			Title:       "Search Memories",
 			Description: "Search across all memories by keyword. Matches against content and tags. Results are sorted by importance and recency.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -122,6 +125,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "memory_update",
+			Title:       "Update Memory",
 			Description: "Update an existing memory's content, tags, palace, room, or importance. Useful for refining memories over time.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -157,6 +161,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "memory_delete",
+			Title:       "Delete Memory",
 			Description: "Delete a memory by ID. This is permanent.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -171,6 +176,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "memory_reflect",
+			Title:       "Reflect on Memory Usage",
 			Description: "Get an overview of memory usage patterns. Shows palace distribution, most-accessed memories, and chronicle timeline. Inspired by hindsight reflection — understand what memories are being used most.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -181,7 +187,7 @@ func (s *Server) Tools() []mcp.Tool {
 }
 
 // HandleToolCall processes a memory tool call and returns the result
-// wrapped in MCP content format: {content: [{type: "text", text: "..."}]}.
+// wrapped in MCP content format: {content: [{type: "text", text: "..."}], isError: false}.
 func (s *Server) HandleToolCall(toolName string, args json.RawMessage) (json.RawMessage, error) {
 	var result interface{}
 	var err error
@@ -200,14 +206,21 @@ func (s *Server) HandleToolCall(toolName string, args json.RawMessage) (json.Raw
 	case "memory_reflect":
 		result, err = s.handleReflect(args)
 	default:
+		// Unknown tool — protocol error (not a tool execution error)
 		return nil, fmt.Errorf("unknown memory tool: %s", toolName)
 	}
 
 	if err != nil {
-		return nil, err
+		// Tool execution errors should be returned as isError: true,
+		// not as JSON-RPC errors. This allows the LLM to self-correct.
+		return wrapMCPError(err.Error())
 	}
 
-	// Wrap in MCP content format
+	return wrapMCPContent(result)
+}
+
+// wrapMCPContent wraps a successful result in MCP content format.
+func wrapMCPContent(result interface{}) (json.RawMessage, error) {
 	textBytes, _ := json.Marshal(result)
 	return json.Marshal(map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -216,6 +229,20 @@ func (s *Server) HandleToolCall(toolName string, args json.RawMessage) (json.Raw
 				"text": string(textBytes),
 			},
 		},
+		"isError": false,
+	})
+}
+
+// wrapMCPError wraps a tool execution error in MCP content format.
+func wrapMCPError(message string) (json.RawMessage, error) {
+	return json.Marshal(map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": message,
+			},
+		},
+		"isError": true,
 	})
 }
 

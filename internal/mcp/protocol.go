@@ -82,12 +82,30 @@ type Tool struct {
 	Title       string          `json:"title,omitempty"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
+	Annotations json.RawMessage `json:"annotations,omitempty"`
 }
 
 // ToolListResult is the result of tools/list.
 type ToolListResult struct {
-	Tools       []Tool `json:"tools"`
-	NextCursor  string `json:"nextCursor,omitempty"`
+	Tools      []Tool `json:"tools"`
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
+// CallToolResult is the result of tools/call.
+// Per MCP spec, tool results MUST include isError field.
+type CallToolResult struct {
+	Content          []map[string]interface{} `json:"content"`
+	IsError          bool                     `json:"isError"`
+	StructuredContent json.RawMessage          `json:"structuredContent,omitempty"`
+}
+
+// ResourceTemplate is a parameterized resource template.
+type ResourceTemplate struct {
+	URITemplate string          `json:"uriTemplate"`
+	Name        string          `json:"name"`
+	Title       string          `json:"title,omitempty"`
+	Description string          `json:"description,omitempty"`
+	MimeType   string          `json:"mimeType,omitempty"`
 }
 
 // InitializeResult is the result of initialize.

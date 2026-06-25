@@ -44,6 +44,7 @@ func (s *Server) Tools() []mcp.Tool {
 	return []mcp.Tool{
 		{
 			Name:        "skill_list",
+			Title:       "List Skills",
 			Description: "List all available skills. Returns skill names, descriptions, categories, and versions. Use this first to discover what skills exist before loading one.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -57,6 +58,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "skill_load",
+			Title:       "Load Skill",
 			Description: "Load the full content of a skill by name. Returns the complete SKILL.md body — instructions, steps, commands, and pitfalls. Always call this before executing a skill's procedure.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -71,6 +73,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "skill_search",
+			Title:       "Search Skills",
 			Description: "Search skills by keyword. Matches against name, description, content, and tags. Use this when you're not sure which skill exists for a task.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -85,6 +88,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "skill_create",
+			Title:       "Create Skill",
 			Description: "Create a new skill. Skills are reusable procedures (SKILL.md format). Include: trigger conditions, numbered steps with exact commands, pitfalls, and verification steps. Search first to avoid duplicates.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -122,6 +126,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "skill_update",
+			Title:       "Update Skill",
 			Description: "Update an existing skill's content, description, tags, or version. Useful for refining skills after learning new pitfalls.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -157,6 +162,7 @@ func (s *Server) Tools() []mcp.Tool {
 		},
 		{
 			Name:        "skill_delete",
+			Title:       "Delete Skill",
 			Description: "Delete a skill by ID. This is permanent.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
@@ -173,7 +179,7 @@ func (s *Server) Tools() []mcp.Tool {
 }
 
 // HandleToolCall processes a skill tool call and returns the result
-// wrapped in MCP content format.
+// wrapped in MCP content format with isError field.
 func (s *Server) HandleToolCall(toolName string, args json.RawMessage) (json.RawMessage, error) {
 	var result interface{}
 	var err error
@@ -192,13 +198,21 @@ func (s *Server) HandleToolCall(toolName string, args json.RawMessage) (json.Raw
 	case "skill_delete":
 		result, err = s.handleDelete(args)
 	default:
+		// Unknown tool — protocol error (not a tool execution error)
 		return nil, fmt.Errorf("unknown skill tool: %s", toolName)
 	}
 
 	if err != nil {
-		return nil, err
+		// Tool execution errors should be returned as isError: true,
+		// not as JSON-RPC errors. This allows the LLM to self-correct.
+		return wrapMCPError(err.Error())
 	}
 
+	return wrapMCPContent(result)
+}
+
+// wrapMCPContent wraps a successful result in MCP content format.
+func wrapMCPContent(result interface{}) (json.RawMessage, error) {
 	textBytes, _ := json.Marshal(result)
 	return json.Marshal(map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -207,6 +221,20 @@ func (s *Server) HandleToolCall(toolName string, args json.RawMessage) (json.Raw
 				"text": string(textBytes),
 			},
 		},
+		"isError": false,
+	})
+}
+
+// wrapMCPError wraps a tool execution error in MCP content format.
+func wrapMCPError(message string) (json.RawMessage, error) {
+	return json.Marshal(map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": message,
+			},
+		},
+		"isError": true,
 	})
 }
 

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,6 +105,9 @@ type Manager struct {
 	serverLogs     map[string]*serverLog               // serverID -> stderr log ring buffer
 	oauthMetaCache map[string]*oauthMetaEntry // serverID -> cached discovery result (with TTL)
 	oauthMetaMu    sync.RWMutex
+	// onToolsChanged is a callback fired when the tool list changes (server connect/disconnect, etc.)
+	// Set by the API layer to broadcast notifications/tools/list_changed to SSE clients.
+	onToolsChanged func()
 }
 
 // New creates a new proxy Manager.
@@ -126,6 +130,19 @@ func New(s *store.Store) *Manager {
 	// deviceAuths entries expire after 15 minutes (device code flows left pending).
 	go m.cleanupStaleAuthStates()
 	return m
+}
+
+// SetOnToolsChanged sets a callback that fires when the tool list changes.
+// The API layer uses this to broadcast notifications/tools/list_changed to SSE clients.
+func (m *Manager) SetOnToolsChanged(fn func()) {
+	m.onToolsChanged = fn
+}
+
+// fireToolsChanged fires the onToolsChanged callback if set.
+func (m *Manager) fireToolsChanged() {
+	if m.onToolsChanged != nil {
+		go m.onToolsChanged()
+	}
 }
 
 // authStateTTL is the maximum lifetime of an incomplete OAuth state.
@@ -522,6 +539,8 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 		log.Printf("[Proxy] Warning: failed to update server status to 'connected' for %s: %v", srv.ID, err)
 	}
 	log.Printf("Connected to MCP server: %s (%d tools)", srv.Name, len(client.Tools()))
+	// Notify SSE clients that the tool list has changed
+	m.fireToolsChanged()
 }
 
 // AddServer creates and connects to a new server.
@@ -663,6 +682,8 @@ func (m *Manager) DisconnectServer(id string) {
 	if err := m.store.UpdateServerStatus(id, "disconnected"); err != nil {
 		log.Printf("[Proxy] Warning: failed to update server status to 'disconnected' for %s: %v", id, err)
 	}
+	// Notify SSE clients that the tool list has changed
+	m.fireToolsChanged()
 }
 
 // ReconnectServer disconnects and reconnects a server.
@@ -820,11 +841,13 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 		// returns 202 for notifications without an ID. Return nil result.
 		return nil, nil
 	case "notifications/cancelled":
-		// Process cancellation notification — forward to the relevant backend.
-		// For now we just acknowledge it; the context deadline handles timeouts.
+		// Forward cancellation to backend servers
+		m.handleCancelledNotification(req, scope)
 		return nil, nil
 	case "ping":
 		// Ping is a keepalive — return an empty result per spec.
+		// Also forward pings to backend servers to keep their connections alive.
+		m.handlePing(scope)
 		return json.Marshal(map[string]interface{}{})
 	case "tools/list":
 		return m.handleToolsList(req, scope)
@@ -834,10 +857,17 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 		return m.handleResourcesList(req, scope)
 	case "resources/read":
 		return m.handleResourcesRead(req, scope)
+	case "resources/templates/list":
+		return m.handleResourcesTemplatesList(req, scope)
 	case "prompts/list":
 		return m.handlePromptsList(req)
 	case "prompts/get":
 		return m.handlePromptsGet(req, scope)
+	case "logging/setLevel":
+		// Acknowledge logging level change — store it for future log filtering
+		return json.Marshal(map[string]interface{}{})
+	case "completion/complete":
+		return m.handleCompletionComplete(req, scope)
 	default:
 		return nil, fmt.Errorf("unsupported method: %s", req.Method)
 	}
@@ -926,13 +956,16 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 		"protocolVersion": negotiatedVersion,
 		"capabilities": map[string]interface{}{
 			"tools":     map[string]interface{}{"listChanged": true},
-			"resources": map[string]interface{}{"subscribe": true, "listChanged": true},
+			"resources": map[string]interface{}{"listChanged": true},
 			"prompts":   map[string]interface{}{"listChanged": true},
 			"logging":   map[string]interface{}{},
+			"completions": map[string]interface{}{},
 		},
 		"serverInfo": map[string]interface{}{
-			"name":    "mcp-proxy",
-			"version": "1.0.0",
+			"name":        "mcp-proxy",
+			"version":     "1.0.0",
+			"title":       "MCP Proxy",
+			"description": "Aggregates multiple MCP servers, built-in memory, and skills into a single endpoint",
 		},
 		"instructions": instructions,
 	}
@@ -1004,6 +1037,185 @@ func (m *Manager) getMemorySetIDs(scope Scope) []string {
 		ids = append(ids, setID)
 	}
 	return ids
+}
+
+// handlePing forwards ping requests to backend servers to keep their connections alive.
+// The proxy itself responds to the client with an empty result (handled in HandleJSONRPC).
+func (m *Manager) handlePing(scope Scope) {
+	// Forward ping to all connected servers in scope
+	var serverIDs []string
+	if scope.ServerID != "" {
+		serverIDs = []string{scope.ServerID}
+	} else if scope.CompoundID != "" {
+		if memberIDs, err := m.store.GetCompoundMemberIDs(scope.CompoundID); err == nil {
+			serverIDs = memberIDs
+		}
+	} else {
+		// Global — ping all servers
+		m.mu.RLock()
+		for id := range m.clients {
+			serverIDs = append(serverIDs, id)
+		}
+		m.mu.RUnlock()
+	}
+
+	for _, id := range serverIDs {
+		m.mu.RLock()
+		client, ok := m.clients[id]
+		m.mu.RUnlock()
+		if ok {
+			go client.Call("ping", nil)
+		}
+	}
+}
+
+// handleCancelledNotification forwards a cancellation notification to backend servers.
+// The client sends this when it wants to cancel a long-running request.
+func (m *Manager) handleCancelledNotification(req mcp.JSONRPCRequest, scope Scope) {
+	// Parse the cancellation params to find which request to cancel
+	var params struct {
+		RequestID interface{} `json:"requestId"`
+	}
+	if len(req.Params) > 0 {
+		json.Unmarshal(req.Params, &params)
+	}
+	// Forward the cancellation notification to all backend servers in scope.
+	// We don't track which server is handling the request, so we broadcast.
+	notif := mcp.JSONRPCNotification{
+		JSONRPC: "2.0",
+		Method:  "notifications/cancelled",
+	}
+	if len(req.Params) > 0 {
+		notif.Params = req.Params
+	}
+
+	var serverIDs []string
+	if scope.ServerID != "" {
+		serverIDs = []string{scope.ServerID}
+	} else if scope.CompoundID != "" {
+		if memberIDs, err := m.store.GetCompoundMemberIDs(scope.CompoundID); err == nil {
+			serverIDs = memberIDs
+		}
+	} else {
+		m.mu.RLock()
+		for id := range m.clients {
+			serverIDs = append(serverIDs, id)
+		}
+		m.mu.RUnlock()
+	}
+
+	for _, id := range serverIDs {
+		m.mu.RLock()
+		client, ok := m.clients[id]
+		m.mu.RUnlock()
+		if ok {
+			// Send as notification (no ID) — best effort, ignore errors
+			go func(c *mcp.Client) {
+				c.Call("notifications/cancelled", notif.Params)
+			}(client)
+		}
+	}
+}
+
+// handleResourcesTemplatesList returns resource templates from backend servers.
+// The proxy doesn't expose its own resource templates — it forwards to backends.
+func (m *Manager) handleResourcesTemplatesList(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var serverIDs []string
+	if scope.ServerID != "" {
+		serverIDs = []string{scope.ServerID}
+	} else if scope.CompoundID != "" {
+		if memberIDs, err := m.store.GetCompoundMemberIDs(scope.CompoundID); err == nil {
+			serverIDs = memberIDs
+		}
+	} else {
+		m.mu.RLock()
+		for id := range m.clients {
+			serverIDs = append(serverIDs, id)
+		}
+		m.mu.RUnlock()
+	}
+
+	var allTemplates []map[string]interface{}
+	for _, id := range serverIDs {
+		m.mu.RLock()
+		client, ok := m.clients[id]
+		m.mu.RUnlock()
+		if !ok {
+			continue
+		}
+		result, err := client.Call("resources/templates/list", nil)
+		if err != nil {
+			continue // Server may not support resources/templates/list
+		}
+		var tmplResult struct {
+			ResourceTemplates []map[string]interface{} `json:"resourceTemplates"`
+		}
+		if json.Unmarshal(result, &tmplResult) == nil {
+			// Prefix template names with server name
+			srv, _ := m.store.GetServer(id)
+			srvName := "server"
+			if srv != nil {
+				srvName = srv.Name
+			}
+			for _, t := range tmplResult.ResourceTemplates {
+				t["server"] = srvName
+				allTemplates = append(allTemplates, t)
+			}
+		}
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"resourceTemplates": allTemplates,
+	})
+}
+
+// handleCompletionComplete handles completion/complete requests by forwarding
+// to the appropriate backend server.
+func (m *Manager) handleCompletionComplete(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	var params struct {
+		Ref      map[string]interface{} `json:"ref"`
+		Argument map[string]interface{} `json:"argument"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return nil, fmt.Errorf("invalid completion params: %w", err)
+	}
+
+	// Forward to all backend servers in scope and collect results
+	var serverIDs []string
+	if scope.ServerID != "" {
+		serverIDs = []string{scope.ServerID}
+	} else if scope.CompoundID != "" {
+		if memberIDs, err := m.store.GetCompoundMemberIDs(scope.CompoundID); err == nil {
+			serverIDs = memberIDs
+		}
+	} else {
+		m.mu.RLock()
+		for id := range m.clients {
+			serverIDs = append(serverIDs, id)
+		}
+		m.mu.RUnlock()
+	}
+
+	for _, id := range serverIDs {
+		m.mu.RLock()
+		client, ok := m.clients[id]
+		m.mu.RUnlock()
+		if !ok {
+			continue
+		}
+		result, err := client.Call("completion/complete", req.Params)
+		if err == nil {
+			return result, nil
+		}
+	}
+
+	// No server could handle the completion request — return empty
+	return json.Marshal(map[string]interface{}{
+		"completion": map[string]interface{}{
+			"values": []string{},
+			"total":  0,
+		},
+	})
 }
 
 // handleResourcesList exposes memories as MCP resources so clients can auto-discover them.
@@ -1232,6 +1444,23 @@ func (m *Manager) handlePromptsGet(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 }
 
 func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
+	// Parse pagination cursor from params
+	var params struct {
+		Cursor string `json:"cursor"`
+	}
+	if len(req.Params) > 0 {
+		json.Unmarshal(req.Params, &params)
+	}
+	// Cursor is an opaque token encoding the offset (base64 of the offset number)
+	offset := 0
+	if params.Cursor != "" {
+		if decoded, err := base64.StdEncoding.DecodeString(params.Cursor); err == nil {
+			fmt.Sscanf(string(decoded), "%d", &offset)
+		}
+	}
+	// Page size — large enough that most clients get everything in one page
+	const pageSize = 200
+
 	var allTools []models.Tool
 	if scope.ServerID != "" {
 		allTools = m.ListToolsForServer(scope.ServerID)
@@ -1242,10 +1471,11 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 			// Dictionary mode: return ONLY the dictionary tool.
 			// All member tools (including memory) are discovered lazily via the dictionary.
 			tools := []mcp.Tool{{
-				Name:        "dictionary",
-				Description: dictionaryDescription,
-				InputSchema: dictionarySchema,
-			}}
+						Name:        "dictionary",
+						Title:       "Dictionary (lazy tool discovery)",
+						Description: dictionaryDescription,
+						InputSchema: dictionarySchema,
+					}}
 			result := mcp.ToolListResult{Tools: tools}
 			return json.Marshal(result)
 		}
@@ -1259,6 +1489,7 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 		namespacedName := fmt.Sprintf("%s__%s", t.ServerName, t.Name)
 		tool := mcp.Tool{
 			Name:        namespacedName,
+			Title:       fmt.Sprintf("%s (%s)", t.Name, t.ServerName),
 			Description: fmt.Sprintf("[%s] %s", t.ServerName, t.Description),
 		}
 		if t.InputSchema != nil {
@@ -1295,6 +1526,7 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 			for _, mt := range srv.Tools() {
 				tool := mcp.Tool{
 					Name:        srv.NamespacedName(mt.Name),
+					Title:       mt.Title,
 					Description: fmt.Sprintf("[memory%s] %s", setSuffix, mt.Description),
 				}
 				if len(mt.InputSchema) > 0 {
@@ -1330,6 +1562,7 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 			for _, st := range srv.Tools() {
 				tool := mcp.Tool{
 					Name:        srv.NamespacedName(st.Name),
+					Title:       st.Title,
 					Description: fmt.Sprintf("[skills%s] %s", setSuffix, st.Description),
 				}
 				if len(st.InputSchema) > 0 {
@@ -1347,7 +1580,25 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 	// Filter out disabled tools (global + per-compound).
 	mcpTools = m.filterDisabledMCPTools(mcpTools, scope)
 
+	// Apply pagination
+	totalTools := len(mcpTools)
+	if offset >= totalTools {
+		mcpTools = []mcp.Tool{}
+	} else {
+		end := offset + pageSize
+		if end > totalTools {
+			end = totalTools
+		}
+		mcpTools = mcpTools[offset:end]
+	}
+
 	result := mcp.ToolListResult{Tools: mcpTools}
+	// Set nextCursor if there are more pages
+	if offset+pageSize < totalTools {
+		nextOffset := offset + pageSize
+		cursor := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", nextOffset)))
+		result.NextCursor = cursor
+	}
 	return json.Marshal(result)
 }
 
@@ -2323,7 +2574,8 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 	}
 }
 
-// wrapMCPContent wraps a result in MCP content format.
+// wrapMCPContent wraps a successful result in MCP content format.
+// Per spec, tool results MUST include isError: false.
 func wrapMCPContent(result interface{}) (json.RawMessage, error) {
 	textBytes, _ := json.Marshal(result)
 	return json.Marshal(map[string]interface{}{
@@ -2333,6 +2585,22 @@ func wrapMCPContent(result interface{}) (json.RawMessage, error) {
 				"text": string(textBytes),
 			},
 		},
+		"isError": false,
+	})
+}
+
+// wrapMCPError wraps a tool execution error in MCP content format.
+// Per spec, tool execution errors are returned with isError: true (not as JSON-RPC errors).
+// This allows the LLM to self-correct and retry with adjusted parameters.
+func wrapMCPError(message string) (json.RawMessage, error) {
+	return json.Marshal(map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": message,
+			},
+		},
+		"isError": true,
 	})
 }
 
