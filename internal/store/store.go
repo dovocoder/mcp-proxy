@@ -98,6 +98,7 @@ func (s *Store) Close() error {
 }
 
 func migrate(db *sql.DB) error {
+	log.Print("[store] running database migrations...")
 	schema := `
 	CREATE TABLE IF NOT EXISTS servers (
 		id TEXT PRIMARY KEY,
@@ -346,6 +347,7 @@ func migrate(db *sql.DB) error {
 	// Create default task board set if it doesn't exist
 	_, _ = db.Exec(`INSERT OR IGNORE INTO task_board_sets (id, name, slug, description, is_default, created_at) VALUES ('default', 'Default', '', '', 1, datetime('now'))`)
 
+	log.Print("[store] migrations complete")
 	return nil
 }
 

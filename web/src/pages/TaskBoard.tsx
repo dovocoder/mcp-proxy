@@ -9,6 +9,7 @@ import {
   User,
   Tag,
   Calendar,
+  FolderPlus,
 } from 'lucide-react';
 import {
   tasks as tasksApi,
@@ -16,6 +17,7 @@ import {
   type TaskStatus,
   type TaskPriority,
   type TaskInput,
+  type TaskBoardSet,
 } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import {
@@ -53,6 +55,14 @@ import { cn } from '@/lib/utils';
 const STATUS_OPTIONS: TaskStatus[] = ['todo', 'in_progress', 'done', 'blocked'];
 const PRIORITY_OPTIONS: TaskPriority[] = ['low', 'medium', 'high', 'urgent'];
 
+const PRIORITY_LEVEL_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: 'P1 - Critical' },
+  { value: 2, label: 'P2 - High' },
+  { value: 3, label: 'P3 - Normal' },
+  { value: 4, label: 'P4 - Low' },
+  { value: 5, label: 'P5 - Backlog' },
+];
+
 const STATUS_STYLES: Record<TaskStatus, string> = {
   todo: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
   in_progress: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
@@ -66,6 +76,16 @@ const PRIORITY_STYLES: Record<TaskPriority, string> = {
   high: 'bg-orange-500/15 text-orange-400 border-orange-500/30',
   urgent: 'bg-red-500/15 text-red-400 border-red-500/30',
 };
+
+const PRIORITY_LEVEL_STYLES: Record<number, string> = {
+  1: 'bg-red-500/15 text-red-400 border-red-500/30',
+  2: 'bg-orange-500/15 text-orange-400 border-orange-500/30',
+  3: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+  4: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
+  5: 'bg-gray-500/10 text-gray-500 border-gray-500/20',
+};
+
+const DEFAULT_BOARD_ID = 'default';
 
 function StatusBadge({ status }: { status: TaskStatus }) {
   return (
@@ -83,22 +103,46 @@ function PriorityBadge({ priority }: { priority: TaskPriority }) {
   );
 }
 
+function PriorityLevelBadge({ level }: { level: number }) {
+  const style = PRIORITY_LEVEL_STYLES[level] ?? PRIORITY_LEVEL_STYLES[3];
+  const label = PRIORITY_LEVEL_OPTIONS.find((o) => o.value === level)?.label ?? `P${level}`;
+  return (
+    <Badge variant="outline" className={cn('font-mono', style)}>
+      {label}
+    </Badge>
+  );
+}
+
 export default function TaskBoard() {
   const queryClient = useQueryClient();
+  const [selectedBoard, setSelectedBoard] = useState<string>(DEFAULT_BOARD_ID);
   const [statusFilter, setStatusFilter] = useState<TaskStatus | ''>('');
   const [priorityFilter, setPriorityFilter] = useState<TaskPriority | ''>('');
   const [editing, setEditing] = useState<Task | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [newBoardOpen, setNewBoardOpen] = useState(false);
+  const [deleteBoardOpen, setDeleteBoardOpen] = useState(false);
+
+  const { data: boards } = useQuery({
+    queryKey: ['task-board-sets'],
+    queryFn: tasksApi.listSets,
+  });
+
+  const currentBoard = boards?.find((b) => b.id === selectedBoard);
 
   const { data: stats } = useQuery({
-    queryKey: ['task-stats'],
-    queryFn: () => tasksApi.stats(),
+    queryKey: ['task-stats', selectedBoard],
+    queryFn: () => tasksApi.stats(selectedBoard),
   });
 
   const { data: allTasks } = useQuery({
-    queryKey: ['tasks', statusFilter, priorityFilter],
+    queryKey: ['tasks', statusFilter, priorityFilter, selectedBoard],
     queryFn: () =>
-      tasksApi.list(statusFilter || undefined, priorityFilter || undefined),
+      tasksApi.list(
+        statusFilter || undefined,
+        priorityFilter || undefined,
+        selectedBoard,
+      ),
   });
 
   const deleteMutation = useMutation({
@@ -109,8 +153,21 @@ export default function TaskBoard() {
     },
   });
 
+  const deleteBoardMutation = useMutation({
+    mutationFn: tasksApi.deleteSet,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['task-board-sets'] });
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['task-stats'] });
+      setSelectedBoard(DEFAULT_BOARD_ID);
+      setDeleteBoardOpen(false);
+    },
+  });
+
   const displayTasks = allTasks ?? [];
   const totalTasks = stats?.total ?? displayTasks.length;
+  const boardName = (id: string) =>
+    id === DEFAULT_BOARD_ID ? 'Default' : boards?.find((b) => b.id === id)?.name ?? id;
 
   return (
     <div className="space-y-6">
@@ -119,7 +176,7 @@ export default function TaskBoard() {
         <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold text-foreground">Task Board</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            Manage and track your tasks across statuses and priorities.
+            {currentBoard?.description || `Board: ${currentBoard?.name ?? 'Default'}`}
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -133,9 +190,64 @@ export default function TaskBoard() {
             }
           />
           <DialogContent className="sm:max-w-2xl">
-            <TaskForm onSaved={() => setCreateOpen(false)} />
+            <TaskForm boardId={selectedBoard} onSaved={() => setCreateOpen(false)} />
           </DialogContent>
         </Dialog>
+      </div>
+
+      {/* Board selector */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col gap-1.5 min-w-[200px]">
+          <Label htmlFor="board-select" className="text-xs text-muted-foreground">
+            Board
+          </Label>
+          <Select
+            value={selectedBoard}
+            onValueChange={(val) => setSelectedBoard(val ?? DEFAULT_BOARD_ID)}
+          >
+            <SelectTrigger id="board-select" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {boards?.map((b) => (
+                <SelectItem key={b.id} value={b.id}>
+                  {b.name}
+                  {b.is_default && ' (default)'}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <Dialog open={newBoardOpen} onOpenChange={setNewBoardOpen}>
+          <DialogTrigger
+            render={
+              <Button variant="outline" size="sm" className="self-end shrink-0">
+                <FolderPlus className="size-4" />
+                <span className="hidden sm:inline">New Board</span>
+                <span className="sm:hidden">Board</span>
+              </Button>
+            }
+          />
+          <DialogContent className="sm:max-w-md">
+            <NewBoardForm
+              onSaved={(id) => {
+                setNewBoardOpen(false);
+                if (id) setSelectedBoard(id);
+              }}
+            />
+          </DialogContent>
+        </Dialog>
+        {currentBoard && !currentBoard.is_default && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="self-end shrink-0 text-muted-foreground hover:text-destructive"
+            onClick={() => setDeleteBoardOpen(true)}
+            aria-label={`Delete board ${currentBoard.name}`}
+          >
+            <Trash2 className="size-4" />
+          </Button>
+        )}
       </div>
 
       {/* Stats summary */}
@@ -224,6 +336,7 @@ export default function TaskBoard() {
             <TaskCard
               key={task.id}
               task={task}
+              boardName={task.board_id !== DEFAULT_BOARD_ID ? boardName(task.board_id) : undefined}
               onDelete={() => deleteMutation.mutate(task.id)}
               onEdit={() => setEditing(task)}
             />
@@ -235,10 +348,30 @@ export default function TaskBoard() {
       {editing && (
         <Dialog open onOpenChange={(open) => !open && setEditing(null)}>
           <DialogContent className="sm:max-w-2xl">
-            <TaskForm task={editing} onSaved={() => setEditing(null)} />
+            <TaskForm
+              task={editing}
+              boardId={editing.board_id}
+              onSaved={() => setEditing(null)}
+            />
           </DialogContent>
         </Dialog>
       )}
+
+      {/* Delete board confirmation */}
+      <ConfirmDialog
+        open={deleteBoardOpen}
+        onOpenChange={setDeleteBoardOpen}
+        title="Delete Board"
+        description="Delete board"
+        itemName={currentBoard?.name}
+        confirmText="Delete Board"
+        loading={deleteBoardMutation.isPending}
+        onConfirm={() => {
+          if (currentBoard) {
+            deleteBoardMutation.mutate(currentBoard.id);
+          }
+        }}
+      />
     </div>
   );
 }
@@ -266,10 +399,12 @@ function StatCard({
 
 function TaskCard({
   task,
+  boardName,
   onDelete,
   onEdit,
 }: {
   task: Task;
+  boardName?: string;
   onDelete: () => void;
   onEdit: () => void;
 }) {
@@ -284,6 +419,12 @@ function TaskCard({
             <div className="flex items-center gap-2 flex-wrap min-w-0">
               <StatusBadge status={task.status} />
               <PriorityBadge priority={task.priority} />
+              <PriorityLevelBadge level={task.priority_level} />
+              {boardName && (
+                <Badge variant="outline" className="text-xs bg-purple-500/15 text-purple-400 border-purple-500/30">
+                  {boardName}
+                </Badge>
+              )}
               <span className="font-medium text-foreground truncate">{task.title}</span>
             </div>
             <div className="flex items-center gap-1 shrink-0">
@@ -360,9 +501,11 @@ function TaskCard({
 
 function TaskForm({
   task,
+  boardId,
   onSaved,
 }: {
   task?: Task;
+  boardId: string;
   onSaved: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -370,6 +513,7 @@ function TaskForm({
   const [description, setDescription] = useState(task?.description ?? '');
   const [status, setStatus] = useState<TaskStatus>(task?.status ?? 'todo');
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 'medium');
+  const [priorityLevel, setPriorityLevel] = useState<number>(task?.priority_level ?? 3);
   const [assignee, setAssignee] = useState(task?.assignee ?? '');
   const [dueDate, setDueDate] = useState(task?.due_date ?? '');
   const [tags, setTags] = useState((task?.tags ?? []).join(', '));
@@ -382,14 +526,15 @@ function TaskForm({
         description,
         status,
         priority,
+        priority_level: priorityLevel,
         assignee,
         due_date: dueDate,
         tags: tagArray,
       };
       if (task) {
-        return tasksApi.update(task.id, payload);
+        return tasksApi.update(task.id, { ...payload, board_id: boardId });
       }
-      return tasksApi.create(payload);
+      return tasksApi.create({ ...payload, board_id: boardId });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
@@ -459,6 +604,25 @@ function TaskForm({
           </div>
         </div>
 
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="task-priority-level">Priority Level</Label>
+          <Select
+            value={String(priorityLevel)}
+            onValueChange={(val) => setPriorityLevel(Number(val))}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PRIORITY_LEVEL_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={String(o.value)}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="task-assignee">Assignee (optional)</Label>
@@ -509,6 +673,64 @@ function TaskForm({
               : task
                 ? 'Update Task'
                 : 'Create Task'}
+          </Button>
+        </DialogFooter>
+      </form>
+    </>
+  );
+}
+
+function NewBoardForm({ onSaved }: { onSaved: (id?: string) => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+
+  const saveMutation = useMutation({
+    mutationFn: () => tasksApi.createSet({ name, description }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['task-board-sets'] });
+      onSaved(data.id);
+    },
+  });
+
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>New Task Board</DialogTitle>
+        <DialogDescription>
+          Create a new task board to organize tasks for a specific project or context.
+        </DialogDescription>
+      </DialogHeader>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          saveMutation.mutate();
+        }}
+        className="flex flex-col gap-4"
+      >
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="board-name">Name</Label>
+          <Input
+            id="board-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Project Alpha"
+            required
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="board-description">Description (optional)</Label>
+          <Input
+            id="board-description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Tasks for the Alpha project"
+          />
+        </div>
+        <DialogFooter>
+          <DialogClose render={<Button type="button" variant="outline">Cancel</Button>} />
+          <Button type="submit" disabled={saveMutation.isPending || !name}>
+            {saveMutation.isPending ? 'Creating...' : 'Create Board'}
           </Button>
         </DialogFooter>
       </form>
