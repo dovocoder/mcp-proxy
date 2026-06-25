@@ -47,7 +47,7 @@ func (s *Server) Tools() []mcp.Tool {
 	return []mcp.Tool{
 		{
 			Name:        "memory_store",
-			Description: "Store a new memory. Memories are organized into 'palaces' (top-level categories) and 'rooms' (sub-categories), inspired by the memory palace technique. Use meaningful palace names like 'projects', 'decisions', 'learnings', 'context'. Importance (0-100) controls recall priority — higher values surface first.",
+			Description: "Store a new memory. IMPORTANT: Search first (memory_search) to avoid duplicates — update existing memories instead of creating new ones. Memories are organized into 'palaces' (top-level categories) and 'rooms' (sub-categories). Use meaningful palace names like 'projects', 'decisions', 'learnings', 'context', 'preferences'. Importance (0-100) controls recall priority — use 80-100 for critical gotchas/user corrections, 50 for general context, 20-30 for nice-to-know. Keep memories concise: one durable fact per entry, not paragraphs.",
 			InputSchema: mustJSON(map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

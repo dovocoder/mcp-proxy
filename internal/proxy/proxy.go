@@ -660,9 +660,40 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest) (json.RawMessage, err
 			"name":    "mcp-proxy",
 			"version": "1.0.0",
 		},
+		"instructions": memoryInstructions,
 	}
 	return json.Marshal(result)
 }
+
+// memoryInstructions provides guidance to LLM clients on how to use the
+// built-in memory tools effectively. Returned in the MCP initialize response.
+const memoryInstructions = `This server provides persistent memory tools (memory_store, memory_recall, memory_search, memory_update, memory_delete, memory_reflect). Use them wisely:
+
+## When to store memories
+- Durable facts: user preferences, environment details, project conventions, API endpoints, tool quirks
+- Important decisions: architectural choices, trade-off rationale, why something was done a certain way
+- Hard-won knowledge: debugging insights, non-obvious configurations, gotchas discovered through trial and error
+- User corrections: when the user corrects your approach — save what they preferred instead
+
+## When NOT to store memories
+- Transient state: task progress, current step, "what I'm doing now"
+- Ephemeral context: conversation summaries, session outcomes, temporary TODO state
+- Trivial details: anything easily re-discovered (file paths that can be listed, default values, API response shapes)
+- Raw data dumps: logs, API responses, command output — extract the signal, not the noise
+- Duplicates: search first before storing — update existing memories instead of creating new ones
+
+## How to write good memories
+- Be concise: one fact per memory, not paragraphs. A memory should be useful in 1-2 sentences.
+- Use tags: add 2-4 relevant tags for searchability (e.g. ["golang", "security", "config"])
+- Choose palaces wisely: "projects", "decisions", "learnings", "context", "preferences" — be consistent
+- Set importance: 80-100 for critical gotchas/user corrections, 50 for general context, 20-30 for nice-to-know
+- Update, don't duplicate: use memory_search before storing. If a similar memory exists, use memory_update.
+
+## Memory lifecycle
+1. Before storing: search (memory_search) to check for existing similar memories
+2. When recalling: use memory_recall for palace browsing, memory_search for specific lookups
+3. Periodically: use memory_reflect to see what's being used and what's stale
+4. When facts change: update the existing memory (memory_update) rather than creating a new one`
 
 func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.RawMessage, error) {
 	var allTools []models.Tool
