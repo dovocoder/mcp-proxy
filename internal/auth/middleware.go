@@ -105,6 +105,10 @@ func (rl *rateLimiter) cleanup() {
 // LoginRateLimitMiddleware applies rate limiting to login attempts.
 var loginLimiter = newRateLimiter(time.Minute, 10)
 
+// apiLimiter limits MCP API endpoint requests per IP to prevent brute-force
+// and DoS attacks. 120 req/min is generous for normal MCP client usage.
+var apiLimiter = newRateLimiter(time.Minute, 120)
+
 func (a *AuthService) LoginRateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
@@ -192,11 +196,14 @@ func CORSMiddleware(next http.Handler) http.Handler {
 				strings.HasPrefix(r.URL.Path, "/api/oauth/")
 
 			if isPublicPath {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				// Public OAuth discovery endpoints: allow any origin but WITHOUT credentials.
+				// Returning Access-Control-Allow-Credentials: true with a reflected origin
+				// would allow cross-origin sites to make authenticated requests.
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, MCP-Protocol-Version, Mcp-Session-Id")
-				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Access-Control-Max-Age", "3600")
+				// Deliberately NOT setting Allow-Credentials: true
 			} else {
 				// Only allow same-origin requests (the frontend is served by the same server)
 				// Check if the Origin matches the request Host
@@ -231,6 +238,7 @@ func StartCleanupRoutine() {
 		defer ticker.Stop()
 		for range ticker.C {
 			loginLimiter.cleanup()
+			apiLimiter.cleanup()
 		}
 	}()
 }
@@ -251,4 +259,20 @@ func RateLimitRemaining(ip string) (int, string) {
 		remaining = 0
 	}
 	return remaining, strconv.Itoa(remaining)
+}
+
+// APIRateLimitMiddleware applies rate limiting to MCP API endpoints.
+// Returns 429 when a client exceeds 120 requests per minute.
+func (a *AuthService) APIRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		if !apiLimiter.allow(ip) {
+			w.Header().Set("Retry-After", "60")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"Rate limit exceeded. Try again later."}`))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

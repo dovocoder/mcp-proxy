@@ -240,8 +240,19 @@ func (a *AuthService) JWTMiddleware(next http.Handler) http.Handler {
 
 // APIKeyMiddleware protects MCP proxy routes requiring API key auth.
 // Also accepts OIDC access tokens (Bearer) when OIDC is configured.
+// Includes per-IP rate limiting to prevent brute-force and DoS attacks.
 func (a *AuthService) APIKeyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Rate limit check — 120 req/min per IP
+		ip := clientIP(r)
+		if !apiLimiter.allow(ip) {
+			w.Header().Set("Retry-After", "60")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"Rate limit exceeded. Try again later."}`))
+			return
+		}
+
 		// Try API key first (X-API-Key, Bearer mcp_*, query param)
 		keyString := ExtractAPIKey(r)
 		if keyString != "" {
@@ -343,10 +354,18 @@ func writeAuthError(w http.ResponseWriter, message string) {
 }
 
 // EnsureDefaultAdmin creates a default admin user if none exists.
+// If the admin user already exists, it logs a warning if the provided
+// password doesn't match the stored hash (indicating MCP_PROXY_ADMIN_PASS
+// was changed but not applied via the UI/API).
 func (a *AuthService) EnsureDefaultAdmin(username, password string) error {
-	_, err := a.store.GetUserByUsername(username)
-	if err == nil {
-		// User exists, update password if needed
+	existing, err := a.store.GetUserByUsername(username)
+	if err == nil && existing != nil {
+		// User exists — check if the provided password matches
+		if !VerifyPassword(existing.PasswordHash, password) {
+			log.Printf("WARNING: MCP_PROXY_ADMIN_PASS does not match the stored password for user '%s'. "+
+				"The password was not rotated. Change it via the web UI or API, or delete the user to re-create with the new password.",
+				username)
+		}
 		return nil
 	}
 

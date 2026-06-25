@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -1915,9 +1916,9 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify state from cookie
+	// Verify state from cookie (constant-time comparison to prevent timing attacks)
 	cookie, err := r.Cookie("oidc_state")
-	if err != nil || cookie.Value != state {
+	if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(state)) != 1 {
 		writeError(w, http.StatusBadRequest, "Invalid or expired state")
 		return
 	}
@@ -2123,7 +2124,7 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 
 	oidc := h.auth.OIDC()
 	clientID := oidc.ClientID()
-	clientSecret := oidc.ClientSecret()
+	_ = oidc.ClientSecret() // used only for upstream token exchange, never returned to caller
 
 	if clientID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "No OAuth client configured"})
@@ -2167,12 +2168,11 @@ func (h *Handlers) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		resp["redirect_uris"] = []string{"http://localhost/callback"}
 	}
 
-	// Only include client_secret for confidential clients
-	if clientSecret != "" {
-		resp["client_secret"] = clientSecret
-		resp["client_secret_expires_at"] = 0 // never expires
-		resp["token_endpoint_auth_method"] = "client_secret_post"
-	}
+	// Do NOT return client_secret in the response.
+	// The proxy is a public client (token_endpoint_auth_method: "none") using PKCE.
+	// Leaking the secret allows anyone to impersonate the proxy to the OIDC provider.
+	// If a confidential client is needed in the future, the secret should only be
+	// stored server-side and never returned to the caller.
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

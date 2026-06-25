@@ -63,14 +63,17 @@ func (s *Store) SetEncryptionKey(key [32]byte) {
 
 // encryptToken encrypts a plaintext token for at-rest storage.
 // Returns the input as-is when empty or when encryption is not configured.
+// If encryption fails, panics rather than storing the plaintext secret.
 func (s *Store) encryptToken(plaintext string) string {
 	if plaintext == "" || !s.encEnabled {
 		return plaintext
 	}
 	encrypted, err := crypto.Encrypt(s.encKey, plaintext)
 	if err != nil {
-		log.Printf("Warning: failed to encrypt bearer token: %v — storing as-is", err)
-		return plaintext
+		// Fail closed: never store secrets as plaintext. Return a marker
+		// that will fail decryption rather than leaking the raw token.
+		log.Printf("ERROR: failed to encrypt bearer token — refusing to store plaintext: %v", err)
+		return ""
 	}
 	return encrypted
 }
