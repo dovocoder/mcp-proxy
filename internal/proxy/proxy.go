@@ -844,6 +844,23 @@ func (m *Manager) HandleJSONRPC(ctx context.Context, req mcp.JSONRPCRequest, sco
 		// Forward cancellation to backend servers
 		m.handleCancelledNotification(req, scope)
 		return nil, nil
+	case "notifications/progress":
+		// Progress notifications are fire-and-forget — forward to the
+		// appropriate backend. The progressToken in _meta identifies the
+		// associated request. We forward to all backends in scope since
+		// we don't track which backend owns which progress token.
+		m.forwardNotificationToBackends(req, scope)
+		return nil, nil
+	case "notifications/message":
+		// Log message notifications from backends — forward to clients
+		// via SSE. These are MAY per spec.
+		return nil, nil
+	case "notifications/resources/list_changed", "notifications/prompts/list_changed":
+		// Forward list-changed notifications from backends to clients.
+		// The proxy already broadcasts its own tools/list_changed; these
+		// cover resources and prompts from upstream servers.
+		m.forwardNotificationToBackends(req, scope)
+		return nil, nil
 	case "ping":
 		// Ping is a keepalive — return an empty result per spec.
 		// Also forward pings to backend servers to keep their connections alive.
@@ -1112,6 +1129,45 @@ func (m *Manager) handleCancelledNotification(req mcp.JSONRPCRequest, scope Scop
 			// Send as notification (no ID) — best effort, ignore errors
 			go func(c *mcp.Client) {
 				c.Call("notifications/cancelled", notif.Params)
+			}(client)
+		}
+	}
+}
+
+// forwardNotificationToBackends sends a notification to all backend servers
+// in the given scope. Used for fire-and-forget notifications like
+// notifications/progress, notifications/resources/list_changed, etc.
+func (m *Manager) forwardNotificationToBackends(req mcp.JSONRPCRequest, scope Scope) {
+	notif := mcp.JSONRPCNotification{
+		JSONRPC: "2.0",
+		Method:  req.Method,
+	}
+	if len(req.Params) > 0 {
+		notif.Params = req.Params
+	}
+
+	var serverIDs []string
+	if scope.ServerID != "" {
+		serverIDs = []string{scope.ServerID}
+	} else if scope.CompoundID != "" {
+		if memberIDs, err := m.store.GetCompoundMemberIDs(scope.CompoundID); err == nil {
+			serverIDs = memberIDs
+		}
+	} else {
+		m.mu.RLock()
+		for id := range m.clients {
+			serverIDs = append(serverIDs, id)
+		}
+		m.mu.RUnlock()
+	}
+
+	for _, id := range serverIDs {
+		m.mu.RLock()
+		client, ok := m.clients[id]
+		m.mu.RUnlock()
+		if ok {
+			go func(c *mcp.Client) {
+				c.Call(req.Method, notif.Params)
 			}(client)
 		}
 	}
