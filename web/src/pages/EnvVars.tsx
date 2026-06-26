@@ -70,6 +70,7 @@ export default function EnvVars() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [copiedVal, setCopiedVal] = useState<string | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
+  const [copiedRef, setCopiedRef] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<EnvVar | null>(null);
 
@@ -148,6 +149,13 @@ export default function EnvVars() {
     navigator.clipboard.writeText(lines);
     setCopiedAll(true);
     setTimeout(() => setCopiedAll(false), 2000);
+  };
+
+  const copyRef = (ev: EnvVar) => {
+    const ref = `$[${ev.project}:${ev.environment}:${ev.key}]`;
+    navigator.clipboard.writeText(ref);
+    setCopiedRef(ev.id);
+    setTimeout(() => setCopiedRef(null), 2000);
   };
 
   const toggleValue = (id: string) => {
@@ -480,6 +488,16 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
                             ref
                           </Badge>
                         )}
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => copyRef(ev)}
+                          aria-label="Copy $[project:env:var] reference"
+                          title={`Copy $[${ev.project}:${ev.environment}:${ev.key}]`}
+                          className="text-muted-foreground/50 hover:text-foreground"
+                        >
+                          {copiedRef === ev.id ? <Check className="size-3" /> : <Link2 className="size-3" />}
+                        </Button>
                       </div>
                       <div className="flex items-center gap-2 mt-1">
                         <code className="text-xs text-muted-foreground font-mono break-all">
