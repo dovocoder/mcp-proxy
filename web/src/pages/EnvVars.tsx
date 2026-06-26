@@ -67,6 +67,9 @@ export default function EnvVars() {
   const [dialog, setDialog] = useState<DialogState>(emptyDialog);
   const [showValues, setShowValues] = useState<Record<string, boolean>>({});
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [copiedVal, setCopiedVal] = useState<string | null>(null);
+  const [copiedAll, setCopiedAll] = useState(false);
   const [formError, setFormError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<EnvVar | null>(null);
 
@@ -119,6 +122,32 @@ export default function EnvVars() {
     navigator.clipboard.writeText(text);
     setCopiedUrl(text);
     setTimeout(() => setCopiedUrl(null), 2000);
+  };
+
+  const copyKey = (key: string) => {
+    navigator.clipboard.writeText(key);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const copyValue = (ev: EnvVar) => {
+    const val = ev.resolved_value && ev.resolved_value !== ev.value ? ev.resolved_value : ev.value;
+    navigator.clipboard.writeText(val);
+    setCopiedVal(ev.id);
+    setTimeout(() => setCopiedVal(null), 2000);
+  };
+
+  const copyAllAsEnv = () => {
+    if (!envVars || envVars.length === 0) return;
+    const lines = envVars
+      .map((ev) => {
+        const val = ev.resolved_value && ev.resolved_value !== ev.value ? ev.resolved_value : ev.value;
+        return `${ev.key}=${val}`;
+      })
+      .join('\n');
+    navigator.clipboard.writeText(lines);
+    setCopiedAll(true);
+    setTimeout(() => setCopiedAll(false), 2000);
   };
 
   const toggleValue = (id: string) => {
@@ -396,12 +425,26 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
       {/* Env var list */}
       <Card>
         <CardHeader className="border-b">
-          <CardTitle className="text-base">
-            Variables
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="text-base">
+              Variables
+              {envVars && envVars.length > 0 && (
+                <Badge variant="secondary" className="ml-2">{envVars.length}</Badge>
+              )}
+            </CardTitle>
             {envVars && envVars.length > 0 && (
-              <Badge variant="secondary" className="ml-2">{envVars.length}</Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={copyAllAsEnv}
+                className="text-xs text-muted-foreground hover:text-foreground shrink-0"
+              >
+                {copiedAll ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                <span className="hidden sm:inline">{copiedAll ? 'Copied!' : 'Copy all as .env'}</span>
+                <span className="sm:hidden">{copiedAll ? 'Copied!' : 'Copy all'}</span>
+              </Button>
             )}
-          </CardTitle>
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           {!envVars || envVars.length === 0 ? (
@@ -420,6 +463,15 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <code className="text-sm font-mono font-medium text-foreground">{ev.key}</code>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => copyKey(ev.key)}
+                          aria-label="Copy key"
+                          className="text-muted-foreground/50 hover:text-foreground"
+                        >
+                          {copiedKey === ev.key ? <Check className="size-3" /> : <Copy className="size-3" />}
+                        </Button>
                         <Badge variant="outline" className="text-[10px]">{ev.project}</Badge>
                         <Badge variant="secondary" className="text-[10px]">{ev.environment}</Badge>
                         {ev.is_reference && (
@@ -441,17 +493,16 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
                         >
                           {showValues[ev.id] ? <EyeOff /> : <Eye />}
                         </Button>
-                        {/* Copy resolved value */}
-                        {showValues[ev.id] && ev.resolved_value && ev.resolved_value !== ev.value && (
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            onClick={() => copyToClipboard(ev.resolved_value!)}
-                            aria-label="Copy resolved value"
-                          >
-                            {copiedUrl === ev.resolved_value ? <Check /> : <Copy />}
-                          </Button>
-                        )}
+                        {/* Quick copy value */}
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => copyValue(ev)}
+                          aria-label="Copy value"
+                          className="text-muted-foreground/50 hover:text-foreground"
+                        >
+                          {copiedVal === ev.id ? <Check className="size-3" /> : <Copy className="size-3" />}
+                        </Button>
                       </div>
                       {/* Show resolved value below if different */}
                       {showValues[ev.id] && ev.resolved_value && ev.resolved_value !== ev.value && (
