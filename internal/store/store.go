@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -19,10 +18,10 @@ import (
 )
 
 // envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
-var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+var envVarRefPattern = models.EnvVarRefPattern
 
 // projectEnvVarRefPattern matches $[project:environment:var] patterns.
-var projectEnvVarRefPattern = regexp.MustCompile(`\$\[([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z_][A-Za-z0-9_]*)\]`)
+var projectEnvVarRefPattern = models.ProjectEnvVarRefPattern
 
 // Store is the SQLite data access layer.
 type Store struct {

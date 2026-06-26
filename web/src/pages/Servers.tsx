@@ -873,17 +873,19 @@ function ServerForm({
             <div className="grid gap-1.5">
               <Label htmlFor="srv-envvar" className="flex items-center gap-1.5">
                 <Variable className="size-3.5 text-muted-foreground" />
-                Environment Variable Name
+                Token Reference
               </Label>
               <Input
                 id="srv-envvar"
                 value={bearerTokenEnv}
                 onChange={(e) => setBearerTokenEnv(e.target.value)}
-                placeholder="e.g. GITHUB_COPILOT_TOKEN"
+                placeholder="GITHUB_TOKEN, ${KEY}, or $[project:env:var]"
                 className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                Token read from <code className="font-mono">os.Getenv()</code> at runtime — never stored in the database.
+                Env var name, <code className="font-mono">{'${KEY}'}</code> reference, or{' '}
+                <code className="font-mono">{'$[project:env:var]'}</code> for cross-project.
+                Resolved at runtime — token never stored in the database.
               </p>
             </div>
           )}
@@ -918,7 +920,7 @@ function ServerForm({
         <Label className="flex items-center gap-1.5">
           <Settings2 className="size-3.5 text-muted-foreground" />
           Environment Variables
-          <span className="text-[10px] text-muted-foreground font-normal">(key → value or ${'{}'} reference)</span>
+          <span className="text-[10px] text-muted-foreground font-normal">({'${KEY}'} or {'$[project:env:var]'} ref)</span>
         </Label>
         <EnvVarInput entries={envEntries} onChange={setEnvEntries} />
       </div>

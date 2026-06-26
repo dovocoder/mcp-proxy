@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -24,12 +23,10 @@ import (
 )
 
 // envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
-var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+var envVarRefPattern = models.EnvVarRefPattern
 
 // projectEnvVarRefPattern matches $[project:environment:var] patterns.
-// Example: $[myapp:dev:GITHUB_TOKEN] resolves to the GITHUB_TOKEN value
-// stored under project "myapp", environment "dev".
-var projectEnvVarRefPattern = regexp.MustCompile(`\$\[([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z_][A-Za-z0-9_]*)\]`)
+var projectEnvVarRefPattern = models.ProjectEnvVarRefPattern
 
 // resolveEnvRefs resolves ${KEY}, ${KEY:-default}, and $[project:env:var] references
 // in env map values. Flat ${KEY} refs resolve against refVars (all env vars).
@@ -446,9 +443,18 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 
 	switch srv.AuthMethod {
 	case "bearer":
-		// Manual bearer token stored in auth_token field
+		// Manual bearer token stored in auth_token field.
+		// Supports ${KEY} and $[project:env:var] references — if the token
+		// matches a reference pattern, resolve it from the store's env vars.
 		authToken = srv.AuthToken
-		if authToken == "" {
+		if authToken != "" && (envVarRefPattern.MatchString(authToken) || projectEnvVarRefPattern.MatchString(authToken)) {
+			authToken = resolveTokenRef(authToken, m.store)
+			if authToken == "" {
+				log.Printf("Server %s: bearer token reference resolved to empty", srv.Name)
+			} else {
+				log.Printf("Server %s: resolved bearer token reference (%d chars)", srv.Name, len(authToken))
+			}
+		} else if authToken == "" {
 			log.Printf("Server %s: auth_method=bearer but auth_token is empty", srv.Name)
 		} else {
 			log.Printf("Server %s: using manual bearer token (%d chars)", srv.Name, len(authToken))
@@ -540,16 +546,26 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 		}
 	}
 
-	// Resolve ${KEY} references in the server's env map using decrypted env
-	// vars from the store. This allows servers to reference shared secrets
-	// (stored in the env_vars table) without hardcoding them.
+	// Resolve ${KEY} and $[project:env:var] references in the server's env map
+	// and headers using decrypted env vars from the store. This allows servers
+	// to reference shared secrets (stored in the env_vars table) without
+	// hardcoding them.
 	serverEnv := srv.Env
-	if len(serverEnv) > 0 {
+	resolvedHeaders := srv.Headers
+	if (len(serverEnv) > 0 || len(resolvedHeaders) > 0) {
 		hasRefs := false
 		for _, v := range serverEnv {
 			if envVarRefPattern.MatchString(v) || projectEnvVarRefPattern.MatchString(v) {
 				hasRefs = true
 				break
+			}
+		}
+		if !hasRefs {
+			for _, v := range resolvedHeaders {
+				if envVarRefPattern.MatchString(v) || projectEnvVarRefPattern.MatchString(v) {
+					hasRefs = true
+					break
+				}
 			}
 		}
 		if hasRefs {
@@ -563,6 +579,9 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 			}
 			if (refVars != nil && len(refVars) > 0) || (groupedVars != nil && len(groupedVars) > 0) {
 				serverEnv = resolveEnvRefsWithGrouped(serverEnv, refVars, groupedVars)
+				if len(resolvedHeaders) > 0 {
+					resolvedHeaders = resolveEnvRefsWithGrouped(resolvedHeaders, refVars, groupedVars)
+				}
 				log.Printf("Server %s: resolved env var references from %d flat + %d grouped env vars", srv.Name, len(refVars), len(groupedVars))
 			}
 		}
@@ -574,7 +593,7 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 		Args:           srv.Args,
 		Env:            serverEnv,
 		URL:            srv.URL,
-		Headers:        srv.Headers,
+		Headers:        resolvedHeaders,
 		AuthToken:      authToken,
 		Timeout:        srv.Timeout,
 		ConnectTimeout: srv.ConnectTimeout,

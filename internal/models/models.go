@@ -1,8 +1,22 @@
 package models
 
 import (
+	"regexp"
 	"time"
 )
+
+// EnvVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
+var EnvVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+
+// ProjectEnvVarRefPattern matches $[project:environment:var] patterns.
+// Example: $[myapp:dev:GITHUB_TOKEN] resolves to the GITHUB_TOKEN value
+// stored under project "myapp", environment "dev".
+var ProjectEnvVarRefPattern = regexp.MustCompile(`\$\[([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z_][A-Za-z0-9_]*)\]`)
+
+// HasEnvVarRef returns true if the value contains any env var reference pattern.
+func HasEnvVarRef(val string) bool {
+	return EnvVarRefPattern.MatchString(val) || ProjectEnvVarRefPattern.MatchString(val)
+}
 
 // Server represents a backend MCP server that the proxy connects to.
 type Server struct {

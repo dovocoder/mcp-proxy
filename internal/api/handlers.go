@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -1703,14 +1702,14 @@ func slugify(name string) string {
 // --- Env Vars (admin) ---
 
 // envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
-var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+var envVarRefPattern = models.EnvVarRefPattern
 
 // projectEnvVarRefPattern matches $[project:environment:var] patterns.
-var projectEnvVarRefPattern = regexp.MustCompile(`\$\[([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z_][A-Za-z0-9_]*)\]`)
+var projectEnvVarRefPattern = models.ProjectEnvVarRefPattern
 
 // hasEnvVarRef returns true if the value contains any env var reference pattern.
 func hasEnvVarRef(val string) bool {
-	return envVarRefPattern.MatchString(val) || projectEnvVarRefPattern.MatchString(val)
+	return models.HasEnvVarRef(val)
 }
 
 // resolveEnvVarReferences resolves ${KEY}, ${KEY:-default}, and $[project:env:var]

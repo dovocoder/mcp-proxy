@@ -524,14 +524,18 @@ export default function ServerDetail() {
                   <Label className="text-xs">
                     {authStatus?.status === 'valid'
                       ? `Current: ${authStatus?.bearer_token_env || srv.bearer_token_env}`
-                      : 'Environment Variable Name'}
+                      : 'Token Reference'}
                   </Label>
                   <Input
                     value={bearerTokenEnv}
                     onChange={(e) => setBearerTokenEnv(e.target.value)}
-                    placeholder="e.g. GITHUB_COPILOT_TOKEN"
+                    placeholder="GITHUB_TOKEN, ${KEY}, or $[project:env:var]"
                     className="font-mono text-xs"
                   />
+                  <p className="text-[11px] text-muted-foreground/70">
+                    Env var name, <code className="text-foreground">{'${KEY}'}</code> reference, or{' '}
+                    <code className="text-foreground">{'$[project:env:var]'}</code> for cross-project.
+                  </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
