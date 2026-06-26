@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useNavigate, Outlet } from 'react-router-dom';
-import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, Brain, Lock, BookOpen, KanbanSquare } from 'lucide-react';
+import { LayoutDashboard, Server, KeyRound, Wrench, LogOut, Network, Layers, Menu, Brain, Lock, BookOpen, KanbanSquare, Github } from 'lucide-react';
 import { clearToken } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger, SheetClose } from '@/components/ui/sheet';
@@ -58,6 +58,7 @@ const navSections: NavSection[] = [
     title: 'Settings',
     items: [
       { to: '/env-vars', label: 'Env Vars', icon: Lock },
+      { to: '/github-accounts', label: 'GitHub', icon: Github },
     ],
   },
 ];

@@ -214,6 +214,11 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	// GitHub issue lookup (admin — JWT auth)
 	adminMux.HandleFunc("GET /api/github/issue", h.handleGetGithubIssue)
 
+	// GitHub account routes (admin — JWT auth)
+	adminMux.HandleFunc("GET /api/github/accounts", h.handleListGitHubAccounts)
+	adminMux.HandleFunc("POST /api/github/accounts", h.handleCreateGitHubAccount)
+	adminMux.HandleFunc("DELETE /api/github/accounts/{id}", h.handleDeleteGitHubAccount)
+
 	// Env var routes (admin — JWT auth)
 	// Register more specific paths first for safety.
 	adminMux.HandleFunc("GET /api/env-vars/projects", h.handleListEnvVarProjects)
@@ -2757,6 +2762,61 @@ type githubLabel struct {
 	Name string `json:"name"`
 }
 
+// --- GitHub Accounts ---
+
+func (h *Handlers) handleListGitHubAccounts(w http.ResponseWriter, r *http.Request) {
+	accounts, err := h.store.ListGitHubAccounts()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to list GitHub accounts")
+		return
+	}
+	if accounts == nil {
+		accounts = []*models.GitHubAccount{}
+	}
+	// Token is never exposed (json:"-"), HasToken reflects whether a token is set.
+	writeJSON(w, http.StatusOK, accounts)
+}
+
+func (h *Handlers) handleCreateGitHubAccount(w http.ResponseWriter, r *http.Request) {
+	var req models.CreateGitHubAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+	if req.Username == "" {
+		writeError(w, http.StatusBadRequest, "Username is required")
+		return
+	}
+
+	account := &models.GitHubAccount{
+		ID:        uuid.NewString(),
+		Name:      req.Name,
+		Username:  req.Username,
+		Token:     req.Token,
+		TokenEnv:  req.TokenEnv,
+		HasToken:  req.Token != "" || req.TokenEnv != "",
+		CreatedAt: time.Now(),
+	}
+	if err := h.store.CreateGitHubAccount(account); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create GitHub account: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, account)
+}
+
+func (h *Handlers) handleDeleteGitHubAccount(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.store.DeleteGitHubAccount(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to delete GitHub account")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // handleGetGithubIssue fetches issue metadata from the GitHub REST API.
 // Query param: url=https://github.com/owner/repo/issues/123
 func (h *Handlers) handleGetGithubIssue(w http.ResponseWriter, r *http.Request) {
@@ -2788,7 +2848,26 @@ func (h *Handlers) handleGetGithubIssue(w http.ResponseWriter, r *http.Request) 
 	}
 
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%s", owner, repo, issueNumber)
-	resp, err := http.Get(apiURL)
+
+	// Build the request so we can add auth headers if a GitHub account token is available.
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to build GitHub API request")
+		return
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	// Use the first available GitHub account token for auth, if any.
+	token, err := h.store.GetFirstGitHubToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to retrieve GitHub account token")
+		return
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to reach GitHub API")
 		return

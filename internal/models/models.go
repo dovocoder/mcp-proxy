@@ -431,3 +431,22 @@ type UpdateTaskItemRequest struct {
 	Tags           *[]string  `json:"tags,omitempty"`
 	GithubIssueURL *string    `json:"github_issue_url,omitempty"`
 }
+
+// GitHubAccount represents a stored GitHub account used for API authentication.
+type GitHubAccount struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`       // display name, e.g. "Personal", "Work"
+	Username  string    `json:"username"`   // GitHub username
+	Token     string    `json:"-"`          // never serialized — write-only via API
+	HasToken  bool      `json:"has_token"`  // indicates a token is set
+	TokenEnv  string    `json:"token_env,omitempty"` // env var name for token (alternative to Token)
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// CreateGitHubAccountRequest is the payload for creating a new GitHub account.
+type CreateGitHubAccountRequest struct {
+	Name     string `json:"name"`
+	Username string `json:"username"`
+	Token    string `json:"token,omitempty"`
+	TokenEnv string `json:"token_env,omitempty"`
+}

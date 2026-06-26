@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -274,6 +275,15 @@ func migrate(db *sql.DB) error {
 		is_default INTEGER DEFAULT 0,
 		created_at TEXT
 	);
+
+	CREATE TABLE IF NOT EXISTS github_accounts (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		username TEXT,
+		token TEXT,
+		token_env TEXT,
+		created_at TEXT
+	);
 `
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -330,6 +340,12 @@ func migrate(db *sql.DB) error {
 
 	// Migration: add github_issue_url column to task_items
 	_, err = db.Exec(`ALTER TABLE task_items ADD COLUMN github_issue_url TEXT`)
+	if err != nil {
+		// Column already exists
+	}
+
+	// Migration: add token_env column to github_accounts
+	_, err = db.Exec(`ALTER TABLE github_accounts ADD COLUMN token_env TEXT`)
 	if err != nil {
 		// Column already exists
 	}
@@ -2003,4 +2019,74 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// --- GitHub Accounts ---
+
+// CreateGitHubAccount inserts a new GitHub account, encrypting the token at rest.
+func (s *Store) CreateGitHubAccount(account *models.GitHubAccount) error {
+	_, err := s.db.Exec(`
+		INSERT INTO github_accounts (id, name, username, token, token_env, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`,
+		account.ID, account.Name, account.Username, s.encryptToken(account.Token),
+		account.TokenEnv,
+		account.CreatedAt.Format(time.RFC3339),
+	)
+	return err
+}
+
+// ListGitHubAccounts returns all GitHub accounts, decrypting tokens.
+func (s *Store) ListGitHubAccounts() ([]*models.GitHubAccount, error) {
+	rows, err := s.db.Query(`SELECT id, name, username, token, token_env, created_at FROM github_accounts ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []*models.GitHubAccount
+	for rows.Next() {
+		var a models.GitHubAccount
+		var token, tokenEnv, createdAt string
+		if err := rows.Scan(&a.ID, &a.Name, &a.Username, &token, &tokenEnv, &createdAt); err != nil {
+			return nil, err
+		}
+		a.Token = s.decryptToken(token)
+		a.TokenEnv = tokenEnv
+		a.HasToken = a.Token != "" || a.TokenEnv != ""
+		a.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		accounts = append(accounts, &a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
+// DeleteGitHubAccount removes a GitHub account by ID.
+func (s *Store) DeleteGitHubAccount(id string) error {
+	_, err := s.db.Exec(`DELETE FROM github_accounts WHERE id = ?`, id)
+	return err
+}
+
+// GetFirstGitHubToken returns the decrypted token of the first GitHub account,
+// or an empty string if no accounts exist. If the account uses a token_env
+// reference, the env var is resolved at runtime.
+func (s *Store) GetFirstGitHubToken() (string, error) {
+	var token, tokenEnv string
+	err := s.db.QueryRow(`SELECT token, token_env FROM github_accounts ORDER BY created_at LIMIT 1`).Scan(&token, &tokenEnv)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	// If token_env is set, resolve from environment
+	if tokenEnv != "" {
+		if v := os.Getenv(tokenEnv); v != "" {
+			return v, nil
+		}
+		return "", nil
+	}
+	return s.decryptToken(token), nil
 }

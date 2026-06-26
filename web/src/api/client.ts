@@ -531,7 +531,22 @@ export interface GitHubIssue {
   user: string;
 }
 
+export interface GitHubAccount {
+  id: string;
+  name: string;
+  username: string;
+  has_token: boolean;
+  token_env?: string;
+  created_at: string;
+}
+
 export const github = {
   fetchIssue: (url: string) =>
     request<GitHubIssue>(`/github/issue?url=${encodeURIComponent(url)}`),
+  listAccounts: () =>
+    request<GitHubAccount[]>('/github/accounts'),
+  createAccount: (data: { name: string; username: string; token?: string; token_env?: string }) =>
+    request<GitHubAccount>('/github/accounts', { method: 'POST', body: JSON.stringify(data) }),
+  deleteAccount: (id: string) =>
+    request<{ status: string }>(`/github/accounts/${id}`, { method: 'DELETE' }),
 };

@@ -12,6 +12,7 @@ import MemoriesPage from './pages/Memories';
 import SkillsPage from './pages/Skills';
 import EnvVarsPage from './pages/EnvVars';
 import TaskBoardPage from './pages/TaskBoard';
+import GitHubAccountsPage from './pages/GitHubAccounts';
 import { isAuthenticated, dashboard as dashboardApi } from './api/client';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -50,6 +51,7 @@ export default function App() {
         <Route path="/skills" element={<SkillsPage />} />
         <Route path="/env-vars" element={<EnvVarsPage />} />
         <Route path="/taskboard" element={<TaskBoardPage />} />
+      <Route path="/github-accounts" element={<GitHubAccountsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
