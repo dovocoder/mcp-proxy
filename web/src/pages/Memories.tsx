@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Search, Brain, Clock, Eye, Pencil, X, Check, FolderPlus, Layers, Link2, Copy } from 'lucide-react';
+import { Plus, Trash2, Search, Brain, Clock, Eye, Pencil, X, Check, FolderPlus, Layers, Info } from 'lucide-react';
 import { memories as memApi, memorySets as setsApi, type Memory, type MemorySet } from '@/api/client';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { InfoBanner } from '@/components/InfoBanner';
+import { CollapsibleConnectionURLs } from '@/components/CollapsibleConnectionURLs';
 import {
   Dialog,
   DialogTrigger,
@@ -31,7 +33,6 @@ export default function Memories() {
   const [editing, setEditing] = useState<Memory | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [newSetOpen, setNewSetOpen] = useState(false);
-  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [deleteSetOpen, setDeleteSetOpen] = useState(false);
 
   const { data: sets } = useQuery({ queryKey: ['memory-sets'], queryFn: setsApi.list });
@@ -89,20 +90,14 @@ export default function Memories() {
   const mcpUrl = `${origin}/api/servers/${memServerId}/mcp`;
   const sseUrl = `${origin}/api/servers/${memServerId}/sse`;
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedUrl(text);
-    setTimeout(() => setCopiedUrl(null), 2000);
-  };
-
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold text-foreground">Memories</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            {currentSet?.description || `Memory set: ${currentSet?.name ?? 'Default'}`}
+            Persistent key-value store for your AI agents — connect via MCP
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -136,6 +131,29 @@ export default function Memories() {
         </div>
       </div>
 
+      {/* Info banner */}
+      <InfoBanner
+        icon={Brain}
+        title="What are Memories?"
+        description="Memories are persistent notes that your AI agent can store and recall across conversations. Think of them as a long-term knowledge base the agent can search and reference."
+        iconColor="text-violet-400"
+        iconBg="bg-violet-500/10"
+        tips={[
+          { label: 'Palace', explanation: 'Top-level category for grouping related memories (e.g. "project-alpha", "preferences")' },
+          { label: 'Room', explanation: 'Optional sub-category within a palace for finer organization' },
+          { label: 'Importance', explanation: '0-100 score — higher values are prioritized when the agent searches' },
+          { label: 'Sets', explanation: 'Separate memory collections for different projects or contexts — each set gets its own MCP endpoint' },
+        ]}
+      />
+
+      {/* Collapsible connection URLs */}
+      <CollapsibleConnectionURLs
+        mcpUrl={mcpUrl}
+        sseUrl={sseUrl}
+        label="MCP Connection URLs"
+        description={currentSet && currentSet.name !== 'memory' ? `Set: ${currentSet.name}` : undefined}
+      />
+
       {/* Set selector */}
       {sets && sets.length > 1 && (
         <div className="flex flex-wrap gap-2 items-center">
@@ -157,55 +175,6 @@ export default function Memories() {
           ))}
         </div>
       )}
-
-      {/* Connection URLs for this memory set */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <Link2 className="size-4 text-primary shrink-0" />
-            <div>
-              <CardTitle className="text-base">Connection URLs</CardTitle>
-              <CardDescription>
-                Connect MCP clients to this memory set
-                {currentSet && currentSet.name !== 'memory' ? ` (${currentSet.name})` : ''}.
-              </CardDescription>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Badge variant="default" className="font-mono shrink-0 text-xs">POST</Badge>
-            <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
-              {mcpUrl}
-            </code>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => copyToClipboard(mcpUrl)}
-              aria-label="Copy MCP URL"
-              className="shrink-0"
-            >
-              {copiedUrl === mcpUrl ? <Check className="size-4" /> : <Copy className="size-4" />}
-            </Button>
-          </div>
-          <Separator />
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="font-mono shrink-0 text-xs bg-emerald-500/15 text-emerald-400">SSE</Badge>
-            <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
-              {sseUrl}
-            </code>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => copyToClipboard(sseUrl)}
-              aria-label="Copy SSE URL"
-              className="shrink-0"
-            >
-              {copiedUrl === sseUrl ? <Check className="size-4" /> : <Copy className="size-4" />}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
 
       {/* Search bar */}
       <div className="flex gap-2">
@@ -382,7 +351,7 @@ function MemoryCard({
           {memory.content}
         </p>
 
-        {/* Footer: chronicle metadata */}
+        {/* Footer: metadata */}
         <Separator />
         <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
           <span className="flex items-center gap-1">
@@ -481,7 +450,7 @@ function MemoryForm({
         <DialogDescription>
           {memory
             ? 'Update the memory content and metadata.'
-            : 'Store a new memory in the memory palace.'}
+            : 'Store a new memory that your AI agent can recall later.'}
         </DialogDescription>
       </DialogHeader>
       <form

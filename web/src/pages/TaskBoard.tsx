@@ -10,6 +10,8 @@ import {
   Tag,
   Calendar,
   FolderPlus,
+  Layers,
+  GripVertical,
 } from 'lucide-react';
 import {
   tasks as tasksApi,
@@ -20,19 +22,15 @@ import {
   type TaskBoardSet,
 } from '@/api/client';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-} from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { InfoBanner } from '@/components/InfoBanner';
+import { CollapsibleConnectionURLs } from '@/components/CollapsibleConnectionURLs';
 import {
   Select,
   SelectContent,
@@ -63,11 +61,11 @@ const PRIORITY_LEVEL_OPTIONS: { value: number; label: string }[] = [
   { value: 5, label: 'P5 - Backlog' },
 ];
 
-const STATUS_STYLES: Record<TaskStatus, string> = {
-  todo: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
-  in_progress: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
-  done: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  blocked: 'bg-red-500/15 text-red-400 border-red-500/30',
+const STATUS_META: Record<TaskStatus, { label: string; color: string; bg: string; border: string; dot: string }> = {
+  todo:        { label: 'To Do',       color: 'text-gray-400',    bg: 'bg-gray-500/5',     border: 'border-gray-500/20',    dot: 'bg-gray-400' },
+  in_progress: { label: 'In Progress',  color: 'text-blue-400',    bg: 'bg-blue-500/5',     border: 'border-blue-500/20',    dot: 'bg-blue-400' },
+  done:        { label: 'Done',         color: 'text-emerald-400', bg: 'bg-emerald-500/5',  border: 'border-emerald-500/20', dot: 'bg-emerald-400' },
+  blocked:     { label: 'Blocked',      color: 'text-red-400',    bg: 'bg-red-500/5',      border: 'border-red-500/20',     dot: 'bg-red-400' },
 };
 
 const PRIORITY_STYLES: Record<TaskPriority, string> = {
@@ -88,8 +86,9 @@ const PRIORITY_LEVEL_STYLES: Record<number, string> = {
 const DEFAULT_BOARD_ID = 'default';
 
 function StatusBadge({ status }: { status: TaskStatus }) {
+  const meta = STATUS_META[status];
   return (
-    <Badge variant="outline" className={cn('capitalize', STATUS_STYLES[status])}>
+    <Badge variant="outline" className={cn('capitalize', meta.color)}>
       {status.replace('_', ' ')}
     </Badge>
   );
@@ -122,6 +121,7 @@ export default function TaskBoard() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newBoardOpen, setNewBoardOpen] = useState(false);
   const [deleteBoardOpen, setDeleteBoardOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<'board' | 'list'>('board');
 
   const { data: boards } = useQuery({
     queryKey: ['task-board-sets'],
@@ -145,6 +145,15 @@ export default function TaskBoard() {
       ),
   });
 
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<TaskInput> }) =>
+      tasksApi.update(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['task-stats'] });
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: tasksApi.delete,
     onSuccess: () => {
@@ -166,17 +175,41 @@ export default function TaskBoard() {
 
   const displayTasks = allTasks ?? [];
   const totalTasks = stats?.total ?? displayTasks.length;
+  const completedPct = totalTasks > 0 ? Math.round(((stats?.done ?? 0) / totalTasks) * 100) : 0;
   const boardName = (id: string) =>
     id === DEFAULT_BOARD_ID ? 'Default' : boards?.find((b) => b.id === id)?.name ?? id;
 
+  // Group tasks by status for kanban view
+  const tasksByStatus: Record<TaskStatus, Task[]> = {
+    todo: [],
+    in_progress: [],
+    done: [],
+    blocked: [],
+  };
+  displayTasks.forEach((t) => {
+    if (tasksByStatus[t.status]) tasksByStatus[t.status].push(t);
+  });
+
+  // Connection URLs for this task board
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const taskServerId = selectedBoard === DEFAULT_BOARD_ID
+    ? 'builtin-tasks'
+    : `builtin-tasks:${selectedBoard}`;
+  const mcpUrl = `${origin}/api/servers/${taskServerId}/mcp`;
+  const sseUrl = `${origin}/api/servers/${taskServerId}/sse`;
+
+  const handleStatusChange = (taskId: string, newStatus: TaskStatus) => {
+    updateMutation.mutate({ id: taskId, data: { status: newStatus } });
+  };
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold text-foreground">Task Board</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            {currentBoard?.description || `Board: ${currentBoard?.name ?? 'Default'}`}
+            Kanban board for your projects — your AI agent can create and update tasks via MCP
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -195,130 +228,207 @@ export default function TaskBoard() {
         </Dialog>
       </div>
 
-      {/* Board selector */}
+      {/* Info banner */}
+      <InfoBanner
+        icon={KanbanSquare}
+        title="What is the Task Board?"
+        description="A persistent kanban board for project management tasks. Your AI agent can create, update, and query tasks through MCP — useful for tracking work across conversations."
+        iconColor="text-orange-400"
+        iconBg="bg-orange-500/10"
+        tips={[
+          { label: 'Status', explanation: 'Workflow state: To Do → In Progress → Done (or Blocked)' },
+          { label: 'Priority', explanation: 'How urgent the task is: low, medium, high, or urgent' },
+          { label: 'P-Level', explanation: 'Finer priority ranking from P1 (critical) to P5 (backlog)' },
+          { label: 'Boards', explanation: 'Separate task boards for different projects — each board gets its own MCP endpoint' },
+        ]}
+      />
+
+      {/* Collapsible connection URLs */}
+      <CollapsibleConnectionURLs
+        mcpUrl={mcpUrl}
+        sseUrl={sseUrl}
+        label="MCP Connection URLs"
+        description={currentBoard && currentBoard.name !== 'tasks' ? `Board: ${currentBoard.name}` : undefined}
+      />
+
+      {/* Board selector + view toggle */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex flex-col gap-1.5 min-w-[200px]">
-          <Label htmlFor="board-select" className="text-xs text-muted-foreground">
-            Board
-          </Label>
-          <Select
-            value={selectedBoard}
-            onValueChange={(val) => setSelectedBoard(val ?? DEFAULT_BOARD_ID)}
-          >
-            <SelectTrigger id="board-select" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {boards?.map((b) => (
-                <SelectItem key={b.id} value={b.id}>
-                  {b.name}
-                  {b.is_default && ' (default)'}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <Dialog open={newBoardOpen} onOpenChange={setNewBoardOpen}>
-          <DialogTrigger
-            render={
-              <Button variant="outline" size="sm" className="self-end shrink-0">
-                <FolderPlus className="size-4" />
-                <span className="hidden sm:inline">New Board</span>
-                <span className="sm:hidden">Board</span>
-              </Button>
-            }
-          />
-          <DialogContent className="sm:max-w-md">
-            <NewBoardForm
-              onSaved={(id) => {
-                setNewBoardOpen(false);
-                if (id) setSelectedBoard(id);
-              }}
-            />
-          </DialogContent>
-        </Dialog>
-        {currentBoard && !currentBoard.is_default && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="self-end shrink-0 text-muted-foreground hover:text-destructive"
-            onClick={() => setDeleteBoardOpen(true)}
-            aria-label={`Delete board ${currentBoard.name}`}
-          >
-            <Trash2 className="size-4" />
-          </Button>
+        {boards && boards.length > 1 && (
+          <div className="flex flex-wrap gap-2 items-center">
+            <Layers className="size-4 text-muted-foreground shrink-0" />
+            {boards.map((b) => (
+              <button
+                key={b.id}
+                onClick={() => setSelectedBoard(b.id)}
+                className={cn(
+                  'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px] flex items-center gap-1.5',
+                  selectedBoard === b.id
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
+                )}
+              >
+                {b.name}
+                {b.is_default && <Badge variant="outline" className="text-[10px] py-0 px-1">default</Badge>}
+              </button>
+            ))}
+          </div>
         )}
+        <div className="ml-auto flex items-center gap-2">
+          <Dialog open={newBoardOpen} onOpenChange={setNewBoardOpen}>
+            <DialogTrigger
+              render={
+                <Button variant="outline" size="sm" className="shrink-0">
+                  <FolderPlus className="size-4" />
+                  <span className="hidden sm:inline">New Board</span>
+                  <span className="sm:hidden">Board</span>
+                </Button>
+              }
+            />
+            <DialogContent className="sm:max-w-md">
+              <NewBoardForm
+                onSaved={(id) => {
+                  setNewBoardOpen(false);
+                  if (id) setSelectedBoard(id);
+                }}
+              />
+            </DialogContent>
+          </Dialog>
+          {currentBoard && !currentBoard.is_default && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 text-muted-foreground hover:text-destructive"
+              onClick={() => setDeleteBoardOpen(true)}
+              aria-label={`Delete board ${currentBoard.name}`}
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          )}
+          {/* View toggle */}
+          <div className="flex items-center rounded-lg border border-border overflow-hidden shrink-0">
+            <button
+              onClick={() => setViewMode('board')}
+              className={cn(
+                'px-2.5 py-1.5 text-xs font-medium transition-colors',
+                viewMode === 'board' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'
+              )}
+            >
+              Board
+            </button>
+            <button
+              onClick={() => setViewMode('list')}
+              className={cn(
+                'px-2.5 py-1.5 text-xs font-medium transition-colors',
+                viewMode === 'list' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent'
+              )}
+            >
+              List
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Stats summary */}
+      {/* Stats summary + progress bar */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <StatCard label="To Do" value={stats?.todo ?? 0} className="text-gray-400" />
-        <StatCard label="In Progress" value={stats?.in_progress ?? 0} className="text-blue-400" />
-        <StatCard label="Done" value={stats?.done ?? 0} className="text-emerald-400" />
-        <StatCard label="Blocked" value={stats?.blocked ?? 0} className="text-red-400" />
+        {STATUS_OPTIONS.map((s) => {
+          const meta = STATUS_META[s];
+          const count = s === 'todo' ? stats?.todo ?? 0
+            : s === 'in_progress' ? stats?.in_progress ?? 0
+            : s === 'done' ? stats?.done ?? 0
+            : stats?.blocked ?? 0;
+          return (
+            <Card key={s} className={cn('border', meta.border)}>
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className={cn('w-2 h-2 rounded-full', meta.dot)} />
+                    <span className="text-xs text-muted-foreground">{meta.label}</span>
+                  </div>
+                  <span className={cn('text-2xl font-bold', meta.color)}>{count}</span>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
 
-      {/* Filter pills: status */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <span className="text-xs text-muted-foreground mr-1">Status:</span>
-        <button
-          onClick={() => setStatusFilter('')}
-          className={cn(
-            'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px]',
-            statusFilter === ''
-              ? 'bg-primary text-primary-foreground'
-              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
-          )}
-        >
-          All
-        </button>
-        {STATUS_OPTIONS.map((s) => (
-          <button
-            key={s}
-            onClick={() => setStatusFilter(s)}
-            className={cn(
-              'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px] capitalize',
-              statusFilter === s
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
-            )}
-          >
-            {s.replace('_', ' ')}
-          </button>
-        ))}
-      </div>
+      {/* Progress bar */}
+      {totalTasks > 0 && (
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-muted-foreground shrink-0">Progress</span>
+          <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+            <div
+              className="h-full bg-emerald-500 rounded-full transition-all"
+              style={{ width: `${completedPct}%` }}
+            />
+          </div>
+          <span className="text-xs font-medium text-foreground shrink-0">{completedPct}%</span>
+        </div>
+      )}
 
-      {/* Filter pills: priority */}
-      <div className="flex flex-wrap gap-2 items-center">
-        <span className="text-xs text-muted-foreground mr-1">Priority:</span>
-        <button
-          onClick={() => setPriorityFilter('')}
-          className={cn(
-            'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px]',
-            priorityFilter === ''
-              ? 'bg-primary text-primary-foreground'
-              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
-          )}
-        >
-          All
-        </button>
-        {PRIORITY_OPTIONS.map((p) => (
-          <button
-            key={p}
-            onClick={() => setPriorityFilter(p)}
-            className={cn(
-              'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px] capitalize',
-              priorityFilter === p
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
-            )}
-          >
-            {p}
-          </button>
-        ))}
-      </div>
+      {/* Filter pills: status + priority (list mode only) */}
+      {viewMode === 'list' && (
+        <>
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-xs text-muted-foreground mr-1">Status:</span>
+            <button
+              onClick={() => setStatusFilter('')}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px]',
+                statusFilter === ''
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
+              )}
+            >
+              All
+            </button>
+            {STATUS_OPTIONS.map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s)}
+                className={cn(
+                  'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px] capitalize',
+                  statusFilter === s
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
+                )}
+              >
+                {s.replace('_', ' ')}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-xs text-muted-foreground mr-1">Priority:</span>
+            <button
+              onClick={() => setPriorityFilter('')}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px]',
+                priorityFilter === ''
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
+              )}
+            >
+              All
+            </button>
+            {PRIORITY_OPTIONS.map((p) => (
+              <button
+                key={p}
+                onClick={() => setPriorityFilter(p)}
+                className={cn(
+                  'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors min-h-[36px] capitalize',
+                  priorityFilter === p
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground'
+                )}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
-      {/* Task list */}
+      {/* Task display: kanban columns or flat list */}
       {displayTasks.length === 0 ? (
         <Card>
           <CardContent className="p-8 sm:p-12 text-center flex flex-col items-center gap-3">
@@ -330,6 +440,40 @@ export default function TaskBoard() {
             </p>
           </CardContent>
         </Card>
+      ) : viewMode === 'board' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+          {STATUS_OPTIONS.map((status) => {
+            const meta = STATUS_META[status];
+            const columnTasks = tasksByStatus[status];
+            return (
+              <div key={status} className={cn('rounded-lg border p-3 space-y-3', meta.border, meta.bg)}>
+                <div className="flex items-center justify-between px-1">
+                  <div className="flex items-center gap-2">
+                    <div className={cn('w-2 h-2 rounded-full', meta.dot)} />
+                    <span className={cn('text-sm font-semibold', meta.color)}>{meta.label}</span>
+                  </div>
+                  <Badge variant="outline" className="text-xs">{columnTasks.length}</Badge>
+                </div>
+                <div className="space-y-2">
+                  {columnTasks.map((task) => (
+                    <TaskCard
+                      key={task.id}
+                      task={task}
+                      boardName={task.board_id !== DEFAULT_BOARD_ID ? boardName(task.board_id) : undefined}
+                      onDelete={() => deleteMutation.mutate(task.id)}
+                      onEdit={() => setEditing(task)}
+                      onStatusChange={(newStatus) => handleStatusChange(task.id, newStatus)}
+                      compact
+                    />
+                  ))}
+                  {columnTasks.length === 0 && (
+                    <p className="text-xs text-muted-foreground/50 text-center py-4">No tasks</p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       ) : (
         <div className="space-y-3">
           {displayTasks.map((task) => (
@@ -339,6 +483,7 @@ export default function TaskBoard() {
               boardName={task.board_id !== DEFAULT_BOARD_ID ? boardName(task.board_id) : undefined}
               onDelete={() => deleteMutation.mutate(task.id)}
               onEdit={() => setEditing(task)}
+              onStatusChange={(newStatus) => handleStatusChange(task.id, newStatus)}
             />
           ))}
         </div>
@@ -376,48 +521,31 @@ export default function TaskBoard() {
   );
 }
 
-function StatCard({
-  label,
-  value,
-  className,
-}: {
-  label: string;
-  value: number;
-  className?: string;
-}) {
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-muted-foreground">{label}</span>
-          <span className={cn('text-2xl font-bold', className)}>{value}</span>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function TaskCard({
   task,
   boardName,
   onDelete,
   onEdit,
+  onStatusChange,
+  compact,
 }: {
   task: Task;
   boardName?: string;
   onDelete: () => void;
   onEdit: () => void;
+  onStatusChange: (status: TaskStatus) => void;
+  compact?: boolean;
 }) {
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
 
   return (
     <>
-      <Card>
-        <CardContent className="space-y-3">
-          {/* Top row: title, status, priority, actions */}
+      <Card className={cn(compact && 'hover:shadow-sm transition-shadow cursor-pointer')} >
+        <CardContent className={cn('space-y-2', compact ? 'p-3' : 'space-y-3')}>
+          {/* Top row: badges + actions */}
           <div className="flex items-start justify-between gap-2 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap min-w-0">
-              <StatusBadge status={task.status} />
+            <div className="flex items-center gap-1.5 flex-wrap min-w-0">
               <PriorityBadge priority={task.priority} />
               <PriorityLevelBadge level={task.priority_level} />
               {boardName && (
@@ -425,9 +553,8 @@ function TaskCard({
                   {boardName}
                 </Badge>
               )}
-              <span className="font-medium text-foreground truncate">{task.title}</span>
             </div>
-            <div className="flex items-center gap-1 shrink-0">
+            <div className="flex items-center gap-0.5 shrink-0">
               <Button variant="ghost" size="icon-sm" onClick={onEdit}>
                 <Pencil className="size-3.5" />
               </Button>
@@ -442,8 +569,11 @@ function TaskCard({
             </div>
           </div>
 
-          {/* Description */}
-          {task.description && (
+          {/* Title */}
+          <p className={cn('font-medium text-foreground', compact ? 'text-sm' : 'truncate')}>{task.title}</p>
+
+          {/* Description (list mode only) */}
+          {!compact && task.description && (
             <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
               {task.description}
             </p>
@@ -451,7 +581,7 @@ function TaskCard({
 
           {/* Tags */}
           {task.tags.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="flex items-center gap-1 flex-wrap">
               {task.tags.map((tag) => (
                 <Badge key={tag} variant="outline" className="text-xs">
                   <Tag className="size-2.5 mr-0.5" />
@@ -462,12 +592,14 @@ function TaskCard({
           )}
 
           {/* Footer: metadata */}
-          <Separator />
-          <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
-            <span className="flex items-center gap-1">
-              <Clock className="size-3" />
-              {new Date(task.created_at).toLocaleDateString()}
-            </span>
+          {!compact && <Separator />}
+          <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
+            {!compact && (
+              <span className="flex items-center gap-1">
+                <Clock className="size-3" />
+                {new Date(task.created_at).toLocaleDateString()}
+              </span>
+            )}
             {task.assignee && (
               <span className="flex items-center gap-1">
                 <User className="size-3" />
@@ -481,6 +613,27 @@ function TaskCard({
               </span>
             )}
           </div>
+
+          {/* Quick status changer (board mode) */}
+          {compact && (
+            <div className="pt-1">
+              <Select
+                value={task.status}
+                onValueChange={(val) => onStatusChange(val as TaskStatus)}
+              >
+                <SelectTrigger className="h-7 text-xs" >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STATUS_OPTIONS.map((s) => (
+                    <SelectItem key={s} value={s} className="capitalize text-xs">
+                      {s.replace('_', ' ')}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
         </CardContent>
       </Card>
       <ConfirmDialog

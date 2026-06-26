@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Search, BookOpen, Clock, Eye, Pencil, X, Check, FolderPlus, Link2, Copy, Tag } from 'lucide-react';
+import { Plus, Trash2, Search, BookOpen, Clock, Eye, Pencil, X, FolderPlus, Tag, ChevronDown, ChevronRight } from 'lucide-react';
 import { skills as skillsApi, skillSets as setsApi, type Skill, type SkillSet } from '@/api/client';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { InfoBanner } from '@/components/InfoBanner';
+import { CollapsibleConnectionURLs } from '@/components/CollapsibleConnectionURLs';
 import {
   Dialog,
   DialogTrigger,
@@ -31,7 +33,6 @@ export default function Skills() {
   const [editing, setEditing] = useState<Skill | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [newSetOpen, setNewSetOpen] = useState(false);
-  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [deleteSetOpen, setDeleteSetOpen] = useState(false);
 
   const { data: sets } = useQuery({ queryKey: ['skill-sets'], queryFn: setsApi.list });
@@ -89,20 +90,14 @@ export default function Skills() {
   const mcpUrl = `${origin}/api/servers/${skillServerId}/mcp`;
   const sseUrl = `${origin}/api/servers/${skillServerId}/sse`;
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedUrl(text);
-    setTimeout(() => setCopiedUrl(null), 2000);
-  };
-
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold text-foreground">Skills</h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            {currentSet?.description || `Skill set: ${currentSet?.name ?? 'Default'}`}
+            Reusable procedures your AI agent can discover and follow — connect via MCP
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -136,6 +131,29 @@ export default function Skills() {
         </div>
       </div>
 
+      {/* Info banner */}
+      <InfoBanner
+        icon={BookOpen}
+        title="What are Skills?"
+        description="Skills are reusable step-by-step procedures (SKILL.md format) that your AI agent can discover and follow. Think of them as playbook entries the agent loads on demand when it encounters a matching task."
+        iconColor="text-blue-400"
+        iconBg="bg-blue-500/10"
+        tips={[
+          { label: 'Category', explanation: 'Grouping label for organizing related skills (e.g. "devops", "data-science")' },
+          { label: 'Version', explanation: 'Semver version number to track skill updates' },
+          { label: 'Content', explanation: 'The full SKILL.md body — markdown with trigger conditions, steps, and pitfalls' },
+          { label: 'Sets', explanation: 'Separate skill collections for different projects or contexts — each set gets its own MCP endpoint' },
+        ]}
+      />
+
+      {/* Collapsible connection URLs */}
+      <CollapsibleConnectionURLs
+        mcpUrl={mcpUrl}
+        sseUrl={sseUrl}
+        label="MCP Connection URLs"
+        description={currentSet && currentSet.name !== 'skills' ? `Set: ${currentSet.name}` : undefined}
+      />
+
       {/* Set selector */}
       {sets && sets.length > 1 && (
         <div className="flex flex-wrap gap-2 items-center">
@@ -156,55 +174,6 @@ export default function Skills() {
           ))}
         </div>
       )}
-
-      {/* Connection URLs for this skill set */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <Link2 className="size-4 text-primary shrink-0" />
-            <div>
-              <CardTitle className="text-base">Connection URLs</CardTitle>
-              <CardDescription>
-                Connect MCP clients to this skill set
-                {currentSet && currentSet.name !== 'skills' ? ` (${currentSet.name})` : ''}.
-              </CardDescription>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Badge variant="default" className="font-mono shrink-0 text-xs">POST</Badge>
-            <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
-              {mcpUrl}
-            </code>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => copyToClipboard(mcpUrl)}
-              aria-label="Copy MCP URL"
-              className="shrink-0"
-            >
-              {copiedUrl === mcpUrl ? <Check className="size-4" /> : <Copy className="size-4" />}
-            </Button>
-          </div>
-          <Separator />
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="font-mono shrink-0 text-xs bg-emerald-500/15 text-emerald-400">SSE</Badge>
-            <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
-              {sseUrl}
-            </code>
-            <Button
-              variant="outline"
-              size="icon-sm"
-              onClick={() => copyToClipboard(sseUrl)}
-              aria-label="Copy SSE URL"
-              className="shrink-0"
-            >
-              {copiedUrl === sseUrl ? <Check className="size-4" /> : <Copy className="size-4" />}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
 
       {/* Search bar */}
       <div className="flex gap-2">
@@ -343,6 +312,7 @@ function SkillCard({
   onEdit: () => void;
 }) {
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <>
@@ -383,10 +353,21 @@ function SkillCard({
           </p>
         )}
 
-        {/* Content preview */}
-        <p className="text-xs text-muted-foreground font-mono whitespace-pre-wrap break-words line-clamp-3 overflow-hidden">
-          {skill.content}
-        </p>
+        {/* Expandable content preview */}
+        {skill.content && (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity"
+          >
+            {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            {expanded ? 'Hide content' : 'Show content'}
+          </button>
+        )}
+        {expanded && skill.content && (
+          <pre className="text-xs text-muted-foreground font-mono whitespace-pre-wrap break-words overflow-auto max-h-96 bg-muted/50 rounded-md p-3">
+            {skill.content}
+          </pre>
+        )}
 
         {/* Footer: metadata */}
         <Separator />
@@ -479,7 +460,7 @@ function SkillForm({
         <DialogDescription>
           {skill
             ? 'Update the skill content and metadata.'
-            : 'Create a reusable skill (SKILL.md format).'}
+            : 'Create a reusable procedure (SKILL.md format) your agent can follow.'}
         </DialogDescription>
       </DialogHeader>
       <form
