@@ -78,39 +78,21 @@ func resolveEnvRefsWithGrouped(envMap map[string]string, refVars map[string]stri
 //
 // Returns the resolved value, or empty string if not found.
 func resolveTokenRef(ref string, st *store.Store) string {
-	if ref == "" {
-		return ""
-	}
-	// Check for $[project:env:var] pattern
-	if projectEnvVarRefPattern.MatchString(ref) {
-		subs := projectEnvVarRefPattern.FindStringSubmatch(ref)
-		if len(subs) == 4 {
-			groupKey := subs[1] + ":" + subs[2] + ":" + subs[3]
-			grouped, err := st.ListEnvVarsDecryptedGrouped()
-			if err == nil {
-				if v, ok := grouped[groupKey]; ok {
-					return v
-				}
-			}
+	flatResolver := func(key string) string {
+		flat, err := st.ListEnvVarsDecrypted()
+		if err == nil {
+			return flat[key]
 		}
 		return ""
 	}
-	// Check for ${KEY} pattern
-	if envVarRefPattern.MatchString(ref) {
-		subs := envVarRefPattern.FindStringSubmatch(ref)
-		if len(subs) >= 2 {
-			refKey := subs[1]
-			flat, err := st.ListEnvVarsDecrypted()
-			if err == nil {
-				if v, ok := flat[refKey]; ok {
-					return v
-				}
-			}
+	groupedResolver := func(groupKey string) string {
+		grouped, err := st.ListEnvVarsDecryptedGrouped()
+		if err == nil {
+			return grouped[groupKey]
 		}
 		return ""
 	}
-	// Plain env var name
-	return os.Getenv(ref)
+	return models.ResolveTokenRef(ref, flatResolver, groupedResolver, os.Getenv)
 }
 
 // LogEntry is a single stderr log line with timestamp.
@@ -531,19 +513,25 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 			} else {
 				// No OAuth tokens — fall back to auth_token as a static bearer token
 				authToken = srv.AuthToken
-				if authToken != "" {
+				if authToken != "" && (envVarRefPattern.MatchString(authToken) || projectEnvVarRefPattern.MatchString(authToken)) {
+					authToken = resolveTokenRef(authToken, m.store)
+					log.Printf("Server %s: resolved auth_token reference (%d chars)", srv.Name, len(authToken))
+				} else if authToken != "" {
 					log.Printf("Server %s: no auth_method set, using auth_token as static bearer (%d chars)", srv.Name, len(authToken))
 				} else {
 					log.Printf("Server %s: no auth configured (auth_method=%q, no tokens, no auth_token)", srv.Name, srv.AuthMethod)
 				}
 			}
-		} else {
+			} else {
 			// Non-HTTP transports: use auth_token directly
 			authToken = srv.AuthToken
-			if authToken != "" {
+			if authToken != "" && (envVarRefPattern.MatchString(authToken) || projectEnvVarRefPattern.MatchString(authToken)) {
+				authToken = resolveTokenRef(authToken, m.store)
+				log.Printf("Server %s: resolved auth_token reference for non-HTTP transport (%d chars)", srv.Name, len(authToken))
+			} else if authToken != "" {
 				log.Printf("Server %s: using auth_token for non-HTTP transport (%d chars)", srv.Name, len(authToken))
 			}
-		}
+			}
 	}
 
 	// Resolve ${KEY} and $[project:env:var] references in the server's env map

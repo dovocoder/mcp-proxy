@@ -18,6 +18,38 @@ func HasEnvVarRef(val string) bool {
 	return EnvVarRefPattern.MatchString(val) || ProjectEnvVarRefPattern.MatchString(val)
 }
 
+// ResolveTokenRef resolves a token reference string that may be:
+//   - A $[project:env:var] reference → resolved via the groupedResolver
+//   - A ${KEY} reference → resolved via the flatResolver
+//   - A plain env var name → resolved via the osResolver
+//
+// Each resolver returns the resolved value, or empty string if not found.
+// This is shared by both the proxy and store packages to avoid duplication.
+func ResolveTokenRef(ref string, flatResolver func(key string) string, groupedResolver func(groupKey string) string, osResolver func(name string) string) string {
+	if ref == "" {
+		return ""
+	}
+	// Check for $[project:env:var] pattern
+	if ProjectEnvVarRefPattern.MatchString(ref) {
+		subs := ProjectEnvVarRefPattern.FindStringSubmatch(ref)
+		if len(subs) == 4 {
+			groupKey := subs[1] + ":" + subs[2] + ":" + subs[3]
+			return groupedResolver(groupKey)
+		}
+		return ""
+	}
+	// Check for ${KEY} pattern
+	if EnvVarRefPattern.MatchString(ref) {
+		subs := EnvVarRefPattern.FindStringSubmatch(ref)
+		if len(subs) >= 2 {
+			return flatResolver(subs[1])
+		}
+		return ""
+	}
+	// Plain env var name
+	return osResolver(ref)
+}
+
 // Server represents a backend MCP server that the proxy connects to.
 type Server struct {
 	ID             string            `json:"id"`

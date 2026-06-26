@@ -1712,6 +1712,12 @@ func hasEnvVarRef(val string) bool {
 	return models.HasEnvVarRef(val)
 }
 
+// httpClient is used for outbound HTTP calls (e.g. GitHub API) with a
+// reasonable timeout to prevent hanging requests.
+var httpClient = &http.Client{
+	Timeout: 15 * time.Second,
+}
+
 // resolveEnvVarReferences resolves ${KEY}, ${KEY:-default}, and $[project:env:var]
 // references in env var values. Flat ${KEY} refs resolve within the same
 // project/environment scope (envMap). $[project:env:var] refs resolve against
@@ -2900,7 +2906,7 @@ func (h *Handlers) handleGetGithubIssue(w http.ResponseWriter, r *http.Request) 
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to reach GitHub API")
 		return

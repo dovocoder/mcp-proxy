@@ -17,12 +17,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
-var envVarRefPattern = models.EnvVarRefPattern
-
-// projectEnvVarRefPattern matches $[project:environment:var] patterns.
-var projectEnvVarRefPattern = models.ProjectEnvVarRefPattern
-
 // Store is the SQLite data access layer.
 type Store struct {
 	db         *sql.DB
@@ -2125,37 +2119,19 @@ func (s *Store) GetFirstGitHubToken() (string, error) {
 // resolveTokenRef resolves a token reference that may be a plain env var name,
 // a $[project:env:var] reference, or a ${KEY} reference.
 func (s *Store) resolveTokenRef(ref string) string {
-	if ref == "" {
-		return ""
-	}
-	// Check for $[project:env:var] pattern
-	if projectEnvVarRefPattern.MatchString(ref) {
-		subs := projectEnvVarRefPattern.FindStringSubmatch(ref)
-		if len(subs) == 4 {
-			groupKey := subs[1] + ":" + subs[2] + ":" + subs[3]
-			grouped, err := s.ListEnvVarsDecryptedGrouped()
-			if err == nil {
-				if v, ok := grouped[groupKey]; ok {
-					return v
-				}
-			}
+	flatResolver := func(key string) string {
+		flat, err := s.ListEnvVarsDecrypted()
+		if err == nil {
+			return flat[key]
 		}
 		return ""
 	}
-	// Check for ${KEY} pattern
-	if envVarRefPattern.MatchString(ref) {
-		subs := envVarRefPattern.FindStringSubmatch(ref)
-		if len(subs) >= 2 {
-			refKey := subs[1]
-			flat, err := s.ListEnvVarsDecrypted()
-			if err == nil {
-				if v, ok := flat[refKey]; ok {
-					return v
-				}
-			}
+	groupedResolver := func(groupKey string) string {
+		grouped, err := s.ListEnvVarsDecryptedGrouped()
+		if err == nil {
+			return grouped[groupKey]
 		}
 		return ""
 	}
-	// Plain env var name
-	return os.Getenv(ref)
+	return models.ResolveTokenRef(ref, flatResolver, groupedResolver, os.Getenv)
 }

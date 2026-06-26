@@ -7,7 +7,6 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { InfoBanner } from '@/components/InfoBanner';
 import {
@@ -144,7 +143,7 @@ export default function GitHubAccounts() {
         open={!!deleteTarget}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
         title="Delete GitHub Account"
-        description="Delete"
+        description="Are you sure you want to delete"
         itemName={deleteTarget?.name}
         confirmText="Delete"
         loading={deleteMutation.isPending}
