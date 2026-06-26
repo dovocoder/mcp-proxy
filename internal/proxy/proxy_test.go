@@ -169,3 +169,139 @@ func TestEnvVarRefPattern(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectEnvVarRefPattern(t *testing.T) {
+	cases := []struct {
+		input   string
+		matches bool
+		project string
+		env     string
+		varName string
+	}{
+		{"$[myapp:dev:TOKEN]", true, "myapp", "dev", "TOKEN"},
+		{"$[my-app:prod:API_KEY]", true, "my-app", "prod", "API_KEY"},
+		{"$[my.app:v2:SECRET_KEY]", true, "my.app", "v2", "SECRET_KEY"},
+		{"$[a:b:GITHUB_TOKEN]", true, "a", "b", "GITHUB_TOKEN"},
+		{"$[PROJ:ENV:VAR]", true, "PROJ", "ENV", "VAR"},
+		{"prefix $[myapp:dev:TOKEN] suffix", true, "myapp", "dev", "TOKEN"},
+		// Non-matches
+		{"$[myapp:dev:1TOKEN]", false, "", "", ""},   // var must start with letter
+		{"$[myapp:dev:]", false, "", "", ""},          // empty var name
+		{"$[:dev:TOKEN]", false, "", "", ""},           // empty project
+		{"$[myapp::TOKEN]", false, "", "", ""},          // empty env
+		{"$[myapp:dev:TOKEN", false, "", "", ""},        // missing closing bracket
+		{"$[myapp:dev]", false, "", "", ""},             // only 2 parts
+		{"${myapp:dev:TOKEN}", false, "", "", ""},       // curly braces, not square
+		// Edge: special chars in project/env names
+		{"$[my_app:staging_eu:DB_PASS]", true, "my_app", "staging_eu", "DB_PASS"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			matches := projectEnvVarRefPattern.MatchString(tc.input)
+			if matches != tc.matches {
+				t.Errorf("MatchString(%q) = %v, want %v", tc.input, matches, tc.matches)
+			}
+			if matches {
+				subs := projectEnvVarRefPattern.FindStringSubmatch(tc.input)
+				if subs[1] != tc.project {
+					t.Errorf("project: got %q, want %q", subs[1], tc.project)
+				}
+				if subs[2] != tc.env {
+					t.Errorf("env: got %q, want %q", subs[2], tc.env)
+				}
+				if subs[3] != tc.varName {
+					t.Errorf("var: got %q, want %q", subs[3], tc.varName)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveEnvRefsWithGrouped_SimpleProjectRef(t *testing.T) {
+	envMap := map[string]string{
+		"TOKEN": "$[myapp:dev:GITHUB_TOKEN]",
+	}
+	groupedVars := map[string]string{
+		"myapp:dev:GITHUB_TOKEN": "ghp_abcdef123",
+	}
+	result := resolveEnvRefsWithGrouped(envMap, nil, groupedVars)
+	if result["TOKEN"] != "ghp_abcdef123" {
+		t.Errorf("expected ghp_abcdef123, got %s", result["TOKEN"])
+	}
+}
+
+func TestResolveEnvRefsWithGrouped_UnknownProjectRef(t *testing.T) {
+	envMap := map[string]string{
+		"TOKEN": "$[unknown:env:KEY]",
+	}
+	groupedVars := map[string]string{}
+	result := resolveEnvRefsWithGrouped(envMap, nil, groupedVars)
+	// Unknown $[...] refs should be left as-is
+	if result["TOKEN"] != "$[unknown:env:KEY]" {
+		t.Errorf("expected $[unknown:env:KEY] unchanged, got %s", result["TOKEN"])
+	}
+}
+
+func TestResolveEnvRefsWithGrouped_MixedRefs(t *testing.T) {
+	envMap := map[string]string{
+		"TOKEN":    "$[myapp:dev:GITHUB_TOKEN]",
+		"TIMEOUT":  "${TIMEOUT:-30s}",
+		"PATH":     "/usr/bin",
+		"COMBINED": "prefix-$[myapp:prod:SECRET]-suffix",
+	}
+	refVars := map[string]string{}
+	groupedVars := map[string]string{
+		"myapp:dev:GITHUB_TOKEN": "ghp_token123",
+		"myapp:prod:SECRET":      "s3cr3t",
+	}
+	result := resolveEnvRefsWithGrouped(envMap, refVars, groupedVars)
+
+	if result["TOKEN"] != "ghp_token123" {
+		t.Errorf("TOKEN: expected ghp_token123, got %s", result["TOKEN"])
+	}
+	if result["TIMEOUT"] != "30s" {
+		t.Errorf("TIMEOUT: expected 30s, got %s", result["TIMEOUT"])
+	}
+	if result["PATH"] != "/usr/bin" {
+		t.Errorf("PATH: expected /usr/bin, got %s", result["PATH"])
+	}
+	if result["COMBINED"] != "prefix-s3cr3t-suffix" {
+		t.Errorf("COMBINED: expected prefix-s3cr3t-suffix, got %s", result["COMBINED"])
+	}
+}
+
+func TestResolveEnvRefsWithGrouped_ProjectAndFlatRef(t *testing.T) {
+	// Both $[project:env:var] and ${KEY} in the same value
+	envMap := map[string]string{
+		"URL": "https://${HOST}/api?token=$[myapp:dev:TOKEN]",
+	}
+	refVars := map[string]string{
+		"HOST": "api.example.com",
+	}
+	groupedVars := map[string]string{
+		"myapp:dev:TOKEN": "abc123",
+	}
+	result := resolveEnvRefsWithGrouped(envMap, refVars, groupedVars)
+	if result["URL"] != "https://api.example.com/api?token=abc123" {
+		t.Errorf("URL: expected https://api.example.com/api?token=abc123, got %s", result["URL"])
+	}
+}
+
+func TestResolveEnvRefsWithGrouped_NilGroupedVars(t *testing.T) {
+	// When groupedVars is nil, $[...] refs should be left as-is
+	envMap := map[string]string{
+		"TOKEN": "$[myapp:dev:KEY]",
+		"FLAT":  "${MY_VAR}",
+	}
+	refVars := map[string]string{
+		"MY_VAR": "resolved",
+	}
+	result := resolveEnvRefsWithGrouped(envMap, refVars, nil)
+	if result["TOKEN"] != "$[myapp:dev:KEY]" {
+		t.Errorf("TOKEN: expected $[myapp:dev:KEY] unchanged, got %s", result["TOKEN"])
+	}
+	if result["FLAT"] != "resolved" {
+		t.Errorf("FLAT: expected resolved, got %s", result["FLAT"])
+	}
+}

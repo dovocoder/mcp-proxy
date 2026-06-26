@@ -1328,6 +1328,31 @@ func (s *Store) ListEnvVarsDecrypted() (map[string]string, error) {
 	return result, nil
 }
 
+// ListEnvVarsDecryptedGrouped returns all env vars as a "project:env:key" → value
+// map with values decrypted. This is used to resolve $[project:env:var] references.
+func (s *Store) ListEnvVarsDecryptedGrouped() (map[string]string, error) {
+	envVars, err := s.ListEnvVars("", "")
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string)
+	for _, ev := range envVars {
+		var val string
+		if s.encEnabled {
+			decrypted, err := crypto.Decrypt(s.encKey, ev.Value)
+			if err != nil {
+				log.Printf("Warning: failed to decrypt env var %s/%s/%s: %v — skipping", ev.Project, ev.Environment, ev.Key, err)
+				continue
+			}
+			val = decrypted
+		} else {
+			val = ev.Value
+		}
+		result[ev.Project+":"+ev.Environment+":"+ev.Key] = val
+	}
+	return result, nil
+}
+
 // ListEnvVarProjects returns distinct project names from env_vars.
 func (s *Store) ListEnvVarProjects() ([]string, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT project FROM env_vars ORDER BY project`)

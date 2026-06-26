@@ -182,7 +182,8 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
           <h1 className="text-xl sm:text-2xl font-bold text-foreground">Env Variables</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Encrypted env vars per project & environment. Values can reference other keys with{' '}
-            <code className="text-xs bg-muted px-1 py-0.5 rounded">{'${KEY}'}</code>. Export via API key — decrypt locally.
+            <code className="text-xs bg-muted px-1 py-0.5 rounded">{'${KEY}'}</code> or specific project/env vars with{' '}
+            <code className="text-xs bg-muted px-1 py-0.5 rounded">{'$[project:env:var]'}</code>.
           </p>
         </div>
         <Dialog
@@ -564,6 +565,10 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
               <code className="text-foreground text-xs">{'${KEY}'}</code> to reference another variable
               in the same project/environment. Use{' '}
               <code className="text-foreground text-xs">{'${KEY:-default}'}</code> for a fallback.
+              Use{' '}
+              <code className="text-foreground text-xs">{'$[project:env:var]'}</code> to reference
+              a variable from a specific project and environment (e.g.{' '}
+              <code className="text-foreground text-xs">{'$[myapp:dev:TOKEN]'}</code>).
               References are resolved on export — the raw value stays encrypted in the database.
             </p>
           </div>

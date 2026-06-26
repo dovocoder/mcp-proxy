@@ -26,12 +26,38 @@ import (
 // envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
 var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
 
-// resolveEnvRefs resolves ${KEY} and ${KEY:-default} references in env map
-// values using the decrypted env vars from the store. Unknown keys are left
-// as-is (or replaced with the default if specified).
+// projectEnvVarRefPattern matches $[project:environment:var] patterns.
+// Example: $[myapp:dev:GITHUB_TOKEN] resolves to the GITHUB_TOKEN value
+// stored under project "myapp", environment "dev".
+var projectEnvVarRefPattern = regexp.MustCompile(`\$\[([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z_][A-Za-z0-9_]*)\]`)
+
+// resolveEnvRefs resolves ${KEY}, ${KEY:-default}, and $[project:env:var] references
+// in env map values. Flat ${KEY} refs resolve against refVars (all env vars).
+// $[project:env:var] refs resolve against groupedVars (project:env:key → value).
 func resolveEnvRefs(envMap map[string]string, refVars map[string]string) map[string]string {
+	return resolveEnvRefsWithGrouped(envMap, refVars, nil)
+}
+
+// resolveEnvRefsWithGrouped is the full resolver that also handles
+// $[project:env:var] references using the groupedVars map.
+func resolveEnvRefsWithGrouped(envMap map[string]string, refVars map[string]string, groupedVars map[string]string) map[string]string {
 	resolved := make(map[string]string, len(envMap))
 	for key, val := range envMap {
+		// First resolve $[project:env:var] references
+		if groupedVars != nil {
+			val = projectEnvVarRefPattern.ReplaceAllStringFunc(val, func(match string) string {
+				subs := projectEnvVarRefPattern.FindStringSubmatch(match)
+				if len(subs) < 4 {
+					return match
+				}
+				groupKey := subs[1] + ":" + subs[2] + ":" + subs[3]
+				if v, ok := groupedVars[groupKey]; ok {
+					return v
+				}
+				return match
+			})
+		}
+		// Then resolve ${KEY} and ${KEY:-default} references
 		resolved[key] = envVarRefPattern.ReplaceAllStringFunc(val, func(match string) string {
 			sub := envVarRefPattern.FindStringSubmatch(match)
 			refKey := sub[1]
@@ -479,17 +505,23 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 	if len(serverEnv) > 0 {
 		hasRefs := false
 		for _, v := range serverEnv {
-			if envVarRefPattern.MatchString(v) {
+			if envVarRefPattern.MatchString(v) || projectEnvVarRefPattern.MatchString(v) {
 				hasRefs = true
 				break
 			}
 		}
 		if hasRefs {
-			if refVars, err := m.store.ListEnvVarsDecrypted(); err == nil && len(refVars) > 0 {
-				serverEnv = resolveEnvRefs(serverEnv, refVars)
-				log.Printf("Server %s: resolved env var references from %d stored env vars", srv.Name, len(refVars))
-			} else if err != nil {
+			refVars, err := m.store.ListEnvVarsDecrypted()
+			if err != nil {
 				log.Printf("Server %s: failed to load env vars for reference resolution: %v", srv.Name, err)
+			}
+			groupedVars, err := m.store.ListEnvVarsDecryptedGrouped()
+			if err != nil {
+				log.Printf("Server %s: failed to load grouped env vars: %v", srv.Name, err)
+			}
+			if (refVars != nil && len(refVars) > 0) || (groupedVars != nil && len(groupedVars) > 0) {
+				serverEnv = resolveEnvRefsWithGrouped(serverEnv, refVars, groupedVars)
+				log.Printf("Server %s: resolved env var references from %d flat + %d grouped env vars", srv.Name, len(refVars), len(groupedVars))
 			}
 		}
 	}
