@@ -12,9 +12,13 @@ import {
   FolderPlus,
   Layers,
   GripVertical,
+  Github,
+  ExternalLink,
+  Loader2,
 } from 'lucide-react';
 import {
   tasks as tasksApi,
+  github as githubApi,
   type Task,
   type TaskStatus,
   type TaskPriority,
@@ -122,6 +126,11 @@ export default function TaskBoard() {
   const [newBoardOpen, setNewBoardOpen] = useState(false);
   const [deleteBoardOpen, setDeleteBoardOpen] = useState(false);
   const [viewMode, setViewMode] = useState<'board' | 'list'>('board');
+  const [ghIssueUrl, setGhIssueUrl] = useState('');
+  const [ghIssueLoading, setGhIssueLoading] = useState(false);
+  const [ghIssueError, setGhIssueError] = useState('');
+  const [ghIssueData, setGhIssueData] = useState<{ url: string; title: string; body: string; labels: string[]; assignee: string } | null>(null);
+  const [ghIssueDialogOpen, setGhIssueDialogOpen] = useState(false);
 
   const { data: boards } = useQuery({
     queryKey: ['task-board-sets'],
@@ -202,6 +211,33 @@ export default function TaskBoard() {
     updateMutation.mutate({ id: taskId, data: { status: newStatus } });
   };
 
+  const handleFetchGithubIssue = async () => {
+    if (!ghIssueUrl.trim()) return;
+    setGhIssueLoading(true);
+    setGhIssueError('');
+    try {
+      const issue = await githubApi.fetchIssue(ghIssueUrl.trim());
+      setGhIssueData({
+        url: ghIssueUrl.trim(),
+        title: issue.title,
+        body: issue.body || '',
+        labels: issue.labels || [],
+        assignee: issue.assignee || '',
+      });
+    } catch (err) {
+      setGhIssueError(err instanceof Error ? err.message : 'Failed to fetch issue');
+    } finally {
+      setGhIssueLoading(false);
+    }
+  };
+
+  const resetGhIssue = () => {
+    setGhIssueUrl('');
+    setGhIssueData(null);
+    setGhIssueError('');
+    setGhIssueLoading(false);
+  };
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -212,20 +248,103 @@ export default function TaskBoard() {
             Kanban board for your projects — your AI agent can create and update tasks via MCP
           </p>
         </div>
-        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger
-            render={
-              <Button size="sm" className="shrink-0">
-                <Plus className="size-4" />
-                <span className="hidden sm:inline">New Task</span>
-                <span className="sm:hidden">New</span>
-              </Button>
-            }
-          />
-          <DialogContent className="sm:max-w-2xl">
-            <TaskForm boardId={selectedBoard} onSaved={() => setCreateOpen(false)} />
-          </DialogContent>
-        </Dialog>
+        <div className="flex items-center gap-2">
+          <Dialog open={ghIssueDialogOpen} onOpenChange={(open) => { setGhIssueDialogOpen(open); if (!open) resetGhIssue(); }}>
+            <DialogTrigger
+              render={
+                <Button variant="outline" size="sm" className="shrink-0">
+                  <Github className="size-4" />
+                  <span className="hidden sm:inline">From GitHub</span>
+                  <span className="sm:hidden">GitHub</span>
+                </Button>
+              }
+            />
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Create task from GitHub issue</DialogTitle>
+                <DialogDescription>
+                  Paste a GitHub issue URL to pre-fill the task with its title, body, labels, and assignee.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="flex gap-2">
+                  <Input
+                    value={ghIssueUrl}
+                    onChange={(e) => setGhIssueUrl(e.target.value)}
+                    placeholder="https://github.com/owner/repo/issues/123"
+                    className="font-mono text-sm"
+                  />
+                  <Button
+                    onClick={handleFetchGithubIssue}
+                    disabled={!ghIssueUrl.trim() || ghIssueLoading}
+                    className="shrink-0"
+                  >
+                    {ghIssueLoading ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Github className="size-4" />
+                    )}
+                    Fetch
+                  </Button>
+                </div>
+                {ghIssueError && (
+                  <p className="text-sm text-destructive">{ghIssueError}</p>
+                )}
+                {ghIssueData && (
+                  <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-[10px]">Preview</Badge>
+                      <a href={ghIssueData.url} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:opacity-80 flex items-center gap-1">
+                        Issue <ExternalLink className="size-2.5" />
+                      </a>
+                    </div>
+                    <p className="text-sm font-medium text-foreground">{ghIssueData.title}</p>
+                    {ghIssueData.body && (
+                      <p className="text-xs text-muted-foreground line-clamp-3">{ghIssueData.body}</p>
+                    )}
+                    {ghIssueData.labels.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {ghIssueData.labels.map((l) => (
+                          <Badge key={l} variant="outline" className="text-[10px]">{l}</Badge>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="flex justify-end gap-2">
+                  <DialogClose render={<Button variant="outline" type="button">Cancel</Button>} />
+                  <Button
+                    disabled={!ghIssueData}
+                    onClick={() => {
+                      setGhIssueDialogOpen(false);
+                      setCreateOpen(true);
+                    }}
+                  >
+                    Continue
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetGhIssue(); }}>
+            <DialogTrigger
+              render={
+                <Button size="sm" className="shrink-0">
+                  <Plus className="size-4" />
+                  <span className="hidden sm:inline">New Task</span>
+                  <span className="sm:hidden">New</span>
+                </Button>
+              }
+            />
+            <DialogContent className="sm:max-w-2xl">
+              <TaskForm
+                boardId={selectedBoard}
+                onSaved={() => { setCreateOpen(false); resetGhIssue(); }}
+                prefilledIssue={ghIssueData}
+              />
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
 
       {/* Info banner */}
@@ -612,6 +731,18 @@ function TaskCard({
                 {new Date(task.due_date).toLocaleDateString()}
               </span>
             )}
+            {task.github_issue_url && (
+              <a
+                href={task.github_issue_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-primary hover:opacity-80"
+              >
+                <Github className="size-3" />
+                #{task.github_issue_url.match(/issues\/(\d+)/)?.[1] ?? 'issue'}
+                <ExternalLink className="size-2.5" />
+              </a>
+            )}
           </div>
 
           {/* Quick status changer (board mode) */}
@@ -656,20 +787,42 @@ function TaskForm({
   task,
   boardId,
   onSaved,
+  prefilledIssue,
 }: {
   task?: Task;
   boardId: string;
   onSaved: () => void;
+  prefilledIssue?: { url: string; title: string; body: string; labels: string[]; assignee: string } | null;
 }) {
   const queryClient = useQueryClient();
-  const [title, setTitle] = useState(task?.title ?? '');
-  const [description, setDescription] = useState(task?.description ?? '');
+  const [title, setTitle] = useState(task?.title ?? prefilledIssue?.title ?? '');
+  const [description, setDescription] = useState(task?.description ?? prefilledIssue?.body ?? '');
   const [status, setStatus] = useState<TaskStatus>(task?.status ?? 'todo');
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 'medium');
   const [priorityLevel, setPriorityLevel] = useState<number>(task?.priority_level ?? 3);
-  const [assignee, setAssignee] = useState(task?.assignee ?? '');
+  const [assignee, setAssignee] = useState(task?.assignee ?? prefilledIssue?.assignee ?? '');
   const [dueDate, setDueDate] = useState(task?.due_date ?? '');
-  const [tags, setTags] = useState((task?.tags ?? []).join(', '));
+  const [tags, setTags] = useState((task?.tags ?? prefilledIssue?.labels ?? []).join(', '));
+  const [githubIssueUrl, setGithubIssueUrl] = useState(task?.github_issue_url ?? prefilledIssue?.url ?? '');
+  const [issueFetchLoading, setIssueFetchLoading] = useState(false);
+  const [issueFetchError, setIssueFetchError] = useState('');
+
+  const handleFetchIssue = async () => {
+    if (!githubIssueUrl.trim()) return;
+    setIssueFetchLoading(true);
+    setIssueFetchError('');
+    try {
+      const issue = await githubApi.fetchIssue(githubIssueUrl.trim());
+      setTitle(issue.title);
+      setDescription(issue.body);
+      if (issue.assignee) setAssignee(issue.assignee);
+      if (issue.labels.length > 0) setTags(issue.labels.join(', '));
+    } catch (err) {
+      setIssueFetchError(err instanceof Error ? err.message : 'Failed to fetch issue');
+    } finally {
+      setIssueFetchLoading(false);
+    }
+  };
 
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -683,6 +836,7 @@ function TaskForm({
         assignee,
         due_date: dueDate,
         tags: tagArray,
+        github_issue_url: githubIssueUrl || undefined,
       };
       if (task) {
         return tasksApi.update(task.id, { ...payload, board_id: boardId });
@@ -805,6 +959,44 @@ function TaskForm({
             onChange={(e) => setTags(e.target.value)}
             placeholder="backend, urgent-fix"
           />
+        </div>
+
+        {/* GitHub issue link */}
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="task-github-issue" className="flex items-center gap-1.5">
+            <Github className="size-3.5" />
+            GitHub Issue URL (optional)
+          </Label>
+          <div className="flex gap-2">
+            <Input
+              id="task-github-issue"
+              value={githubIssueUrl}
+              onChange={(e) => setGithubIssueUrl(e.target.value)}
+              placeholder="https://github.com/owner/repo/issues/123"
+              className="font-mono text-sm"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleFetchIssue}
+              disabled={!githubIssueUrl.trim() || issueFetchLoading}
+              className="shrink-0"
+            >
+              {issueFetchLoading ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Github className="size-4" />
+              )}
+              <span className="hidden sm:inline">Fetch</span>
+            </Button>
+          </div>
+          {issueFetchError && (
+            <p className="text-xs text-destructive">{issueFetchError}</p>
+          )}
+          {prefilledIssue && (
+            <p className="text-xs text-emerald-400">✓ Pre-filled from GitHub issue</p>
+          )}
         </div>
 
         <div className="flex flex-col gap-1.5">

@@ -211,6 +211,9 @@ func (h *Handlers) SetupRoutes(mux *http.ServeMux) {
 	adminMux.HandleFunc("PUT /api/taskboard/{id}", h.handleUpdateTaskItem)
 	adminMux.HandleFunc("DELETE /api/taskboard/{id}", h.handleDeleteTaskItem)
 
+	// GitHub issue lookup (admin — JWT auth)
+	adminMux.HandleFunc("GET /api/github/issue", h.handleGetGithubIssue)
+
 	// Env var routes (admin — JWT auth)
 	// Register more specific paths first for safety.
 	adminMux.HandleFunc("GET /api/env-vars/projects", h.handleListEnvVarProjects)
@@ -2615,13 +2618,14 @@ func (h *Handlers) handleCreateTaskItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	task := &models.TaskItem{
-		BoardID:       req.BoardID,
-		Title:         req.Title,
-		Description:   req.Description,
-		Status:        req.Status,
-		Priority:      req.Priority,
-		Assignee:      req.Assignee,
-		Tags:          req.Tags,
+		BoardID:        req.BoardID,
+		Title:          req.Title,
+		Description:    req.Description,
+		Status:         req.Status,
+		Priority:       req.Priority,
+		Assignee:       req.Assignee,
+		Tags:           req.Tags,
+		GithubIssueURL: req.GithubIssueURL,
 	}
 	if req.PriorityLevel != nil {
 		task.PriorityLevel = *req.PriorityLevel
@@ -2682,6 +2686,9 @@ func (h *Handlers) handleUpdateTaskItem(w http.ResponseWriter, r *http.Request) 
 	if req.Tags != nil {
 		task.Tags = *req.Tags
 	}
+	if req.GithubIssueURL != nil {
+		task.GithubIssueURL = *req.GithubIssueURL
+	}
 	if req.DueDate != nil {
 		if *req.DueDate == "" {
 			task.DueDate = nil
@@ -2716,6 +2723,104 @@ func (h *Handlers) handleTaskBoardStats(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// githubIssueResponse is the JSON returned by the GitHub issue lookup endpoint.
+type githubIssueResponse struct {
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	State     string   `json:"state"`
+	Assignee  string   `json:"assignee"`
+	Labels    []string `json:"labels"`
+	HTMLURL   string   `json:"html_url"`
+	Number    int      `json:"number"`
+	User      string   `json:"user"`
+}
+
+// githubAPIIssue mirrors the relevant fields of the GitHub REST API issue object.
+type githubAPIIssue struct {
+	Title    string         `json:"title"`
+	Body     string         `json:"body"`
+	State    string         `json:"state"`
+	HTMLURL  string         `json:"html_url"`
+	Number   int            `json:"number"`
+	Assignee *githubAPIUser `json:"assignee"`
+	Labels   []githubLabel  `json:"labels"`
+	User     githubAPIUser  `json:"user"`
+}
+
+type githubAPIUser struct {
+	Login string `json:"login"`
+}
+
+type githubLabel struct {
+	Name string `json:"name"`
+}
+
+// handleGetGithubIssue fetches issue metadata from the GitHub REST API.
+// Query param: url=https://github.com/owner/repo/issues/123
+func (h *Handlers) handleGetGithubIssue(w http.ResponseWriter, r *http.Request) {
+	issueURL := r.URL.Query().Get("url")
+	if issueURL == "" {
+		writeError(w, http.StatusBadRequest, "url query parameter is required")
+		return
+	}
+
+	// Parse the GitHub issue URL to extract owner, repo, and issue number.
+	// Expected form: https://github.com/{owner}/{repo}/issues/{number}
+	parsed, err := url.Parse(issueURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid url")
+		return
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	// parts should be: ["{owner}", "{repo}", "issues", "{number}"]
+	if len(parts) != 4 || parts[2] != "issues" {
+		writeError(w, http.StatusBadRequest, "url must be a GitHub issue URL (e.g. https://github.com/owner/repo/issues/123)")
+		return
+	}
+	owner := parts[0]
+	repo := parts[1]
+	issueNumber := parts[3]
+	if owner == "" || repo == "" || issueNumber == "" {
+		writeError(w, http.StatusBadRequest, "could not extract owner, repo, and issue number from url")
+		return
+	}
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%s", owner, repo, issueNumber)
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "failed to reach GitHub API")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("GitHub API returned status %d", resp.StatusCode))
+		return
+	}
+
+	var issue githubAPIIssue
+	if err := json.NewDecoder(resp.Body).Decode(&issue); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to decode GitHub API response")
+		return
+	}
+
+	out := githubIssueResponse{
+		Title:    issue.Title,
+		Body:     issue.Body,
+		State:    issue.State,
+		HTMLURL:  issue.HTMLURL,
+		Number:   issue.Number,
+		User:     issue.User.Login,
+		Labels:   []string{},
+	}
+	if issue.Assignee != nil {
+		out.Assignee = issue.Assignee.Login
+	}
+	for _, l := range issue.Labels {
+		out.Labels = append(out.Labels, l.Name)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handlers) handleSearchTaskItems(w http.ResponseWriter, r *http.Request) {

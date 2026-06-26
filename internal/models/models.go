@@ -390,9 +390,10 @@ type TaskItem struct {
 	PriorityLevel int        `json:"priority_level"` // 1-5 (1=highest priority, 5=lowest)
 	Assignee      string     `json:"assignee,omitempty"`
 	DueDate       *time.Time `json:"due_date,omitempty"`
-	Tags          []string   `json:"tags"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	Tags            []string   `json:"tags"`
+	GithubIssueURL  string     `json:"github_issue_url,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // TaskBoardStats represents summary statistics for the task board dashboard.
@@ -412,9 +413,10 @@ type CreateTaskItemRequest struct {
 	Status        string   `json:"status,omitempty"`
 	Priority      string   `json:"priority,omitempty"`
 	PriorityLevel *int     `json:"priority_level,omitempty"`
-	Assignee      string   `json:"assignee,omitempty"`
-	DueDate       *string  `json:"due_date,omitempty"`
-	Tags          []string `json:"tags,omitempty"`
+	Assignee       string   `json:"assignee,omitempty"`
+	DueDate        *string  `json:"due_date,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	GithubIssueURL string   `json:"github_issue_url,omitempty"`
 }
 
 // UpdateTaskItemRequest is the payload for updating a task board item.
@@ -424,7 +426,8 @@ type UpdateTaskItemRequest struct {
 	Status        *string  `json:"status,omitempty"`
 	Priority      *string  `json:"priority,omitempty"`
 	PriorityLevel *int     `json:"priority_level,omitempty"`
-	Assignee      *string  `json:"assignee,omitempty"`
-	DueDate       *string  `json:"due_date,omitempty"`
-	Tags          *[]string `json:"tags,omitempty"`
+	Assignee       *string    `json:"assignee,omitempty"`
+	DueDate        *string    `json:"due_date,omitempty"`
+	Tags           *[]string  `json:"tags,omitempty"`
+	GithubIssueURL *string    `json:"github_issue_url,omitempty"`
 }

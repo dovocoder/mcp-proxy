@@ -427,6 +427,7 @@ export interface Task {
   assignee: string;
   due_date: string;
   tags: string[];
+  github_issue_url?: string;
   created_at: string;
   updated_at: string;
 }
@@ -449,6 +450,7 @@ export interface TaskInput {
   assignee?: string;
   due_date?: string;
   tags?: string[];
+  github_issue_url?: string;
 }
 
 export const tasks = {
@@ -514,4 +516,22 @@ export const envVars = {
   projects: () => request<string[]>('/env-vars/projects'),
   environments: (project: string) =>
     request<string[]>(`/env-vars/environments?project=${encodeURIComponent(project)}`),
+};
+
+// --- GitHub ---
+
+export interface GitHubIssue {
+  title: string;
+  body: string;
+  state: string;
+  assignee: string;
+  labels: string[];
+  html_url: string;
+  number: number;
+  user: string;
+}
+
+export const github = {
+  fetchIssue: (url: string) =>
+    request<GitHubIssue>(`/github/issue?url=${encodeURIComponent(url)}`),
 };

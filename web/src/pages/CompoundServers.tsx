@@ -14,6 +14,8 @@ import {
   Wrench,
   Check,
   Brain,
+  BookOpen,
+  KanbanSquare,
 } from 'lucide-react';
 import {
   compounds as compoundsApi,
@@ -208,11 +210,45 @@ export default function CompoundServers() {
                     <SelectValue placeholder="+ Add server" />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableServers.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>
-                        {s.name} ({s.transport})
-                      </SelectItem>
-                    ))}
+                    {/* Group: Built-in */}
+                    {availableServers.some((s) => s.is_builtin) && (
+                      <>
+                        <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                          Built-in MCP
+                        </div>
+                        {availableServers.filter((s) => s.is_builtin).map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            <div className="flex items-center gap-2">
+                              {s.builtin_type === 'memory' && <Brain className="size-3.5 text-violet-400" />}
+                              {s.builtin_type === 'skills' && <BookOpen className="size-3.5 text-blue-400" />}
+                              {s.builtin_type === 'tasks' && <KanbanSquare className="size-3.5 text-orange-400" />}
+                              <span>{s.name}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </>
+                    )}
+                    {/* Group: External */}
+                    {availableServers.some((s) => !s.is_builtin) && (
+                      <>
+                        <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+                          External Servers
+                        </div>
+                        {availableServers.filter((s) => !s.is_builtin).map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            <div className="flex items-center gap-2">
+                              {s.status === 'connected' ? (
+                                <CheckCircle2 className="size-3.5 text-emerald-400 shrink-0" />
+                              ) : (
+                                <XCircle className="size-3.5 text-muted-foreground shrink-0" />
+                              )}
+                              <span>{s.name}</span>
+                              <span className="text-xs text-muted-foreground">{s.transport}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </>
+                    )}
                   </SelectContent>
                 </Select>
               )}

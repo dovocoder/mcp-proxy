@@ -258,6 +258,7 @@ func migrate(db *sql.DB) error {
 		assignee TEXT NOT NULL DEFAULT '',
 		due_date TEXT,
 		tags TEXT NOT NULL DEFAULT '[]',
+		github_issue_url TEXT,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	);
@@ -323,6 +324,12 @@ func migrate(db *sql.DB) error {
 
 	// Migration: add bearer_token_env column to servers
 	_, err = db.Exec(`ALTER TABLE servers ADD COLUMN bearer_token_env TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		// Column already exists
+	}
+
+	// Migration: add github_issue_url column to task_items
+	_, err = db.Exec(`ALTER TABLE task_items ADD COLUMN github_issue_url TEXT`)
 	if err != nil {
 		// Column already exists
 	}
@@ -1778,22 +1785,23 @@ func (s *Store) CreateTaskItem(task *models.TaskItem) error {
 		dueDate = task.DueDate.Format(time.RFC3339)
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO task_items (id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO task_items (id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, github_issue_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.BoardID, task.Title, task.Description, task.Status, task.Priority, task.PriorityLevel,
 		task.Assignee, dueDate, string(tagsJSON),
+		task.GithubIssueURL,
 		task.CreatedAt.Format(time.RFC3339), task.UpdatedAt.Format(time.RFC3339),
 	)
 	return err
 }
 
 func (s *Store) GetTaskItem(id string) (*models.TaskItem, error) {
-	row := s.db.QueryRow(`SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, created_at, updated_at FROM task_items WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, github_issue_url, created_at, updated_at FROM task_items WHERE id = ?`, id)
 	return scanTaskItem(row)
 }
 
 func (s *Store) ListTaskItems(boardID, statusFilter, priorityFilter string) ([]*models.TaskItem, error) {
-	q := `SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, created_at, updated_at FROM task_items`
+	q := `SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, github_issue_url, created_at, updated_at FROM task_items`
 	args := []interface{}{}
 	where := []string{}
 	if boardID != "" {
@@ -1839,9 +1847,10 @@ func (s *Store) UpdateTaskItem(task *models.TaskItem) error {
 		dueDate = task.DueDate.Format(time.RFC3339)
 	}
 	_, err := s.db.Exec(`
-		UPDATE task_items SET title=?, description=?, status=?, priority=?, priority_level=?, assignee=?, due_date=?, tags=?, updated_at=? WHERE id=?`,
+		UPDATE task_items SET title=?, description=?, status=?, priority=?, priority_level=?, assignee=?, due_date=?, tags=?, github_issue_url=?, updated_at=? WHERE id=?`,
 		task.Title, task.Description, task.Status, task.Priority, task.PriorityLevel,
 		task.Assignee, dueDate, string(tagsJSON),
+		task.GithubIssueURL,
 		task.UpdatedAt.Format(time.RFC3339), task.ID,
 	)
 	return err
@@ -1890,7 +1899,7 @@ func (s *Store) GetTaskBoardStats(boardID string) (*models.TaskBoardStats, error
 func (s *Store) SearchTaskItems(query string) ([]*models.TaskItem, error) {
 	likeQuery := "%" + query + "%"
 	rows, err := s.db.Query(
-		`SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, created_at, updated_at FROM task_items WHERE title LIKE ? OR description LIKE ? OR assignee LIKE ? OR tags LIKE ? ORDER BY updated_at DESC`,
+		`SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, github_issue_url, created_at, updated_at FROM task_items WHERE title LIKE ? OR description LIKE ? OR assignee LIKE ? OR tags LIKE ? ORDER BY updated_at DESC`,
 		likeQuery, likeQuery, likeQuery, likeQuery,
 	)
 	if err != nil {
@@ -1911,8 +1920,8 @@ func (s *Store) SearchTaskItems(query string) ([]*models.TaskItem, error) {
 func scanTaskItem(s rowScanner) (*models.TaskItem, error) {
 	var t models.TaskItem
 	var tagsJSON string
-	var dueDate, createdAt, updatedAt sql.NullString
-	if err := s.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.Status, &t.Priority, &t.PriorityLevel, &t.Assignee, &dueDate, &tagsJSON, &createdAt, &updatedAt); err != nil {
+	var dueDate, createdAt, updatedAt, githubIssueURL sql.NullString
+	if err := s.Scan(&t.ID, &t.BoardID, &t.Title, &t.Description, &t.Status, &t.Priority, &t.PriorityLevel, &t.Assignee, &dueDate, &tagsJSON, &githubIssueURL, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	json.Unmarshal([]byte(tagsJSON), &t.Tags)
@@ -1922,6 +1931,9 @@ func scanTaskItem(s rowScanner) (*models.TaskItem, error) {
 	if dueDate.Valid {
 		tt, _ := time.Parse(time.RFC3339, dueDate.String)
 		t.DueDate = &tt
+	}
+	if githubIssueURL.Valid {
+		t.GithubIssueURL = githubIssueURL.String
 	}
 	if createdAt.Valid {
 		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt.String)
