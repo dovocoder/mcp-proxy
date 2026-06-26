@@ -74,6 +74,48 @@ func resolveEnvRefsWithGrouped(envMap map[string]string, refVars map[string]stri
 	return resolved
 }
 
+// resolveTokenRef resolves a token reference that may be:
+//   - A plain env var name (e.g. "GITHUB_TOKEN") → os.Getenv
+//   - A $[project:env:var] reference → resolved from the store's grouped env vars
+//   - A ${KEY} reference → resolved from the store's flat env vars
+//
+// Returns the resolved value, or empty string if not found.
+func resolveTokenRef(ref string, st *store.Store) string {
+	if ref == "" {
+		return ""
+	}
+	// Check for $[project:env:var] pattern
+	if projectEnvVarRefPattern.MatchString(ref) {
+		subs := projectEnvVarRefPattern.FindStringSubmatch(ref)
+		if len(subs) == 4 {
+			groupKey := subs[1] + ":" + subs[2] + ":" + subs[3]
+			grouped, err := st.ListEnvVarsDecryptedGrouped()
+			if err == nil {
+				if v, ok := grouped[groupKey]; ok {
+					return v
+				}
+			}
+		}
+		return ""
+	}
+	// Check for ${KEY} pattern
+	if envVarRefPattern.MatchString(ref) {
+		subs := envVarRefPattern.FindStringSubmatch(ref)
+		if len(subs) >= 2 {
+			refKey := subs[1]
+			flat, err := st.ListEnvVarsDecrypted()
+			if err == nil {
+				if v, ok := flat[refKey]; ok {
+					return v
+				}
+			}
+		}
+		return ""
+	}
+	// Plain env var name
+	return os.Getenv(ref)
+}
+
 // LogEntry is a single stderr log line with timestamp.
 type LogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
@@ -412,13 +454,13 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 			log.Printf("Server %s: using manual bearer token (%d chars)", srv.Name, len(authToken))
 		}
 	case "env_bearer":
-		// Bearer token read from an environment variable
+		// Bearer token read from an environment variable or resolved from $[project:env:var]
 		if srv.BearerTokenEnv != "" {
-			authToken = os.Getenv(srv.BearerTokenEnv)
+			authToken = resolveTokenRef(srv.BearerTokenEnv, m.store)
 			if authToken == "" {
-				log.Printf("Server %s: env var %s is empty — token not available", srv.Name, srv.BearerTokenEnv)
+				log.Printf("Server %s: env ref %s is empty — token not available", srv.Name, srv.BearerTokenEnv)
 			} else {
-				log.Printf("Server %s: using env var bearer token from %s (%d chars)", srv.Name, srv.BearerTokenEnv, len(authToken))
+				log.Printf("Server %s: using bearer token from %s (%d chars)", srv.Name, srv.BearerTokenEnv, len(authToken))
 			}
 		} else {
 			log.Printf("Server %s: auth_method=env_bearer but bearer_token_env is not set", srv.Name)

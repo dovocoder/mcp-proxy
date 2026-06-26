@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,12 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
+var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
+
+// projectEnvVarRefPattern matches $[project:environment:var] patterns.
+var projectEnvVarRefPattern = regexp.MustCompile(`\$\[([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z_][A-Za-z0-9_]*)\]`)
 
 // Store is the SQLite data access layer.
 type Store struct {
@@ -2096,7 +2103,10 @@ func (s *Store) DeleteGitHubAccount(id string) error {
 
 // GetFirstGitHubToken returns the decrypted token of the first GitHub account,
 // or an empty string if no accounts exist. If the account uses a token_env
-// reference, the env var is resolved at runtime.
+// reference, it can be:
+//   - A plain env var name (e.g. "GITHUB_TOKEN") → os.Getenv
+//   - A $[project:env:var] reference → resolved from stored grouped env vars
+//   - A ${KEY} reference → resolved from stored flat env vars
 func (s *Store) GetFirstGitHubToken() (string, error) {
 	var token, tokenEnv string
 	err := s.db.QueryRow(`SELECT token, token_env FROM github_accounts ORDER BY created_at LIMIT 1`).Scan(&token, &tokenEnv)
@@ -2106,12 +2116,47 @@ func (s *Store) GetFirstGitHubToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// If token_env is set, resolve from environment
+	// If token_env is set, resolve the reference
 	if tokenEnv != "" {
-		if v := os.Getenv(tokenEnv); v != "" {
-			return v, nil
-		}
-		return "", nil
+		return s.resolveTokenRef(tokenEnv), nil
 	}
 	return s.decryptToken(token), nil
+}
+
+// resolveTokenRef resolves a token reference that may be a plain env var name,
+// a $[project:env:var] reference, or a ${KEY} reference.
+func (s *Store) resolveTokenRef(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	// Check for $[project:env:var] pattern
+	if projectEnvVarRefPattern.MatchString(ref) {
+		subs := projectEnvVarRefPattern.FindStringSubmatch(ref)
+		if len(subs) == 4 {
+			groupKey := subs[1] + ":" + subs[2] + ":" + subs[3]
+			grouped, err := s.ListEnvVarsDecryptedGrouped()
+			if err == nil {
+				if v, ok := grouped[groupKey]; ok {
+					return v
+				}
+			}
+		}
+		return ""
+	}
+	// Check for ${KEY} pattern
+	if envVarRefPattern.MatchString(ref) {
+		subs := envVarRefPattern.FindStringSubmatch(ref)
+		if len(subs) >= 2 {
+			refKey := subs[1]
+			flat, err := s.ListEnvVarsDecrypted()
+			if err == nil {
+				if v, ok := flat[refKey]; ok {
+					return v
+				}
+			}
+		}
+		return ""
+	}
+	// Plain env var name
+	return os.Getenv(ref)
 }

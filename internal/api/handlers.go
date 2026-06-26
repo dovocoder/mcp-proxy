@@ -1705,11 +1705,35 @@ func slugify(name string) string {
 // envVarRefPattern matches ${KEY} or ${KEY:-default} patterns in env var values.
 var envVarRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
 
-// resolveEnvVarReferences resolves ${KEY} and ${KEY:-default} references in env var values.
-// Keys are resolved within the same project/environment scope. Unknown keys are left
-// as-is (or replaced with the default if specified).
-func resolveEnvVarReferences(envMap map[string]string) {
+// projectEnvVarRefPattern matches $[project:environment:var] patterns.
+var projectEnvVarRefPattern = regexp.MustCompile(`\$\[([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):([A-Za-z_][A-Za-z0-9_]*)\]`)
+
+// hasEnvVarRef returns true if the value contains any env var reference pattern.
+func hasEnvVarRef(val string) bool {
+	return envVarRefPattern.MatchString(val) || projectEnvVarRefPattern.MatchString(val)
+}
+
+// resolveEnvVarReferences resolves ${KEY}, ${KEY:-default}, and $[project:env:var]
+// references in env var values. Flat ${KEY} refs resolve within the same
+// project/environment scope (envMap). $[project:env:var] refs resolve against
+// groupedVars (project:env:key → value). Unknown refs are left as-is.
+func resolveEnvVarReferences(envMap map[string]string, groupedVars map[string]string) {
 	for key, val := range envMap {
+		// First resolve $[project:env:var] references
+		if groupedVars != nil {
+			val = projectEnvVarRefPattern.ReplaceAllStringFunc(val, func(match string) string {
+				subs := projectEnvVarRefPattern.FindStringSubmatch(match)
+				if len(subs) < 4 {
+					return match
+				}
+				groupKey := subs[1] + ":" + subs[2] + ":" + subs[3]
+				if v, ok := groupedVars[groupKey]; ok {
+					return v
+				}
+				return match
+			})
+		}
+		// Then resolve ${KEY} and ${KEY:-default} references
 		envMap[key] = envVarRefPattern.ReplaceAllStringFunc(val, func(match string) string {
 			sub := envVarRefPattern.FindStringSubmatch(match)
 			refKey := sub[1]
@@ -1744,15 +1768,21 @@ func (h *Handlers) handleListEnvVars(w http.ResponseWriter, r *http.Request) {
 		}
 		ev.Value = decrypted
 		envMap[ev.Key] = decrypted
-		ev.IsReference = envVarRefPattern.MatchString(decrypted)
+		ev.IsReference = hasEnvVarRef(decrypted)
 	}
 
-	// Resolve ${KEY} references for display
+	// Load grouped env vars for $[project:env:var] resolution
+	groupedVars, err := h.store.ListEnvVarsDecryptedGrouped()
+	if err != nil {
+		log.Printf("Warning: failed to load grouped env vars for reference resolution: %v", err)
+	}
+
+	// Resolve ${KEY} and $[project:env:var] references for display
 	resolvedMap := make(map[string]string, len(envMap))
 	for k, v := range envMap {
 		resolvedMap[k] = v
 	}
-	resolveEnvVarReferences(resolvedMap)
+	resolveEnvVarReferences(resolvedMap, groupedVars)
 	for _, ev := range envVars {
 		if resolved, ok := resolvedMap[ev.Key]; ok && resolved != ev.Value {
 			ev.ResolvedValue = resolved
@@ -1900,8 +1930,12 @@ func (h *Handlers) handleExportEnvVars(w http.ResponseWriter, r *http.Request) {
 		envMap[ev.Key] = decrypted
 	}
 
-	// Resolve ${KEY} references before exporting
-	resolveEnvVarReferences(envMap)
+	// Resolve ${KEY} and $[project:env:var] references before exporting
+	groupedVars, err := h.store.ListEnvVarsDecryptedGrouped()
+	if err != nil {
+		log.Printf("Warning: failed to load grouped env vars for export: %v", err)
+	}
+	resolveEnvVarReferences(envMap, groupedVars)
 
 	jsonData, err := json.Marshal(envMap)
 	if err != nil {
