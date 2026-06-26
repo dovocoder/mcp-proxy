@@ -10,10 +10,10 @@ import {
   CheckCircle2,
   XCircle,
   X,
-  Link as LinkIcon,
-  Copy,
-  Check,
   Ban,
+  Wrench,
+  Check,
+  Brain,
 } from 'lucide-react';
 import {
   compounds as compoundsApi,
@@ -21,6 +21,7 @@ import {
   tools as toolsApi,
   disabledTools as disabledToolsApi,
   type Server,
+  type CompoundServerWithMembers,
 } from '@/api/client';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardAction } from '@/components/ui/card';
@@ -30,6 +31,9 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { InfoBanner } from '@/components/InfoBanner';
+import { CollapsibleConnectionURLs } from '@/components/CollapsibleConnectionURLs';
+import { cn } from '@/lib/utils';
 import {
   Select,
   SelectTrigger,
@@ -53,16 +57,9 @@ export default function CompoundServers() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
-  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [addServerId, setAddServerId] = useState<string | null>(null);
   const [deleteCompoundOpen, setDeleteCompoundOpen] = useState(false);
   const [removeMemberTarget, setRemoveMemberTarget] = useState<Server | null>(null);
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedUrl(text);
-    setTimeout(() => setCopiedUrl(null), 2000);
-  };
 
   const { data: compounds } = useQuery({
     queryKey: ['compounds'],
@@ -154,7 +151,7 @@ export default function CompoundServers() {
     const sseUrl = `${origin}/api/compounds/${selectedId}/sse`;
 
     return (
-      <div className="space-y-6">
+      <div className="space-y-5">
         {/* Header */}
         <div className="flex items-start gap-3 sm:gap-4">
           <Link to="/compounds" className="shrink-0">
@@ -164,6 +161,10 @@ export default function CompoundServers() {
           </Link>
           <div className="flex-1 min-w-0">
             <h1 className="text-xl sm:text-2xl font-bold text-foreground truncate">{detail.name}</h1>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              {detail.members.length} member{detail.members.length !== 1 ? 's' : ''} · {detail.tool_count} tool{detail.tool_count !== 1 ? 's' : ''}
+              {detail.dictionary_mode && ' · dictionary mode'}
+            </p>
             {detail.description && (
               <p className="text-sm text-muted-foreground mt-1 break-words">{detail.description}</p>
             )}
@@ -183,7 +184,15 @@ export default function CompoundServers() {
         {/* Member servers */}
         <Card>
           <CardHeader className="border-b">
-            <CardTitle>Member Servers</CardTitle>
+            <div className="flex items-center gap-2">
+              <ServerIcon className="size-4 text-muted-foreground" />
+              <div>
+                <CardTitle>Member Servers</CardTitle>
+                <CardDescription>
+                  MCP servers included in this compound — their tools are combined into one endpoint
+                </CardDescription>
+              </div>
+            </div>
             <CardAction>
               {availableServers.length > 0 && (
                 <Select
@@ -212,21 +221,32 @@ export default function CompoundServers() {
           <CardContent className="p-0">
             {detail.members.length === 0 ? (
               <div className="px-5 py-8 text-center text-sm text-muted-foreground">
-                No members yet. Add servers to this compound.
+                <ServerIcon className="size-8 text-muted-foreground/40 mx-auto mb-2" />
+                No members yet. Add servers above to combine their tools.
               </div>
             ) : (
               <div className="divide-y divide-border">
                 {detail.members.map((m) => (
                   <div key={m.id} className="px-4 sm:px-5 py-3 flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3 min-w-0">
-                      <ServerIcon className="size-4 text-muted-foreground shrink-0" />
+                      <div className={cn(
+                        'inline-flex items-center justify-center w-8 h-8 rounded-lg shrink-0',
+                        m.is_builtin ? 'bg-violet-500/10' : 'bg-muted'
+                      )}>
+                        {m.is_builtin ? <Brain className="size-4 text-violet-400" /> : <ServerIcon className="size-4 text-muted-foreground" />}
+                      </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-medium text-foreground truncate">{m.name}</span>
                           {m.is_builtin && <Badge variant="secondary" className="text-[10px]">builtin</Badge>}
+                          {m.status === 'connected' ? (
+                            <Badge variant="outline" className="text-[10px] border-emerald-500/30 text-emerald-400 bg-emerald-500/10">connected</Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px] text-muted-foreground">{m.status}</Badge>
+                          )}
                         </div>
                         <div className="text-xs text-muted-foreground">
-                          {m.transport} · {m.status}
+                          {m.transport}
                         </div>
                       </div>
                     </div>
@@ -247,59 +267,25 @@ export default function CompoundServers() {
         </Card>
 
         {/* Connection URLs */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <LinkIcon className="size-4 text-primary" />
-              <CardTitle>Connection URLs</CardTitle>
-            </div>
-            <CardDescription>
-              Use these endpoints with an API key to connect MCP clients to this compound.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center gap-2">
-              <Badge variant="default" className="font-mono shrink-0">POST</Badge>
-              <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
-                {mcpUrl}
-              </code>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                onClick={() => copyToClipboard(mcpUrl)}
-                aria-label="Copy URL"
-                className="shrink-0"
-              >
-                {copiedUrl === mcpUrl ? <Check /> : <Copy />}
-              </Button>
-            </div>
-            <Separator />
-            <div className="flex items-center gap-2">
-              <Badge variant="secondary" className="font-mono shrink-0">SSE</Badge>
-              <code className="flex-1 min-w-0 text-xs text-muted-foreground font-mono break-all">
-                {sseUrl}
-              </code>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                onClick={() => copyToClipboard(sseUrl)}
-                aria-label="Copy URL"
-                className="shrink-0"
-              >
-                {copiedUrl === sseUrl ? <Check /> : <Copy />}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+        <CollapsibleConnectionURLs
+          mcpUrl={mcpUrl}
+          sseUrl={sseUrl}
+          label="MCP Connection URLs"
+          description="Use with an API key"
+        />
 
         {/* Dictionary mode */}
         <Card>
           <CardHeader className="border-b">
-            <CardTitle>Dictionary Mode</CardTitle>
-            <CardDescription>
-              When enabled, the compound exposes a single "dictionary" tool instead of listing all
-              member tools upfront. Clients discover and call tools lazily via the dictionary.
-            </CardDescription>
+            <div className="flex items-center gap-2">
+              <Wrench className="size-4 text-muted-foreground shrink-0" />
+              <div>
+                <CardTitle>Dictionary Mode</CardTitle>
+                <CardDescription>
+                  Controls how tools are exposed to clients
+                </CardDescription>
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between gap-4">
@@ -307,13 +293,13 @@ export default function CompoundServers() {
                 {detail.dictionary_mode ? (
                   <span>
                     <Badge variant="default" className="mr-1.5 text-[10px]">ON</Badge>
-                    Clients see <strong className="text-foreground">1 tool</strong> (dictionary) instead of{' '}
-                    <strong className="text-foreground">{detail.tool_count}</strong> tools directly.
+                    Clients see <strong className="text-foreground">1 tool</strong> (dictionary) that lists all {detail.tool_count} available tools.
+                    Agents browse and call tools on demand.
                   </span>
                 ) : (
                   <span>
                     <Badge variant="outline" className="mr-1.5 text-[10px]">OFF</Badge>
-                    All <strong className="text-foreground">{detail.tool_count}</strong> tools are listed directly.
+                    All <strong className="text-foreground">{detail.tool_count}</strong> tools are listed directly — clients see them all immediately.
                   </span>
                 )}
               </div>
@@ -500,7 +486,7 @@ export default function CompoundServers() {
 
   // --- List view ---
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
       <div className="flex items-start sm:items-center justify-between gap-4">
         <div className="min-w-0">
@@ -531,13 +517,26 @@ export default function CompoundServers() {
         </Dialog>
       </div>
 
+      {/* Info banner */}
+      <InfoBanner
+        icon={Layers}
+        title="What are Compound Servers?"
+        description="Compound servers group multiple MCP servers into a single endpoint. Instead of connecting to each server individually, your AI agent connects to one URL and gets access to all tools from the member servers."
+        tips={[
+          { label: 'Members', explanation: 'The MCP servers (including built-in memory/skills/tasks) included in this compound' },
+          { label: 'Dictionary Mode', explanation: 'When on, the compound exposes a single "dictionary" tool instead of listing all tools upfront — agents discover and call tools lazily' },
+          { label: 'Disabled Tools', explanation: 'Hide specific tools from clients accessing this compound without removing the member server' },
+          { label: 'API Keys', explanation: 'Create API keys scoped to a compound to give clients access to only that group of servers' },
+        ]}
+      />
+
       {/* Compound list */}
       {compounds?.length === 0 && !showCreate ? (
         <Card>
           <CardContent className="py-12 text-center">
             <Layers className="size-10 text-muted-foreground/50 mx-auto mb-3" />
             <p className="text-sm text-muted-foreground">No compound servers yet</p>
-            <p className="text-xs text-muted-foreground/70 mt-1">Create one to group multiple MCP servers</p>
+            <p className="text-xs text-muted-foreground/70 mt-1">Create one to group multiple MCP servers into a single endpoint</p>
           </CardContent>
         </Card>
       ) : (
@@ -552,12 +551,17 @@ export default function CompoundServers() {
                     </div>
                     <div className="min-w-0">
                       <div className="font-medium text-foreground truncate">{c.name}</div>
-                      {c.description && (
+                      {c.description ? (
                         <div className="text-xs text-muted-foreground truncate">{c.description}</div>
+                      ) : (
+                        <div className="text-xs text-muted-foreground/60 truncate">No description</div>
                       )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground shrink-0">
+                    {c.dictionary_mode && (
+                      <Badge variant="secondary" className="text-[10px]">dictionary</Badge>
+                    )}
                     <span className="hidden sm:inline">{new Date(c.created_at).toLocaleDateString()}</span>
                   </div>
                 </Link>
