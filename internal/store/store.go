@@ -81,13 +81,16 @@ func (s *Store) encryptToken(plaintext string) string {
 
 // decryptToken decrypts a stored token value.
 // Falls back to the raw value for legacy plaintext data or when encryption is not configured.
+// Logs a warning when falling back — this could indicate a key mismatch or tampered data.
 func (s *Store) decryptToken(stored string) string {
 	if stored == "" || !s.encEnabled {
 		return stored
 	}
 	decrypted, err := crypto.Decrypt(s.encKey, stored)
 	if err != nil {
-		// Likely legacy plaintext data — return as-is
+		// Likely legacy plaintext data — return as-is but log for visibility.
+		// In a new deployment with no legacy data, this could indicate tampering.
+		log.Printf("WARNING: token decryption failed (len=%d) — returning raw value (likely legacy plaintext or key mismatch)", len(stored))
 		return stored
 	}
 	return decrypted

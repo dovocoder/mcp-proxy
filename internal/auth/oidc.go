@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -453,10 +455,14 @@ func getStringClaim(claims jwt.MapClaims, key string) string {
 // Tries JWT validation first (local, via JWKS), then introspection, then userinfo.
 // Uses a 2-minute cache to avoid network calls on every request.
 // The shorter TTL reduces the window for revoked tokens to remain valid.
+// The cache key is a SHA-256 hash of the token — the raw token is never stored.
 func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, error) {
+	// Hash the token for cache key — never store the raw access token in memory
+	cacheKey := hashTokenForCache(accessToken)
+
 	// Check cache first
 	p.cacheMu.RLock()
-	if cached, ok := p.tokenCache[accessToken]; ok && time.Now().Before(cached.expiresAt) {
+	if cached, ok := p.tokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		p.cacheMu.RUnlock()
 		return cached.user, nil
 	}
@@ -464,7 +470,7 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 
 	// Try JWT validation first (local, no network call)
 	if user, err := p.ValidateJWT(accessToken); err == nil {
-		p.cacheToken(accessToken, user)
+		p.cacheToken(cacheKey, user)
 		return user, nil
 	} else {
 		log.Printf("[OIDC] JWT validation failed: %v", err)
@@ -473,7 +479,7 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 	// Try introspection — works for opaque tokens AND audience-restricted JWTs
 	// that the userinfo endpoint might reject (RFC 8707 resource parameter).
 	if user, err := p.IntrospectToken(accessToken); err == nil {
-		p.cacheToken(accessToken, user)
+		p.cacheToken(cacheKey, user)
 		return user, nil
 	} else {
 		log.Printf("[OIDC] Introspection failed: %v", err)
@@ -490,15 +496,22 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 		return ProviderUser{}, fmt.Errorf("no subject in userinfo response")
 	}
 
-	p.cacheToken(accessToken, user)
+	p.cacheToken(cacheKey, user)
 	return user, nil
 }
 
-// cacheToken stores a validated token → user mapping with 2-minute TTL.
+// hashTokenForCache returns a SHA-256 hex hash of the access token.
+// This prevents raw access tokens from being exposed in memory dumps.
+func hashTokenForCache(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+// cacheToken stores a validated token hash → user mapping with 2-minute TTL.
 // Shorter TTL reduces the window for revoked tokens to remain valid.
-func (p *OIDCProvider) cacheToken(accessToken string, user ProviderUser) {
+func (p *OIDCProvider) cacheToken(cacheKey string, user ProviderUser) {
 	p.cacheMu.Lock()
-	p.tokenCache[accessToken] = cachedToken{
+	p.tokenCache[cacheKey] = cachedToken{
 		user:      user,
 		expiresAt: time.Now().Add(2 * time.Minute),
 	}

@@ -252,8 +252,13 @@ func (h *Handlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Always run bcrypt against a dummy hash when the user doesn't exist,
+	// to prevent timing-based username enumeration. The dummy hash has the
+	// same bcrypt cost as a real hash, so the response time is identical.
+	const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMy.MQDdV4Y3D0Xz6G5Z5X.QZ5Z5Z5Z5Z5Z"
 	user, err := h.store.GetUserByUsername(req.Username)
 	if err != nil || user == nil {
+		auth.VerifyPassword(dummyHash, req.Password)
 		writeError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
@@ -821,6 +826,11 @@ func validateRedirectURI(rawURI string) error {
 	host := parsed.Hostname()
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" {
 		return nil
+	}
+
+	// Block 0.0.0.0 and [::] — on some OSes these reach loopback
+	if host == "0.0.0.0" || host == "[::]" || host == "::" {
+		return fmt.Errorf("address %q is not allowed — only localhost is accepted", host)
 	}
 
 	return fmt.Errorf("external host %q is not allowed — only localhost is accepted", host)
