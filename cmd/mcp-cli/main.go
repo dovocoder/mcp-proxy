@@ -526,8 +526,18 @@ func mcpCall(cfg config, method string, params json.RawMessage) (json.RawMessage
 }
 
 // cliHTTPClient is a shared client with a reasonable timeout for all CLI requests.
+// Redirects are limited to 3 hops and must stay http/https.
 var cliHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects (max 3)")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirect to non-HTTP scheme: %s", req.URL.Scheme)
+		}
+		return nil
+	},
 }
 
 // doPost sends a JSON-RPC request and returns the Mcp-Session-Id from the

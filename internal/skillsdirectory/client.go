@@ -3,6 +3,7 @@ package skillsdirectory
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -21,11 +22,9 @@ type SearchResult struct {
 // Search searches the skills.sh directory for skills matching the query.
 // Uses `npx skills search <query>` which works without Vercel OIDC auth.
 func Search(ctx context.Context, query string) ([]SearchResult, error) {
-	cmd := exec.CommandContext(ctx, "npx", "-y", "skills", "search", query)
-	cmd.Env = append(cmd.Environ(), "CI=true") // suppress interactive prompts
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(ctx, "npx", "-y", "skills", "search", query)
 	if err != nil {
-		return nil, fmt.Errorf("skills search failed: %w (output: %s)", err, string(output))
+		return nil, fmt.Errorf("skills search failed: %w", err)
 	}
 	return parseSearchOutput(string(output)), nil
 }
@@ -86,11 +85,9 @@ type SkillDetail struct {
 // GetSkillContent fetches the full content of a skill from skills.sh.
 // Uses `npx skills use <source>@<slug>` which outputs the SKILL.md as text.
 func GetSkillContent(ctx context.Context, installRef string) (*SkillDetail, error) {
-	cmd := exec.CommandContext(ctx, "npx", "-y", "skills", "use", installRef)
-	cmd.Env = append(cmd.Environ(), "CI=true")
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(ctx, "npx", "-y", "skills", "use", installRef)
 	if err != nil {
-		return nil, fmt.Errorf("skills use failed: %w (output: %s)", err, string(output))
+		return nil, fmt.Errorf("skills use failed: %w", err)
 	}
 
 	// Parse the output — it contains the SKILL.md content
@@ -132,11 +129,9 @@ func GetSkillContent(ctx context.Context, installRef string) (*SkillDetail, erro
 // ListSkills lists available skills in a GitHub repo (owner/repo format).
 // Uses `npx skills add <source> --list` which fetches skill metadata from GitHub.
 func ListSkills(ctx context.Context, source string) ([]SkillInfo, error) {
-	cmd := exec.CommandContext(ctx, "npx", "-y", "skills", "add", source, "--list", "--yes")
-	cmd.Env = append(cmd.Environ(), "CI=true")
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(ctx, "npx", "-y", "skills", "add", source, "--list", "--yes")
 	if err != nil {
-		return nil, fmt.Errorf("skills list failed: %w (output: %s)", err, string(output))
+		return nil, fmt.Errorf("skills list failed: %w", err)
 	}
 	return parseListOutput(string(output), source), nil
 }
@@ -197,14 +192,57 @@ func InstallSkill(ctx context.Context, installRef string, agent string) error {
 	if agent != "" {
 		args = append(args, "-a", agent)
 	}
-	cmd := exec.CommandContext(ctx, "npx", args...)
-	cmd.Env = append(cmd.Environ(), "CI=true")
-	output, err := cmd.CombinedOutput()
+	_, err := runCommand(ctx, "npx", args...)
 	if err != nil {
-		return fmt.Errorf("skills install failed: %w (output: %s)", err, string(output))
+		return fmt.Errorf("skills install failed: %w", err)
 	}
 	return nil
 }
 
 // DefaultTimeout is the default timeout for skills.sh operations.
 const DefaultTimeout = 60 * time.Second
+
+// maxOutputSize limits subprocess output to 10MB — prevents OOM from
+// malicious or buggy npx skills commands producing unbounded output.
+const maxOutputSize = 10 << 20
+
+// runCommand executes an npx command and returns its combined output,
+// limited to maxOutputSize bytes to prevent memory exhaustion.
+func runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(cmd.Environ(), "CI=true") // suppress interactive prompts
+
+	// Get a pipe to stdout+stderr so we can limit the output size
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		return nil, err
+	}
+
+	// Read output in a goroutine with size limit
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(pr, maxOutputSize))
+		ch <- readResult{data, err}
+	}()
+
+	// Wait for command to finish, then close the pipe and read output
+	waitErr := cmd.Wait()
+	pw.Close()
+	res := <-ch
+
+	if waitErr != nil {
+		return res.data, fmt.Errorf("%s failed: %w (output: %s)", name, waitErr, string(res.data))
+	}
+	if res.err != nil {
+		return nil, fmt.Errorf("%s output read failed: %w", name, res.err)
+	}
+	return res.data, nil
+}

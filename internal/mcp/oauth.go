@@ -17,9 +17,20 @@ import (
 
 // oauthHTTPClient is a shared HTTP client for all OAuth discovery/token operations.
 // Uses SSRF-safe transport to prevent requests to private/internal IP ranges.
+// Redirects are limited to 3 hops and must stay http/https — defense-in-depth
+// against redirect-based SSRF where an OAuth metadata URL redirects internally.
 var oauthHTTPClient = &http.Client{
 	Timeout:   30 * time.Second,
 	Transport: ssrf.SafeTransport(),
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects (max 3)")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirect to non-HTTP scheme: %s", req.URL.Scheme)
+		}
+		return nil
+	},
 }
 
 // maxOAuthBodySize limits response bodies from OAuth metadata/token endpoints

@@ -1793,9 +1793,20 @@ func hasEnvVarRef(val string) bool {
 // httpClient is used for outbound HTTP calls (e.g. GitHub API) with a
 // reasonable timeout to prevent hanging requests. Uses SSRF-safe transport
 // to block connections to private/reserved IP ranges.
+// CheckRedirect limits redirect hops and rejects non-http/https schemes
+// as defense-in-depth against redirect-based SSRF.
 var httpClient = &http.Client{
 	Timeout:   15 * time.Second,
 	Transport: auth.NewSSRFSafeTransport(),
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects (max 3)")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirect to non-HTTP scheme: %s", req.URL.Scheme)
+		}
+		return nil
+	},
 }
 
 // resolveEnvVarReferences resolves ${KEY}, ${KEY:-default}, and $[project:env:var]
@@ -2624,7 +2635,8 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	// Limit response body to 2MB — prevents OOM from malicious upstream
+	io.Copy(w, io.LimitReader(resp.Body, 2<<20))
 }
 
 // handleClientMetadata serves the Client ID Metadata Document (CIMD).

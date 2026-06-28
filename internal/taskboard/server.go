@@ -203,23 +203,47 @@ func ParseNamespaced(name string) (string, bool) {
 }
 
 // HandleToolCall dispatches a tool call to the appropriate handler.
+// Tool execution errors are returned as MCP content with isError: true,
+// allowing the LLM to self-correct (matching the memory/skills server pattern).
+// Only protocol-level errors (unknown tool) are returned as Go errors.
 func (s *Server) HandleToolCall(name string, args json.RawMessage) (json.RawMessage, error) {
+	var result json.RawMessage
+	var err error
+
 	switch name {
 	case "task_create":
-		return s.handleCreate(args)
+		result, err = s.handleCreate(args)
 	case "task_list":
-		return s.handleList(args)
+		result, err = s.handleList(args)
 	case "task_get":
-		return s.handleGet(args)
+		result, err = s.handleGet(args)
 	case "task_update":
-		return s.handleUpdate(args)
+		result, err = s.handleUpdate(args)
 	case "task_delete":
-		return s.handleDelete(args)
+		result, err = s.handleDelete(args)
 	case "task_search":
-		return s.handleSearch(args)
+		result, err = s.handleSearch(args)
 	default:
 		return nil, fmt.Errorf("unknown task board tool: %s", name)
 	}
+
+	if err != nil {
+		return wrapMCPError(err.Error())
+	}
+	return result, nil
+}
+
+// wrapMCPError wraps a tool execution error in MCP content format.
+func wrapMCPError(message string) (json.RawMessage, error) {
+	return json.Marshal(map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": message,
+			},
+		},
+		"isError": true,
+	})
 }
 
 func (s *Server) handleCreate(args json.RawMessage) (json.RawMessage, error) {

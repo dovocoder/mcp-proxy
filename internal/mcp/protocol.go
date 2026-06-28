@@ -163,8 +163,19 @@ type sseEvent struct {
 
 // sharedHTTPClient is a pooled HTTP client for all backend Streamable HTTP connections.
 // Uses SSRF-safe transport to prevent connections to private/internal IP ranges.
+// Redirects are limited to 3 hops and must stay http/https — defense-in-depth
+// against redirect-based SSRF where a backend redirects to an internal service.
 var sharedHTTPClient = &http.Client{
 	Transport: ssrf.SafeTransportWithSettings(20, 5, 10),
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects (max 3)")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirect to non-HTTP scheme: %s", req.URL.Scheme)
+		}
+		return nil
+	},
 }
 
 // Client is a connection to a backend MCP server.
