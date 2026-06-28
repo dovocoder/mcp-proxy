@@ -2007,7 +2007,7 @@ func (m *Manager) handleTasksGet(req mcp.JSONRPCRequest, scope Scope) (json.RawM
 
 	task, err := m.taskMgr.Get(params.TaskID, scope.AuthKeyID)
 	if err != nil {
-		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: err.Error()}
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: "invalid task parameters"}
 	}
 
 	return m.marshalTask(task)
@@ -2028,13 +2028,13 @@ func (m *Manager) handleTasksResult(ctx context.Context, req mcp.JSONRPCRequest,
 	// Verify the task exists and belongs to this auth context
 	_, err := m.taskMgr.Get(params.TaskID, scope.AuthKeyID)
 	if err != nil {
-		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: err.Error()}
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: "invalid task parameters"}
 	}
 
 	// Block until terminal or context cancelled
 	result, err := m.taskMgr.WaitForResult(ctx, params.TaskID, scope.AuthKeyID)
 	if err != nil {
-		return nil, &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()}
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: "internal error"}
 	}
 
 	// Return the result with related-task metadata in _meta
@@ -2065,7 +2065,7 @@ func (m *Manager) handleTasksList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 
 	tasks, nextCursor, err := m.taskMgr.ListTasks(scope.AuthKeyID, params.Cursor, 50)
 	if err != nil {
-		return nil, &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()}
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: "internal error"}
 	}
 
 	taskList := make([]map[string]interface{}, 0, len(tasks))
@@ -2096,7 +2096,7 @@ func (m *Manager) handleTasksCancel(req mcp.JSONRPCRequest, scope Scope) (json.R
 
 	task, err := m.taskMgr.CancelTask(params.TaskID, scope.AuthKeyID)
 	if err != nil {
-		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: err.Error()}
+		return nil, &mcp.RPCError{Code: mcp.ErrCodeInvalidParams, Message: "invalid task parameters"}
 	}
 
 	return m.marshalTask(task)

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"log"
 	"net/http"
@@ -1148,7 +1147,7 @@ func (h *Handlers) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[OAuth-Callback] MCP server auth callback failed: %v", err)
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, html.EscapeString(err.Error()))
+			fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Authentication Failed</h2><p>%s</p><p>You can close this window.</p></body></html>`, "Authentication failed. Check server logs for details.")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")

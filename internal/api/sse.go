@@ -300,7 +300,7 @@ func (h *Handlers) sseMessage(w http.ResponseWriter, r *http.Request, fallbackSc
 		resp = mcp.JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Error:   &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()},
+			Error:   &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: "internal error"},
 		}
 	} else {
 		resp = mcp.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
@@ -483,7 +483,7 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 		resp = mcp.JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Error:   &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: err.Error()},
+			Error:   &mcp.RPCError{Code: mcp.ErrCodeInternalError, Message: "internal error"},
 		}
 	} else {
 		resp = mcp.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}

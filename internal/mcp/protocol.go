@@ -531,14 +531,14 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 		return nil, fmt.Errorf("session expired (HTTP 404) — reconnection needed")
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		log.Printf("[MCP] ✗ %s (id=%d) 401 Unauthorized: %s", method, reqID, string(respBody))
-		return nil, fmt.Errorf("unauthorized (HTTP 401) — check your auth token. Server response: %s", string(respBody))
+		return nil, fmt.Errorf("unauthorized (HTTP 401) — check your auth token")
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		log.Printf("[MCP] ✗ %s (id=%d) HTTP %d: %s", method, reqID, resp.StatusCode, string(respBody))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("HTTP %d from backend server", resp.StatusCode)
 	}
 
 	// Capture session ID from initialize response
@@ -570,7 +570,8 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 	}
 	ch := make(chan readResult, 1)
 	go func() {
-		data, err := io.ReadAll(resp.Body)
+		// Limit response body to 10MB — prevents OOM from malicious backend servers
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 		ch <- readResult{data, err}
 	}()
 
