@@ -61,7 +61,11 @@ func (sm *sseSessionManager) cleanupLoop() {
 
 func (sm *sseSessionManager) generateID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID — ensures uniqueness even if crypto/rand fails
+		log.Printf("WARNING: crypto/rand failed in sseSessionManager.generateID: %v — using fallback", err)
+		return fmt.Sprintf("%016x", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -591,7 +595,10 @@ func (sm *streamSessionManager) generateID() string {
 	// so even if a session ID is stolen, the attacker still needs a valid
 	// API key to make authenticated requests.
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		log.Printf("WARNING: crypto/rand failed in streamSessionManager.generateID: %v — using fallback", err)
+		return fmt.Sprintf("%016x", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(b)
 }
 
