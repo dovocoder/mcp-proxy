@@ -580,7 +580,7 @@ function NewSetForm({ onSaved }: { onSaved: () => void }) {
           />
         </div>
         {error && (
-          <p className="text-sm text-destructive">{error}</p>
+          <p className="text-sm text-destructive" aria-live="polite">{error}</p>
         )}
         <DialogFooter>
           <DialogClose render={<Button variant="outline" type="button" />}>

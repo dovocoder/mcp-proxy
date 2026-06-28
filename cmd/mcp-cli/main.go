@@ -35,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // MCP protocol version supported by the proxy (see internal/mcp/protocol.go).
@@ -524,6 +525,11 @@ func mcpCall(cfg config, method string, params json.RawMessage) (json.RawMessage
 	return doPostForResult(cfg.APIKey, endpoint, req, sessionID)
 }
 
+// cliHTTPClient is a shared client with a reasonable timeout for all CLI requests.
+var cliHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
 // doPost sends a JSON-RPC request and returns the Mcp-Session-Id from the
 // response (used for the initialize handshake). The response body is parsed
 // but only the session ID is returned.
@@ -535,7 +541,7 @@ func doPost(apiKey, endpoint string, req jsonRPCRequest, sessionID string) (stri
 	}
 	setCommonHeaders(httpReq, apiKey, sessionID)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := cliHTTPClient.Do(httpReq)
 	if err != nil {
 		return "", err
 	}
@@ -565,7 +571,7 @@ func postNotification(apiKey, endpoint string, body []byte, sessionID string) er
 	}
 	setCommonHeaders(httpReq, apiKey, sessionID)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := cliHTTPClient.Do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -588,7 +594,7 @@ func doPostForResult(apiKey, endpoint string, req jsonRPCRequest, sessionID stri
 	}
 	setCommonHeaders(httpReq, apiKey, sessionID)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := cliHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

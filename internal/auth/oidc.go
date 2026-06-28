@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -49,8 +50,8 @@ type OIDCProvider struct {
 	mu         sync.RWMutex
 	tokenCache map[string]cachedToken // access_token → user info (5-min TTL)
 	cacheMu    sync.RWMutex
-	jwksCache  *jwksKeySet // cached JWKS keys
-	jwksMu     sync.Mutex  // protects jwksCache refresh
+	jwksCache  *jwksKeySet  // cached JWKS keys
+	jwksMu     sync.Mutex   // protects jwksCache refresh
 	httpClient *http.Client // shared HTTP client for all OIDC HTTP calls
 }
 
@@ -160,8 +161,8 @@ func (p *OIDCProvider) RedirectURL(r *http.Request) string {
 	return fmt.Sprintf("%s://%s/api/auth/oidc/callback", scheme, host)
 }
 
-// AuthURL generates the authorization URL with PKCE-like state.
-func (p *OIDCProvider) AuthURL(state string, redirectURL string) string {
+// AuthURL generates the authorization URL with state and nonce.
+func (p *OIDCProvider) AuthURL(state, redirectURL, nonce string) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.oauth2 == nil {
@@ -170,7 +171,7 @@ func (p *OIDCProvider) AuthURL(state string, redirectURL string) string {
 	// Use a per-request config to allow dynamic redirect URL
 	cfg := *p.oauth2
 	cfg.RedirectURL = redirectURL
-	return cfg.AuthCodeURL(state, oauth2.AccessTypeOnline)
+	return cfg.AuthCodeURL(state, oauth2.AccessTypeOnline, oauth2.SetAuthURLParam("nonce", nonce))
 }
 
 // Exchange exchanges the authorization code for tokens.
@@ -450,7 +451,8 @@ func getStringClaim(claims jwt.MapClaims, key string) string {
 
 // ValidateAccessToken validates an OIDC access token and returns the user.
 // Tries JWT validation first (local, via JWKS), then introspection, then userinfo.
-// Uses a 5-minute cache to avoid network calls on every request.
+// Uses a 2-minute cache to avoid network calls on every request.
+// The shorter TTL reduces the window for revoked tokens to remain valid.
 func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, error) {
 	// Check cache first
 	p.cacheMu.RLock()
@@ -492,12 +494,13 @@ func (p *OIDCProvider) ValidateAccessToken(accessToken string) (ProviderUser, er
 	return user, nil
 }
 
-// cacheToken stores a validated token → user mapping with 5-minute TTL.
+// cacheToken stores a validated token → user mapping with 2-minute TTL.
+// Shorter TTL reduces the window for revoked tokens to remain valid.
 func (p *OIDCProvider) cacheToken(accessToken string, user ProviderUser) {
 	p.cacheMu.Lock()
 	p.tokenCache[accessToken] = cachedToken{
 		user:      user,
-		expiresAt: time.Now().Add(5 * time.Minute),
+		expiresAt: time.Now().Add(2 * time.Minute),
 	}
 	// Prune expired entries
 	for k, v := range p.tokenCache {
@@ -616,9 +619,9 @@ func (p *OIDCProvider) ClientSecret() string {
 
 // ProviderUser represents the extracted user info from OIDC.
 type ProviderUser struct {
-	Subject string
-	Email   string
-	Name    string
+	Subject  string
+	Email    string
+	Name     string
 	Username string
 }
 
@@ -685,6 +688,58 @@ func (a *AuthService) LoginOrProvisionUser(pu ProviderUser) (*models.User, error
 // GenerateState generates a random state string for OAuth2.
 func GenerateState() string {
 	return generateID("state")
+}
+
+// VerifyIDTokenNonce verifies that the id_token contains the expected nonce.
+// This prevents token replay and login CSRF (RFC 9701 §2.3.3).
+func (p *OIDCProvider) VerifyIDTokenNonce(idTokenString, expectedNonce string) error {
+	keys, err := p.fetchJWKS()
+	if err != nil {
+		return fmt.Errorf("JWKS fetch failed: %w", err)
+	}
+
+	token, err := jwt.Parse(idTokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		kid, ok := token.Header["kid"].(string)
+		if !ok {
+			return nil, fmt.Errorf("no kid in JWT header")
+		}
+		key, ok := keys[kid]
+		if !ok {
+			return nil, fmt.Errorf("no key found for kid %s", kid)
+		}
+		return key, nil
+	})
+	if err != nil {
+		return fmt.Errorf("JWT verification failed: %w", err)
+	}
+	if !token.Valid {
+		return fmt.Errorf("token is not valid")
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return fmt.Errorf("failed to extract claims")
+	}
+
+	// Check issuer
+	issuer, _ := claims["iss"].(string)
+	if issuer != p.Issuer() {
+		return fmt.Errorf("issuer mismatch: got %s, expected %s", issuer, p.Issuer())
+	}
+
+	// Check nonce
+	nonce, ok := claims["nonce"].(string)
+	if !ok {
+		return fmt.Errorf("no nonce in id_token")
+	}
+	if subtle.ConstantTimeCompare([]byte(nonce), []byte(expectedNonce)) != 1 {
+		return fmt.Errorf("nonce mismatch")
+	}
+
+	return nil
 }
 
 // EncodeRedirectURL encodes a target URL for safe redirect.

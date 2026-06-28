@@ -129,7 +129,7 @@ export default function Login() {
                 </div>
 
                 {error && (
-                  <div className="flex items-start gap-2">
+                  <div className="flex items-start gap-2" aria-live="polite">
                     <Badge variant="destructive" className="break-words whitespace-normal text-left leading-relaxed">
                       {error}
                     </Badge>
@@ -153,7 +153,7 @@ export default function Login() {
 
         {passwordLoginEnabled && !oidcEnabled && (
           <p className="text-center text-xs text-muted-foreground mt-5 sm:mt-6 px-4">
-            Default credentials: admin / admin (set MCP_PROXY_ADMIN_PASS to change)
+            Set MCP_PROXY_ADMIN_PASS environment variable to configure the admin password
           </p>
         )}
       </div>

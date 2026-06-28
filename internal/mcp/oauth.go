@@ -11,17 +11,15 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/agentic/mcp-proxy/internal/ssrf"
 )
 
 // oauthHTTPClient is a shared HTTP client for all OAuth discovery/token operations.
-// Has connection pooling and reasonable timeouts to prevent resource exhaustion.
+// Uses SSRF-safe transport to prevent requests to private/internal IP ranges.
 var oauthHTTPClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 5,
-		IdleConnTimeout:     90 * time.Second,
-	},
+	Timeout:   30 * time.Second,
+	Transport: ssrf.SafeTransport(),
 }
 
 // maxOAuthBodySize limits response bodies from OAuth metadata/token endpoints
@@ -31,19 +29,19 @@ const maxOAuthBodySize = 1 << 20
 
 // OAuthServerMetadata represents the OAuth 2.0 Authorization Server Metadata (RFC8414).
 type OAuthServerMetadata struct {
-	Issuer                 string   `json:"issuer"`
-	AuthorizationEndpoint  string   `json:"authorization_endpoint"`
-	TokenEndpoint          string   `json:"token_endpoint"`
-	RegistrationEndpoint   string   `json:"registration_endpoint,omitempty"`
-	RevocationEndpoint     string   `json:"revocation_endpoint,omitempty"`
-	IntrospectionEndpoint  string   `json:"introspection_endpoint,omitempty"`
-	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint,omitempty"`
-	ScopesSupported        []string `json:"scopes_supported,omitempty"`
-	ResponseTypesSupported []string `json:"response_types_supported,omitempty"`
-	GrantTypesSupported    []string `json:"grant_types_supported,omitempty"`
+	Issuer                            string   `json:"issuer"`
+	AuthorizationEndpoint             string   `json:"authorization_endpoint"`
+	TokenEndpoint                     string   `json:"token_endpoint"`
+	RegistrationEndpoint              string   `json:"registration_endpoint,omitempty"`
+	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
+	IntrospectionEndpoint             string   `json:"introspection_endpoint,omitempty"`
+	DeviceAuthorizationEndpoint       string   `json:"device_authorization_endpoint,omitempty"`
+	ScopesSupported                   []string `json:"scopes_supported,omitempty"`
+	ResponseTypesSupported            []string `json:"response_types_supported,omitempty"`
+	GrantTypesSupported               []string `json:"grant_types_supported,omitempty"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
-	CodeChallengeMethodsSupported      []string `json:"code_challenge_methods_supported,omitempty"`
-	ClientIDMetadataDocumentSupported   bool   `json:"client_id_metadata_document_supported,omitempty"`
+	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported,omitempty"`
+	ClientIDMetadataDocumentSupported bool     `json:"client_id_metadata_document_supported,omitempty"`
 }
 
 // OAuthTokens represents stored OAuth tokens.
@@ -80,8 +78,8 @@ type ClientRegistration struct {
 
 // PKCEParams holds PKCE challenge parameters.
 type PKCEParams struct {
-	Verifier     string
-	Challenge    string
+	Verifier        string
+	Challenge       string
 	ChallengeMethod string
 }
 
@@ -105,25 +103,25 @@ func GeneratePKCE() (*PKCEParams, error) {
 
 // AuthState represents an in-progress OAuth authorization flow.
 type AuthState struct {
-	ServerID         string
-	AuthURL          string
-	PKCE             *PKCEParams
-	RedirectURI      string
-	ClientID         string
-	ClientSecret     string
-	TokenEndpoint    string
+	ServerID              string
+	AuthURL               string
+	PKCE                  *PKCEParams
+	RedirectURI           string
+	ClientID              string
+	ClientSecret          string
+	TokenEndpoint         string
 	AuthorizationEndpoint string
-	Resource         string
-	Metadata         *OAuthServerMetadata
-	CreatedAt        time.Time
+	Resource              string
+	Metadata              *OAuthServerMetadata
+	CreatedAt             time.Time
 }
 
 // ProtectedResourceMetadata represents the OAuth 2.0 Protected Resource Metadata (RFC 9728).
 type ProtectedResourceMetadata struct {
-	Resource             string   `json:"resource"`
-	AuthorizationServers []string `json:"authorization_servers"`
+	Resource               string   `json:"resource"`
+	AuthorizationServers   []string `json:"authorization_servers"`
 	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
-	ScopesSupported      []string `json:"scopes_supported,omitempty"`
+	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 }
 
 // parseServerURL splits an MCP server URL into its base URL (scheme://host) and
@@ -180,7 +178,7 @@ func DiscoverOAuthMetadata(serverURL string) (*OAuthServerMetadata, error) {
 	return &OAuthServerMetadata{
 		AuthorizationEndpoint: baseURL + "/authorize",
 		TokenEndpoint:         baseURL + "/token",
-		RegistrationEndpoint:   baseURL + "/register",
+		RegistrationEndpoint:  baseURL + "/register",
 	}, nil
 }
 
@@ -392,11 +390,11 @@ func extractResourceMetadataURL(header string) string {
 // Uses application_type "native" per MCP spec for local/CLI/desktop apps.
 func RegisterClient(registrationEndpoint string, redirectURIs []string) (*ClientRegistration, error) {
 	body := map[string]interface{}{
-		"redirect_uris":             redirectURIs,
+		"redirect_uris":              redirectURIs,
 		"token_endpoint_auth_method": "none", // public client (PKCE)
-		"grant_types":               []string{"authorization_code", "refresh_token"},
-		"response_types":            []string{"code"},
-		"application_type":          "native",
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"application_type":           "native",
 	}
 	bodyBytes, _ := json.Marshal(body)
 

@@ -159,10 +159,15 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		// Prevent MIME-type sniffing
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// Disable buggy legacy XSS auditor (modern browsers ignore it;
+		// setting to 0 prevents older browsers from enabling it)
+		w.Header().Set("X-XSS-Protection", "0")
 		// Control referrer information
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		// Enable HSTS (only meaningful on HTTPS, but safe to always set)
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		// Restrict browser features (camera, microphone, geolocation)
+		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		// Content-Security-Policy: allow same-origin + inline styles (for shadcn) + data: images
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+

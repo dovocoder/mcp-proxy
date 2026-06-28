@@ -37,10 +37,18 @@ export default function APIKeys() {
   const [newKey, setNewKey] = useState<APIKeyWithSecret | null>(null);
   const [copied, setCopied] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<APIKey | null>(null);
+  const [deleteError, setDeleteError] = useState('');
 
   const deleteMutation = useMutation({
     mutationFn: apiKeysApi.delete,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apiKeys'] }),
+     onSuccess: () => {
+       queryClient.invalidateQueries({ queryKey: ['apiKeys'] });
+       setDeleteError('');
+     },
+     onError: (err: Error) => {
+       console.error('[deleteMutation]', err.message);
+       setDeleteError(err.message);
+     },
   });
 
   const handleCopy = () => {
@@ -192,6 +200,7 @@ export default function APIKeys() {
         itemName={deleteTarget?.name}
         confirmText="Delete Key"
         loading={deleteMutation.isPending}
+         error={deleteError}
         onConfirm={() => {
           if (deleteTarget) {
             deleteMutation.mutate(deleteTarget.id, {
@@ -329,7 +338,7 @@ function KeyForm({
       </div>
 
       {error && (
-        <p className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 break-words">
+         <p aria-live="polite" className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 break-words">
           {error}
         </p>
       )}

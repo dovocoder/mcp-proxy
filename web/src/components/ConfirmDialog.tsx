@@ -21,6 +21,7 @@ interface ConfirmDialogProps {
   destructive?: boolean;
   itemName?: string;
   loading?: boolean;
+  error?: string;
 }
 
 /**
@@ -45,7 +46,8 @@ export function ConfirmDialog({
   destructive = true,
   itemName,
   loading = false,
-}: ConfirmDialogProps) {
+   error,
+  }: ConfirmDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md" showCloseButton={false}>
@@ -73,6 +75,14 @@ export function ConfirmDialog({
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           This action cannot be undone.
         </div>
+         {error && (
+           <div
+             aria-live="polite"
+             className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive break-words"
+           >
+             {error}
+           </div>
+         )}
         <DialogFooter>
           <DialogClose
             render={

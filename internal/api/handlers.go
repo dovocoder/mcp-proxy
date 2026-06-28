@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -247,7 +248,7 @@ func (h *Handlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req models.LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -297,6 +298,40 @@ func extractScopeFromAPIKey(r *http.Request) proxy.Scope {
 	return scope
 }
 
+// enforceCompoundScope checks that the API key's compound scope (if any)
+// allows access to the requested server or compound. Returns true if access
+// is allowed, false otherwise. When the API key has no CompoundID set
+// (global key or OIDC token), all access is allowed.
+func (h *Handlers) enforceCompoundScope(r *http.Request, requestedServerID, requestedCompoundID string) bool {
+	apiKey, ok := auth.APIKeyFromContext(r.Context()).(*models.APIKey)
+	if !ok || apiKey == nil || apiKey.CompoundID == nil {
+		// No compound scoping on this key — allow
+		return true
+	}
+	keyCompoundID := *apiKey.CompoundID
+
+	// If requesting a specific compound, it must match the key's compound
+	if requestedCompoundID != "" {
+		return requestedCompoundID == keyCompoundID
+	}
+
+	// If requesting a specific server, verify it's a member of the key's compound
+	if requestedServerID != "" {
+		memberIDs, err := h.store.GetCompoundMemberIDs(keyCompoundID)
+		if err != nil {
+			return false
+		}
+		for _, mid := range memberIDs {
+			if mid == requestedServerID {
+				return true
+			}
+		}
+		return false
+	}
+
+	return true
+}
+
 // handleMCPProxyGlobal handles POST/GET/DELETE /api/mcp (global scope — all servers).
 func (h *Handlers) handleMCPProxyGlobal(w http.ResponseWriter, r *http.Request) {
 	scope := extractScopeFromAPIKey(r)
@@ -310,6 +345,10 @@ func (h *Handlers) handleMCPProxyServer(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "Server not found")
 		return
 	}
+	if !h.enforceCompoundScope(r, id, "") {
+		writeError(w, http.StatusForbidden, "API key is not scoped to this server")
+		return
+	}
 	h.handleStreamableHTTP(w, r, proxy.Scope{ServerID: id})
 }
 
@@ -317,7 +356,11 @@ func (h *Handlers) handleMCPProxyServer(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) handleMCPProxyCompound(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := h.store.GetCompound(id); err != nil {
-		writeError(w, http.StatusNotFound, "Compound not found")
+		writeError(w, http.StatusNotFound, "Compound server not found")
+		return
+	}
+	if !h.enforceCompoundScope(r, "", id) {
+		writeError(w, http.StatusForbidden, "API key is not scoped to this compound")
 		return
 	}
 	h.handleStreamableHTTP(w, r, proxy.Scope{CompoundID: id})
@@ -428,13 +471,17 @@ func (h *Handlers) handleListServers(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateServerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+	if strings.Contains(req.Name, "__") {
+		writeError(w, http.StatusBadRequest, "Server name cannot contain '__' (reserved delimiter)")
 		return
 	}
 	if req.Transport != "stdio" && req.Transport != "http" && req.Transport != "streamable-http" {
@@ -451,7 +498,7 @@ func (h *Handlers) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 
 	srv, err := h.proxy.AddServer(&req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create server: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create server")
 		return
 	}
 
@@ -540,14 +587,14 @@ func (h *Handlers) handleGetServer(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req models.UpdateServerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
 	srv, err := h.proxy.UpdateServer(id, &req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update server: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to update server")
 		return
 	}
 
@@ -557,7 +604,7 @@ func (h *Handlers) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.proxy.DeleteServer(id); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete server: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to delete server")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -566,7 +613,7 @@ func (h *Handlers) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleReconnectServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.proxy.ReconnectServer(id); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to reconnect: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to reconnect")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reconnecting"})
@@ -595,7 +642,7 @@ func (h *Handlers) handleToggleLogsEnabled(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		LogsEnabled bool `json:"logs_enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -605,7 +652,7 @@ func (h *Handlers) handleToggleLogsEnabled(w http.ResponseWriter, r *http.Reques
 		LogsEnabled: &enabled,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to toggle logs: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to toggle logs")
 		return
 	}
 
@@ -630,7 +677,7 @@ func (h *Handlers) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateAPIKeyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -663,7 +710,7 @@ func (h *Handlers) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.CreateAPIKey(apiKey); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create API key: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create API key")
 		return
 	}
 
@@ -728,12 +775,12 @@ func (h *Handlers) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	stats := models.DashboardStats{
 		TotalServers:     len(servers),
 		ConnectedServers: connected,
-		TotalTools:        len(tools),
-		TotalAPIKeys:      len(keys),
-		TotalCompounds:    len(compounds),
-		TotalMemories:     memCount,
-		TotalSkills:       len(skills),
-		TotalTasks:        taskCount,
+		TotalTools:       len(tools),
+		TotalAPIKeys:     len(keys),
+		TotalCompounds:   len(compounds),
+		TotalMemories:    memCount,
+		TotalSkills:      len(skills),
+		TotalTasks:       taskCount,
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -796,7 +843,7 @@ func (h *Handlers) handleListCompounds(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateCompound(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateCompoundRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -814,7 +861,7 @@ func (h *Handlers) handleCreateCompound(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := h.store.CreateCompound(compound, req.MemberIDs); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create compound: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create compound")
 		return
 	}
 
@@ -887,13 +934,13 @@ func (h *Handlers) handleGetCompound(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleUpdateCompound(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req models.UpdateCompoundRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
 	if err := h.store.UpdateCompound(id, &req); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update compound: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to update compound")
 		return
 	}
 
@@ -904,7 +951,7 @@ func (h *Handlers) handleUpdateCompound(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) handleDeleteCompound(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.store.DeleteCompound(id); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete compound: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to delete compound")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -928,7 +975,7 @@ func (h *Handlers) handleAddCompoundMember(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := h.store.AddCompoundMember(compoundID, serverID); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to add member: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to add member")
 		return
 	}
 
@@ -940,7 +987,7 @@ func (h *Handlers) handleRemoveCompoundMember(w http.ResponseWriter, r *http.Req
 	serverID := r.PathValue("serverId")
 
 	if err := h.store.RemoveCompoundMember(compoundID, serverID); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to remove member: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to remove member")
 		return
 	}
 
@@ -965,7 +1012,8 @@ func (h *Handlers) handleInitiateAuth(w http.ResponseWriter, r *http.Request) {
 
 	authURL, err := h.proxy.InitiateAuth(id, callbackBaseURL)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		log.Printf("InitiateAuth failed for server %s: %v", id, err)
+		writeError(w, http.StatusBadRequest, "Failed to initiate authentication")
 		return
 	}
 
@@ -1004,7 +1052,7 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	// Validate redirect_uri to prevent open redirect / auth code interception.
 	// Allowed: http(s)://localhost:*, http(s)://127.0.0.1:*, or custom app schemes (e.g. com.example://).
 	if err := validateRedirectURI(clientRedirectURI); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid redirect_uri: %v", err))
+		writeError(w, http.StatusBadRequest, "Invalid redirect_uri — only localhost or app schemes are allowed")
 		return
 	}
 
@@ -1017,11 +1065,11 @@ func (h *Handlers) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 	// static client ID and an existing consent cookie.
 	if !confirmed {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":         "confirmation_required",
-			"message":        "This MCP proxy uses a static client ID with the upstream authorization server. You must explicitly confirm authorization.",
-			"redirect_uri":   clientRedirectURI,
-			"scope":          scope,
-			"confirm_url":    r.URL.Path + "?" + r.URL.RawQuery + "&confirm=true",
+			"status":       "confirmation_required",
+			"message":      "This MCP proxy uses a static client ID with the upstream authorization server. You must explicitly confirm authorization.",
+			"redirect_uri": clientRedirectURI,
+			"scope":        scope,
+			"confirm_url":  r.URL.Path + "?" + r.URL.RawQuery + "&confirm=true",
 		})
 		return
 	}
@@ -1188,7 +1236,7 @@ func (h *Handlers) handleSetBearerToken(w http.ResponseWriter, r *http.Request) 
 		BearerTokenEnv string `json:"bearer_token_env"`
 		Method         string `json:"method"` // "bearer" or "env_bearer"
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1200,7 +1248,7 @@ func (h *Handlers) handleSetBearerToken(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := h.proxy.SetBearerToken(id, body.BearerToken); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, http.StatusInternalServerError, "Failed to set bearer token")
 			return
 		}
 	case "env_bearer":
@@ -1209,12 +1257,12 @@ func (h *Handlers) handleSetBearerToken(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err := h.proxy.SetEnvBearerToken(id, body.BearerTokenEnv); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, http.StatusInternalServerError, "Failed to set environment bearer token")
 			return
 		}
 	case "none":
 		if err := h.proxy.ClearAuth(id); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeError(w, http.StatusInternalServerError, "Failed to clear auth")
 			return
 		}
 	default:
@@ -1229,7 +1277,8 @@ func (h *Handlers) handleInitiateDeviceAuth(w http.ResponseWriter, r *http.Reque
 	id := r.PathValue("id")
 	result, err := h.proxy.InitiateDeviceAuth(id)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		log.Printf("InitiateDeviceAuth failed for server %s: %v", id, err)
+		writeError(w, http.StatusBadRequest, "Failed to initiate device authentication")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1238,7 +1287,8 @@ func (h *Handlers) handleInitiateDeviceAuth(w http.ResponseWriter, r *http.Reque
 func (h *Handlers) handlePollDeviceAuth(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.proxy.PollDeviceAuth(id); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		log.Printf("PollDeviceAuth failed for server %s: %v", id, err)
+		writeError(w, http.StatusBadRequest, "Failed to poll device authentication")
 		return
 	}
 	// Check if auth completed
@@ -1285,7 +1335,7 @@ func (h *Handlers) handleListMemories(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateMemory(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateMemoryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1339,7 +1389,7 @@ func (h *Handlers) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleUpdateMemory(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req models.UpdateMemoryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1413,7 +1463,7 @@ func (h *Handlers) handleListMemorySets(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handlers) handleCreateMemorySet(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateMemorySetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1423,7 +1473,7 @@ func (h *Handlers) handleCreateMemorySet(w http.ResponseWriter, r *http.Request)
 	}
 	ms, err := h.proxy.CreateMemorySet(req.Name, req.Description)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create memory set: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create memory set")
 		return
 	}
 	writeJSON(w, http.StatusCreated, ms)
@@ -1432,12 +1482,12 @@ func (h *Handlers) handleCreateMemorySet(w http.ResponseWriter, r *http.Request)
 func (h *Handlers) handleUpdateMemorySet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req models.UpdateMemorySetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 	if err := h.proxy.UpdateMemorySet(id, &req); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update memory set: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to update memory set")
 		return
 	}
 	ms, _ := h.store.GetMemorySet(id)
@@ -1447,7 +1497,7 @@ func (h *Handlers) handleUpdateMemorySet(w http.ResponseWriter, r *http.Request)
 func (h *Handlers) handleDeleteMemorySet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.proxy.DeleteMemorySet(id); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete memory set: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to delete memory set")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -1474,7 +1524,7 @@ func (h *Handlers) handleListSkills(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateSkillRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1509,7 +1559,7 @@ func (h *Handlers) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 		Version:     req.Version,
 	}
 	if err := h.store.CreateSkill(sk); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create skill: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create skill")
 		return
 	}
 	writeJSON(w, http.StatusCreated, sk)
@@ -1528,7 +1578,7 @@ func (h *Handlers) handleGetSkill(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleUpdateSkill(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req models.UpdateSkillRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1556,7 +1606,7 @@ func (h *Handlers) handleUpdateSkill(w http.ResponseWriter, r *http.Request) {
 		sk.Version = *req.Version
 	}
 	if err := h.store.UpdateSkill(sk); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update skill: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to update skill")
 		return
 	}
 	writeJSON(w, http.StatusOK, sk)
@@ -1620,7 +1670,7 @@ func (h *Handlers) handleListSkillSets(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateSkillSet(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateSkillSetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1636,7 +1686,7 @@ func (h *Handlers) handleCreateSkillSet(w http.ResponseWriter, r *http.Request) 
 		Description: req.Description,
 	}
 	if err := h.store.CreateSkillSet(ss); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create skill set: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create skill set")
 		return
 	}
 	// Initialize the skill server for this set
@@ -1647,7 +1697,7 @@ func (h *Handlers) handleCreateSkillSet(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) handleUpdateSkillSet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req models.UpdateSkillSetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1665,7 +1715,7 @@ func (h *Handlers) handleUpdateSkillSet(w http.ResponseWriter, r *http.Request) 
 		ss.Description = *req.Description
 	}
 	if err := h.store.UpdateSkillSet(ss); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update skill set: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to update skill set")
 		return
 	}
 	// Re-initialize skill servers to pick up the updated slug
@@ -1676,7 +1726,7 @@ func (h *Handlers) handleUpdateSkillSet(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) handleDeleteSkillSet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.store.DeleteSkillSet(id); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete skill set: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to delete skill set")
 		return
 	}
 	// Re-initialize to remove the deleted set from the map
@@ -1707,15 +1757,46 @@ var envVarRefPattern = models.EnvVarRefPattern
 // projectEnvVarRefPattern matches $[project:environment:var] patterns.
 var projectEnvVarRefPattern = models.ProjectEnvVarRefPattern
 
+// githubNamePattern validates GitHub owner/repo names: alphanumeric + hyphens.
+var githubNamePattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$`)
+
+// githubIssueNumberPattern validates GitHub issue numbers: numeric only.
+var githubIssueNumberPattern = regexp.MustCompile(`^[0-9]+$`)
+
+// validTaskStatuses is the set of allowed task status values.
+var validTaskStatuses = map[string]bool{
+	"todo": true, "in_progress": true, "done": true, "blocked": true,
+}
+
+// validTaskPriorities is the set of allowed task priority values.
+var validTaskPriorities = map[string]bool{
+	"urgent": true, "high": true, "medium": true, "low": true,
+}
+
+// maxJSONBodySize is the maximum allowed size for JSON request bodies (1MB).
+const maxJSONBodySize = 1 << 20
+
+// decodeJSON decodes a JSON request body with safety measures:
+// - Limits body size to maxJSONBodySize to prevent memory exhaustion
+// - Disallows unknown fields to prevent accidental acceptance of extra data
+// - Returns a user-friendly error message on failure
+func decodeJSON(r *http.Request, v interface{}) error {
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxJSONBodySize))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
 // hasEnvVarRef returns true if the value contains any env var reference pattern.
 func hasEnvVarRef(val string) bool {
 	return models.HasEnvVarRef(val)
 }
 
 // httpClient is used for outbound HTTP calls (e.g. GitHub API) with a
-// reasonable timeout to prevent hanging requests.
+// reasonable timeout to prevent hanging requests. Uses SSRF-safe transport
+// to block connections to private/reserved IP ranges.
 var httpClient = &http.Client{
-	Timeout: 15 * time.Second,
+	Timeout:   15 * time.Second,
+	Transport: auth.NewSSRFSafeTransport(),
 }
 
 // resolveEnvVarReferences resolves ${KEY}, ${KEY:-default}, and $[project:env:var]
@@ -1802,7 +1883,7 @@ func (h *Handlers) handleListEnvVars(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateEnvVar(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateEnvVarRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1839,7 +1920,7 @@ func (h *Handlers) handleCreateEnvVar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.CreateEnvVar(ev); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create env var: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create env var")
 		return
 	}
 
@@ -1851,7 +1932,7 @@ func (h *Handlers) handleCreateEnvVar(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) handleUpdateEnvVar(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req models.UpdateEnvVarRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -1867,7 +1948,7 @@ func (h *Handlers) handleUpdateEnvVar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.UpdateEnvVar(id, &req); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update env var: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to update env var")
 		return
 	}
 
@@ -1915,7 +1996,17 @@ func (h *Handlers) handleListEnvVarEnvironments(w http.ResponseWriter, r *http.R
 
 // --- Env Vars export (API key auth) ---
 
+// handleExportEnvVars exports env vars encrypted with the requesting API key.
+// Compound-scoped API keys are not allowed to export env vars — env vars are
+// global resources not scoped to compounds, so a compound-scoped key exporting
+// any project's secrets would be a privilege escalation.
 func (h *Handlers) handleExportEnvVars(w http.ResponseWriter, r *http.Request) {
+	// Reject compound-scoped API keys — they must not access global env vars
+	if apiKey, ok := auth.APIKeyFromContext(r.Context()).(*models.APIKey); ok && apiKey != nil && apiKey.CompoundID != nil {
+		writeError(w, http.StatusForbidden, "Compound-scoped API keys cannot export env vars")
+		return
+	}
+
 	project := r.URL.Query().Get("project")
 	environment := r.URL.Query().Get("environment")
 
@@ -1995,9 +2086,10 @@ func (h *Handlers) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	provider := h.auth.OIDC()
 	state := auth.GenerateState()
+	nonce := auth.GenerateState() // reuse the random ID generator for nonce
 	redirectURL := provider.RedirectURL(r)
 
-	// Store state in a short-lived cookie for CSRF protection
+	// Store state and nonce in a short-lived cookie for CSRF protection
 	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oidc_state",
@@ -2008,9 +2100,30 @@ func (h *Handlers) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Secure:   isSecure,
 	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oidc_nonce",
+		Value:    nonce,
+		Path:     "/",
+		MaxAge:   300,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isSecure,
+	})
 
-	authURL := provider.AuthURL(state, redirectURL)
+	authURL := provider.AuthURL(state, redirectURL, nonce)
 	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// clearOIDCCookies clears the OIDC state and nonce cookies.
+func clearOIDCCookies(w http.ResponseWriter) {
+	for _, name := range []string{"oidc_state", "oidc_nonce"} {
+		http.SetCookie(w, &http.Cookie{
+			Name:   name,
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
+		})
+	}
 }
 
 // handleOIDCCallback handles the OIDC callback, exchanges code for token,
@@ -2027,20 +2140,23 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Missing code or state")
 		return
 	}
-
 	// Verify state from cookie (constant-time comparison to prevent timing attacks)
 	cookie, err := r.Cookie("oidc_state")
 	if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(state)) != 1 {
+		// Clear state cookie on failure too (prevents state fixation)
+		clearOIDCCookies(w)
 		writeError(w, http.StatusBadRequest, "Invalid or expired state")
 		return
 	}
-	// Clear the cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:   "oidc_state",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
+	// Verify nonce from cookie (if the IdP echoes it back in the token response)
+	nonceCookie, err := r.Cookie("oidc_nonce")
+	if err != nil || nonceCookie.Value == "" {
+		clearOIDCCookies(w)
+		writeError(w, http.StatusBadRequest, "Missing or expired nonce")
+		return
+	}
+	// Clear the cookies
+	clearOIDCCookies(w)
 
 	provider := h.auth.OIDC()
 	redirectURL := provider.RedirectURL(r)
@@ -2049,15 +2165,24 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	token, err := provider.Exchange(code, redirectURL)
 	if err != nil {
 		log.Printf("OIDC callback: token exchange failed (redirect=%s): %v", redirectURL, err)
-		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Token exchange failed: %v", err))
+		writeError(w, http.StatusUnauthorized, "Token exchange failed")
 		return
+	}
+
+	// Verify nonce in id_token if present (RFC 9701 §2.3.3)
+	if idToken, ok := token.Extra("id_token").(string); ok && idToken != "" {
+		if err := provider.VerifyIDTokenNonce(idToken, nonceCookie.Value); err != nil {
+			log.Printf("OIDC callback: id_token nonce verification failed: %v", err)
+			writeError(w, http.StatusUnauthorized, "Nonce verification failed")
+			return
+		}
 	}
 
 	// Fetch user info
 	userInfo, err := provider.UserInfo(token.AccessToken)
 	if err != nil {
 		log.Printf("OIDC callback: userinfo failed: %v", err)
-		writeError(w, http.StatusUnauthorized, fmt.Sprintf("Failed to get user info: %v", err))
+		writeError(w, http.StatusUnauthorized, "Failed to get user info")
 		return
 	}
 
@@ -2071,7 +2196,7 @@ func (h *Handlers) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// Find or provision user
 	user, err := h.auth.LoginOrProvisionUser(pu)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to provision user: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to provision user")
 		return
 	}
 
@@ -2374,9 +2499,17 @@ func (h *Handlers) handleOAuthProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			jsonBody["redirect_uri"] = proxyCallbackURL
+			// Override client_id and client_secret with the proxy's credentials,
+			// mirroring the form-encoded path below. The MCP client may send its
+			// own client_id (e.g. from DCR), but PocketID only recognizes the
+			// proxy's pre-registered client_id.
+			jsonBody["client_id"] = oidc.ClientID()
+			if oidc.ClientSecret() != "" {
+				jsonBody["client_secret"] = oidc.ClientSecret()
+			}
 			newBody, _ := json.Marshal(jsonBody)
 			bodyReader = strings.NewReader(string(newBody))
-			log.Printf("[OAuth-Proxy] Token request (JSON): replaced redirect_uri with %s", proxyCallbackURL)
+			log.Printf("[OAuth-Proxy] Token request (JSON): replaced redirect_uri with %s, client_id=%s", proxyCallbackURL, oidc.ClientID())
 		} else {
 			// Form-encoded body — parse, replace redirect_uri, re-encode
 			vals, err := url.ParseQuery(string(bodyBytes))
@@ -2621,7 +2754,7 @@ func (h *Handlers) handleCreateDisabledTool(w http.ResponseWriter, r *http.Reque
 		ToolName   string  `json:"tool_name"`
 		CompoundID *string `json:"compound_id,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -2631,7 +2764,7 @@ func (h *Handlers) handleCreateDisabledTool(w http.ResponseWriter, r *http.Reque
 	}
 	dt, err := h.store.CreateDisabledTool(req.ToolName, req.CompoundID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to disable tool: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to disable tool")
 		return
 	}
 	writeJSON(w, http.StatusCreated, dt)
@@ -2653,13 +2786,26 @@ func (h *Handlers) handleListTaskItems(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) handleCreateTaskItem(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateTaskItemRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 	if req.Title == "" {
 		writeError(w, http.StatusBadRequest, "Title is required")
 		return
+	}
+	// Validate status and priority against known enums
+	if req.Status != "" {
+		if !validTaskStatuses[req.Status] {
+			writeError(w, http.StatusBadRequest, "Invalid status — must be one of: todo, in_progress, done, blocked")
+			return
+		}
+	}
+	if req.Priority != "" {
+		if !validTaskPriorities[req.Priority] {
+			writeError(w, http.StatusBadRequest, "Invalid priority — must be one of: urgent, high, medium, low")
+			return
+		}
 	}
 	task := &models.TaskItem{
 		BoardID:        req.BoardID,
@@ -2705,7 +2851,7 @@ func (h *Handlers) handleUpdateTaskItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req models.UpdateTaskItemRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -2716,9 +2862,17 @@ func (h *Handlers) handleUpdateTaskItem(w http.ResponseWriter, r *http.Request) 
 		task.Description = *req.Description
 	}
 	if req.Status != nil {
+		if *req.Status != "" && !validTaskStatuses[*req.Status] {
+			writeError(w, http.StatusBadRequest, "Invalid status — must be one of: todo, in_progress, done, blocked")
+			return
+		}
 		task.Status = *req.Status
 	}
 	if req.Priority != nil {
+		if *req.Priority != "" && !validTaskPriorities[*req.Priority] {
+			writeError(w, http.StatusBadRequest, "Invalid priority — must be one of: urgent, high, medium, low")
+			return
+		}
 		task.Priority = *req.Priority
 	}
 	if req.PriorityLevel != nil {
@@ -2771,14 +2925,14 @@ func (h *Handlers) handleTaskBoardStats(w http.ResponseWriter, r *http.Request) 
 
 // githubIssueResponse is the JSON returned by the GitHub issue lookup endpoint.
 type githubIssueResponse struct {
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	State     string   `json:"state"`
-	Assignee  string   `json:"assignee"`
-	Labels    []string `json:"labels"`
-	HTMLURL   string   `json:"html_url"`
-	Number    int      `json:"number"`
-	User      string   `json:"user"`
+	Title    string   `json:"title"`
+	Body     string   `json:"body"`
+	State    string   `json:"state"`
+	Assignee string   `json:"assignee"`
+	Labels   []string `json:"labels"`
+	HTMLURL  string   `json:"html_url"`
+	Number   int      `json:"number"`
+	User     string   `json:"user"`
 }
 
 // githubAPIIssue mirrors the relevant fields of the GitHub REST API issue object.
@@ -2818,7 +2972,7 @@ func (h *Handlers) handleListGitHubAccounts(w http.ResponseWriter, r *http.Reque
 
 func (h *Handlers) handleCreateGitHubAccount(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateGitHubAccountRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -2841,7 +2995,7 @@ func (h *Handlers) handleCreateGitHubAccount(w http.ResponseWriter, r *http.Requ
 		CreatedAt: time.Now(),
 	}
 	if err := h.store.CreateGitHubAccount(account); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create GitHub account: %v", err))
+		writeError(w, http.StatusInternalServerError, "Failed to create GitHub account")
 		return
 	}
 	writeJSON(w, http.StatusCreated, account)
@@ -2872,6 +3026,13 @@ func (h *Handlers) handleGetGithubIssue(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid url")
 		return
 	}
+	// Validate that the URL is actually from github.com — prevents SSRF via
+	// crafted URLs pointing to internal services.
+	parsedHost := strings.ToLower(parsed.Hostname())
+	if parsedHost != "github.com" && parsedHost != "www.github.com" {
+		writeError(w, http.StatusBadRequest, "url must be a GitHub issue URL (e.g. https://github.com/owner/repo/issues/123)")
+		return
+	}
 	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 	// parts should be: ["{owner}", "{repo}", "issues", "{number}"]
 	if len(parts) != 4 || parts[2] != "issues" {
@@ -2883,6 +3044,18 @@ func (h *Handlers) handleGetGithubIssue(w http.ResponseWriter, r *http.Request) 
 	issueNumber := parts[3]
 	if owner == "" || repo == "" || issueNumber == "" {
 		writeError(w, http.StatusBadRequest, "could not extract owner, repo, and issue number from url")
+		return
+	}
+	// Validate path segments to prevent path traversal / API endpoint injection.
+	// GitHub owner/repo names are alphanumeric + hyphens; issue numbers are numeric.
+	// Without this, a crafted URL like .../issues/../../users/admin/tokens would
+	// hit arbitrary GitHub API endpoints.
+	if !githubNamePattern.MatchString(owner) || !githubNamePattern.MatchString(repo) {
+		writeError(w, http.StatusBadRequest, "invalid GitHub owner or repo name")
+		return
+	}
+	if !githubIssueNumberPattern.MatchString(issueNumber) {
+		writeError(w, http.StatusBadRequest, "invalid GitHub issue number")
 		return
 	}
 
@@ -2918,19 +3091,19 @@ func (h *Handlers) handleGetGithubIssue(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var issue githubAPIIssue
-	if err := json.NewDecoder(resp.Body).Decode(&issue); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&issue); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to decode GitHub API response")
 		return
 	}
 
 	out := githubIssueResponse{
-		Title:    issue.Title,
-		Body:     issue.Body,
-		State:    issue.State,
-		HTMLURL:  issue.HTMLURL,
-		Number:   issue.Number,
-		User:     issue.User.Login,
-		Labels:   []string{},
+		Title:   issue.Title,
+		Body:    issue.Body,
+		State:   issue.State,
+		HTMLURL: issue.HTMLURL,
+		Number:  issue.Number,
+		User:    issue.User.Login,
+		Labels:  []string{},
 	}
 	if issue.Assignee != nil {
 		out.Assignee = issue.Assignee.Login
@@ -2984,7 +3157,7 @@ func (h *Handlers) handleCreateTaskBoardSet(w http.ResponseWriter, r *http.Reque
 		Slug        string `json:"slug"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -3007,7 +3180,13 @@ func (h *Handlers) handleCreateTaskBoardSet(w http.ResponseWriter, r *http.Reque
 func (h *Handlers) handleDeleteTaskBoardSet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.store.DeleteTaskBoardSet(id); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		log.Printf("DeleteTaskBoardSet failed for set %s: %v", id, err)
+		// Check for user-facing sentinel error
+		if strings.Contains(err.Error(), "default") {
+			writeError(w, http.StatusBadRequest, "Cannot delete the default task board set")
+		} else {
+			writeError(w, http.StatusInternalServerError, "Failed to delete task board set")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

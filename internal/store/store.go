@@ -496,10 +496,34 @@ func (s *Store) UpdateServerStatus(id, status string) error {
 	return err
 }
 
-// DeleteServer removes a server.
+// DeleteServer removes a server and cleans up all related data.
+// Uses a transaction to ensure atomicity: compound_members, oauth_tokens,
+// oauth_registrations, and disabled_tools are cleaned up to prevent orphaned rows.
 func (s *Store) DeleteServer(id string) error {
-	_, err := s.db.Exec(`DELETE FROM servers WHERE id = ?`, id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM compound_members WHERE server_id = ?`, id); err != nil {
+		return fmt.Errorf("failed to delete compound members: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM oauth_tokens WHERE server_id = ?`, id); err != nil {
+		return fmt.Errorf("failed to delete oauth tokens: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM oauth_registrations WHERE issuer IN (SELECT url FROM servers WHERE id = ?)`, id); err != nil {
+		// Best-effort cleanup — oauth_registrations may not have a direct server_id
+		// but the server's URL may match the issuer. Non-fatal if no rows match.
+	}
+	if _, err := tx.Exec(`DELETE FROM disabled_tools WHERE server_id = ?`, id); err != nil {
+		return fmt.Errorf("failed to delete disabled tools: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM servers WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("failed to delete server: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // --- API Keys ---
@@ -628,6 +652,7 @@ func (s *Store) LinkOIDCSubject(userID, oidcSubject string) error {
 // --- OAuth Tokens ---
 
 // SaveOAuthTokens stores or updates OAuth tokens for a server.
+// Access token, refresh token, and client secret are encrypted at rest.
 func (s *Store) SaveOAuthTokens(serverID string, tokens *mcp.OAuthTokens, clientID, clientSecret string) error {
 	var expiresAt interface{}
 	if !tokens.ExpiresAt.IsZero() {
@@ -646,13 +671,14 @@ func (s *Store) SaveOAuthTokens(serverID string, tokens *mcp.OAuthTokens, client
 			client_secret = excluded.client_secret,
 			updated_at = excluded.updated_at
 	`,
-		serverID, tokens.AccessToken, tokens.TokenType, tokens.RefreshToken,
-		expiresAt, tokens.Scope, clientID, clientSecret, time.Now(),
+		serverID, s.encryptToken(tokens.AccessToken), tokens.TokenType, s.encryptToken(tokens.RefreshToken),
+		expiresAt, tokens.Scope, clientID, s.encryptToken(clientSecret), time.Now(),
 	)
 	return err
 }
 
 // GetOAuthTokens retrieves stored OAuth tokens for a server.
+// Access token, refresh token, and client secret are decrypted before returning.
 func (s *Store) GetOAuthTokens(serverID string) (*mcp.OAuthTokens, string, string, error) {
 	row := s.db.QueryRow(`SELECT access_token, token_type, refresh_token, expires_at, scope, client_id, client_secret FROM oauth_tokens WHERE server_id = ?`, serverID)
 	var t mcp.OAuthTokens
@@ -662,6 +688,10 @@ func (s *Store) GetOAuthTokens(serverID string) (*mcp.OAuthTokens, string, strin
 	if err != nil {
 		return nil, "", "", err
 	}
+	// Decrypt sensitive fields
+	t.AccessToken = s.decryptToken(t.AccessToken)
+	t.RefreshToken = s.decryptToken(t.RefreshToken)
+	clientSecret = s.decryptToken(clientSecret)
 	if expiresAt.Valid {
 		t.ExpiresAt = expiresAt.Time
 	}
@@ -677,31 +707,38 @@ func (s *Store) DeleteOAuthTokens(serverID string) error {
 // --- OAuth Client Registration ---
 
 // OAuthRegistration is a persisted dynamic client registration keyed by issuer.
+// ClientSecret and RegistrationAccessToken are encrypted at rest via
+// encryptToken/decryptToken — they must never be stored in plaintext.
 type OAuthRegistration struct {
 	Issuer                  string `json:"issuer"`
 	ClientID                string `json:"client_id"`
-	ClientSecret            string `json:"client_secret,omitempty"`
-	RegistrationAccessToken string `json:"registration_access_token,omitempty"`
+	ClientSecret            string `json:"-"` // encrypted at rest, never serialized
+	RegistrationAccessToken string `json:"-"` // encrypted at rest, never serialized
 	ClientIDIssuedAt        int64  `json:"client_id_issued_at,omitempty"`
-	ClientSecretExpiresAt   int64  `json:"client_secret_expires_at,omitempty"`
+	ClientSecretExpiresAt  int64  `json:"client_secret_expires_at,omitempty"`
 	CreatedAt               string `json:"created_at"`
 	UpdatedAt               string `json:"updated_at"`
 }
 
 // GetOAuthRegistration retrieves a persisted client registration by issuer.
+// ClientSecret and RegistrationAccessToken are decrypted for internal use.
 func (s *Store) GetOAuthRegistration(issuer string) (*OAuthRegistration, error) {
 	row := s.db.QueryRow(`SELECT issuer, client_id, client_secret, registration_access_token, client_id_issued_at, client_secret_expires_at, created_at, updated_at FROM oauth_registrations WHERE issuer = ?`, issuer)
 	var r OAuthRegistration
-	if err := row.Scan(&r.Issuer, &r.ClientID, &r.ClientSecret, &r.RegistrationAccessToken, &r.ClientIDIssuedAt, &r.ClientSecretExpiresAt, &r.CreatedAt, &r.UpdatedAt); err != nil {
+	var encryptedSecret, encryptedRAT string
+	if err := row.Scan(&r.Issuer, &r.ClientID, &encryptedSecret, &encryptedRAT, &r.ClientIDIssuedAt, &r.ClientSecretExpiresAt, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return nil, err
 	}
+	r.ClientSecret = s.decryptToken(encryptedSecret)
+	r.RegistrationAccessToken = s.decryptToken(encryptedRAT)
 	return &r, nil
 }
 
 // SaveOAuthRegistration creates or updates a client registration keyed by issuer.
+// ClientSecret and RegistrationAccessToken are encrypted at rest.
 func (s *Store) SaveOAuthRegistration(reg *mcp.ClientRegistration, issuer string) error {
 	_, err := s.db.Exec(`INSERT INTO oauth_registrations (issuer, client_id, client_secret, registration_access_token, client_id_issued_at, client_secret_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(issuer) DO UPDATE SET client_id = excluded.client_id, client_secret = excluded.client_secret, registration_access_token = excluded.registration_access_token, client_id_issued_at = excluded.client_id_issued_at, client_secret_expires_at = excluded.client_secret_expires_at, updated_at = excluded.updated_at`,
-		issuer, reg.ClientID, reg.ClientSecret, reg.RegistrationAccessToken, reg.ClientIDIssuedAt, reg.ClientSecretExpiresAt, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
+		issuer, reg.ClientID, s.encryptToken(reg.ClientSecret), s.encryptToken(reg.RegistrationAccessToken), reg.ClientIDIssuedAt, reg.ClientSecretExpiresAt, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339))
 	return err
 }
 
@@ -712,6 +749,17 @@ func (s *Store) DeleteOAuthRegistration(issuer string) error {
 }
 
 // --- Scanner helpers ---
+
+// escapeLikeQuery escapes LIKE wildcards (%, _) and the escape char (\)
+// in user-supplied search queries. This prevents users from using %
+// to match everything (causing full-table scans) or _ to match arbitrary
+// single chars. Must be used with LIKE ? ESCAPE '\' in the SQL query.
+func escapeLikeQuery(query string) string {
+	s := strings.ReplaceAll(query, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
 
 type rowScanner interface {
 	Scan(dest ...interface{}) error
@@ -829,22 +877,30 @@ func scanAPIKeyImpl(s rowScanner) (*models.APIKey, error) {
 // --- Compound Servers ---
 
 // CreateCompound inserts a new compound server and optionally adds members.
+// Uses a transaction to ensure atomicity — if any member insert fails,
+// the compound creation is rolled back entirely.
 func (s *Store) CreateCompound(c *models.CompoundServer, memberIDs []string) error {
 	dictMode := 0
 	if c.DictionaryMode {
 		dictMode = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO compound_servers (id, name, description, dictionary_mode, created_at) VALUES (?, ?, ?, ?, ?)`,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`INSERT INTO compound_servers (id, name, description, dictionary_mode, created_at) VALUES (?, ?, ?, ?, ?)`,
 		c.ID, c.Name, c.Description, dictMode, c.CreatedAt)
 	if err != nil {
 		return err
 	}
 	for _, sid := range memberIDs {
-		if _, err := s.db.Exec(`INSERT OR IGNORE INTO compound_members (compound_id, server_id) VALUES (?, ?)`, c.ID, sid); err != nil {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO compound_members (compound_id, server_id) VALUES (?, ?)`, c.ID, sid); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // GetCompound retrieves a compound server by ID (without members).
@@ -1118,8 +1174,8 @@ func (s *Store) SearchMemories(setID, query string) ([]*models.Memory, error) {
 	if setID == "" {
 		setID = "default"
 	}
-	likeQuery := "%" + query + "%"
-	rows, err := s.db.Query(`SELECT id, set_id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE set_id = ? AND (content LIKE ? OR tags LIKE ?) ORDER BY importance DESC, updated_at DESC`, setID, likeQuery, likeQuery)
+	likeQuery := "%" + escapeLikeQuery(query) + "%"
+	rows, err := s.db.Query(`SELECT id, set_id, palace, room, content, tags, importance, access_count, last_accessed, created_at, updated_at FROM memories WHERE set_id = ? AND (content LIKE ? ESCAPE '\' OR tags LIKE ? ESCAPE '\') ORDER BY importance DESC, updated_at DESC`, setID, likeQuery, likeQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -1710,9 +1766,9 @@ func (s *Store) ListSkills(setID, category string) ([]*models.Skill, error) {
 }
 
 func (s *Store) SearchSkills(setID, query string) ([]*models.Skill, error) {
-	likeQuery := "%" + query + "%"
+	likeQuery := "%" + escapeLikeQuery(query) + "%"
 	rows, err := s.db.Query(
-		`SELECT id, set_id, name, description, content, category, tags, version, access_count, last_accessed, created_at, updated_at FROM skills WHERE set_id = ? AND (content LIKE ? OR name LIKE ? OR tags LIKE ? OR description LIKE ?) ORDER BY updated_at DESC`,
+		`SELECT id, set_id, name, description, content, category, tags, version, access_count, last_accessed, created_at, updated_at FROM skills WHERE set_id = ? AND (content LIKE ? ESCAPE '\' OR name LIKE ? ESCAPE '\' OR tags LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\') ORDER BY updated_at DESC`,
 		setID, likeQuery, likeQuery, likeQuery, likeQuery,
 	)
 	if err != nil {
@@ -1938,9 +1994,9 @@ func (s *Store) GetTaskBoardStats(boardID string) (*models.TaskBoardStats, error
 }
 
 func (s *Store) SearchTaskItems(query string) ([]*models.TaskItem, error) {
-	likeQuery := "%" + query + "%"
+	likeQuery := "%" + escapeLikeQuery(query) + "%"
 	rows, err := s.db.Query(
-		`SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, github_issue_url, created_at, updated_at FROM task_items WHERE title LIKE ? OR description LIKE ? OR assignee LIKE ? OR tags LIKE ? ORDER BY updated_at DESC`,
+		`SELECT id, board_id, title, description, status, priority, priority_level, assignee, due_date, tags, github_issue_url, created_at, updated_at FROM task_items WHERE title LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\' OR assignee LIKE ? ESCAPE '\' OR tags LIKE ? ESCAPE '\' ORDER BY updated_at DESC`,
 		likeQuery, likeQuery, likeQuery, likeQuery,
 	)
 	if err != nil {
@@ -2034,8 +2090,13 @@ func (s *Store) DeleteTaskBoardSet(id string) error {
 	if err != nil {
 		return err
 	}
-	tx.Exec(`UPDATE task_items SET board_id = 'default' WHERE board_id = ?`, id)
-	tx.Exec(`DELETE FROM task_board_sets WHERE id = ?`, id)
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE task_items SET board_id = 'default' WHERE board_id = ?`, id); err != nil {
+		return fmt.Errorf("failed to move tasks to default board: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM task_board_sets WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("failed to delete task board set: %w", err)
+	}
 	return tx.Commit()
 }
 

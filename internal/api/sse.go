@@ -25,12 +25,17 @@ type sseSession struct {
 	done      chan struct{}
 	scope     proxy.Scope
 	createdAt time.Time
+	writeMu   sync.Mutex // serializes writes to ResponseWriter to prevent corruption
 }
 
 type sseSessionManager struct {
 	mu       sync.RWMutex
 	sessions map[string]*sseSession
 }
+
+// maxSessions limits the number of concurrent SSE/stream sessions per type
+// to prevent resource exhaustion from excessive connections.
+const maxSessions = 1000
 
 func newSSESessionManager() *sseSessionManager {
 	sm := &sseSessionManager{sessions: make(map[string]*sseSession)}
@@ -110,6 +115,8 @@ func (sm *sseSessionManager) broadcastNotification(method string, params json.Ra
 }
 
 func (s *sseSession) send(event string, data string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, data)
 	if err != nil {
 		return err
@@ -119,6 +126,8 @@ func (s *sseSession) send(event string, data string) error {
 }
 
 func (s *sseSession) sendMessage(data string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	_, err := fmt.Fprintf(s.w, "data: %s\n\n", data)
 	if err != nil {
 		return err
@@ -146,19 +155,36 @@ func (h *Handlers) handleSSEConnectServer(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "Server not found")
 		return
 	}
+	if !h.enforceCompoundScope(r, id, "") {
+		writeError(w, http.StatusForbidden, "API key is not scoped to this server")
+		return
+	}
 	h.sseConnect(w, r, proxy.Scope{ServerID: id})
 }
 
 func (h *Handlers) handleSSEConnectCompound(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := h.store.GetCompound(id); err != nil {
-		writeError(w, http.StatusNotFound, "Compound not found")
+		writeError(w, http.StatusNotFound, "Compound server not found")
+		return
+	}
+	if !h.enforceCompoundScope(r, "", id) {
+		writeError(w, http.StatusForbidden, "API key is not scoped to this compound")
 		return
 	}
 	h.sseConnect(w, r, proxy.Scope{CompoundID: id})
 }
 
 func (h *Handlers) sseConnect(w http.ResponseWriter, r *http.Request, scope proxy.Scope) {
+	// Limit concurrent SSE sessions to prevent resource exhaustion
+	h.sseManager.mu.RLock()
+	sessionCount := len(h.sseManager.sessions)
+	h.sseManager.mu.RUnlock()
+	if sessionCount >= maxSessions {
+		writeError(w, http.StatusServiceUnavailable, "Too many concurrent SSE sessions")
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "Streaming not supported")
@@ -220,13 +246,21 @@ func (h *Handlers) handleSSEMessageServer(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "Server not found")
 		return
 	}
+	if !h.enforceCompoundScope(r, id, "") {
+		writeError(w, http.StatusForbidden, "API key is not scoped to this server")
+		return
+	}
 	h.sseMessage(w, r, proxy.Scope{ServerID: id})
 }
 
 func (h *Handlers) handleSSEMessageCompound(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := h.store.GetCompound(id); err != nil {
-		writeError(w, http.StatusNotFound, "Compound not found")
+		writeError(w, http.StatusNotFound, "Compound server not found")
+		return
+	}
+	if !h.enforceCompoundScope(r, "", id) {
+		writeError(w, http.StatusForbidden, "API key is not scoped to this compound")
 		return
 	}
 	h.sseMessage(w, r, proxy.Scope{CompoundID: id})
@@ -246,7 +280,7 @@ func (h *Handlers) sseMessage(w http.ResponseWriter, r *http.Request, fallbackSc
 	}
 
 	var req mcp.JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON-RPC request")
 		return
 	}
@@ -309,8 +343,8 @@ const sessionTTL = 30 * time.Minute
 
 // validProtocolVersions lists MCP protocol versions the proxy accepts.
 var validProtocolVersions = map[string]bool{
-	mcp.ProtocolVersionLatest:  true,
-	mcp.ProtocolVersionLegacy:  true,
+	mcp.ProtocolVersionLatest: true,
+	mcp.ProtocolVersionLegacy: true,
 }
 
 func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, scope proxy.Scope) {
@@ -410,7 +444,7 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var req mcp.JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON-RPC request")
 		return
 	}
@@ -459,7 +493,10 @@ func (h *Handlers) handleStreamableHTTP(w http.ResponseWriter, r *http.Request, 
 	if isInitialize && sessionID == "" {
 		sessionID = h.streamManager.generateID()
 		// Register the session so it's tracked for GET streams and 404 detection
-		h.streamManager.registerSession(sessionID, scope)
+		if !h.streamManager.registerSession(sessionID, scope) {
+			writeError(w, http.StatusServiceUnavailable, "Too many concurrent sessions")
+			return
+		}
 	}
 	if sessionID != "" {
 		w.Header().Set("Mcp-Session-Id", sessionID)
@@ -501,6 +538,7 @@ type streamSession struct {
 	done      chan struct{}
 	scope     proxy.Scope
 	createdAt time.Time
+	writeMu   sync.Mutex // serializes writes to ResponseWriter
 	// eventLog stores recent SSE event IDs and their data for resumability (Last-Event-ID support).
 	eventLog []sseEventLog
 	// eventLogMu protects eventLog
@@ -567,9 +605,12 @@ func (sm *streamSessionManager) get(id string) (*streamSession, bool) {
 // registerSession creates a session entry without an active SSE writer.
 // This is used when a session ID is assigned during initialize (POST)
 // so that subsequent requests with that session ID are recognized.
-func (sm *streamSessionManager) registerSession(id string, scope proxy.Scope) {
+func (sm *streamSessionManager) registerSession(id string, scope proxy.Scope) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if len(sm.sessions) >= maxSessions {
+		return false
+	}
 	if _, exists := sm.sessions[id]; !exists {
 		sm.sessions[id] = &streamSession{
 			id:        id,
@@ -577,6 +618,7 @@ func (sm *streamSessionManager) registerSession(id string, scope proxy.Scope) {
 			createdAt: time.Now(),
 		}
 	}
+	return true
 }
 
 // isValidSession checks if a session ID is known but expired (for 404 response).
@@ -629,8 +671,10 @@ func (sm *streamSessionManager) broadcastNotification(method string, params json
 
 		// Try to send on the SSE stream
 		if s.flusher != nil {
+			s.writeMu.Lock()
 			fmt.Fprintf(s.w, "id: %s\ndata: %s\n\n", eventID, string(data))
 			s.flusher.Flush()
+			s.writeMu.Unlock()
 		}
 	}
 }

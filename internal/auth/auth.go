@@ -108,12 +108,15 @@ func VerifyPassword(hash, password string) bool {
 }
 
 // GenerateToken creates a JWT token for a user.
+// Includes iss and aud claims to prevent cross-service token replay.
 func (a *AuthService) GenerateToken(userID, username, role string) (string, time.Time, error) {
 	expiresAt := time.Now().Add(24 * time.Hour)
 	claims := jwt.MapClaims{
 		"user_id":  userID,
 		"username": username,
 		"role":     role,
+		"iss":      "mcp-proxy",
+		"aud":      "mcp-proxy",
 		"exp":      expiresAt.Unix(),
 		"iat":      time.Now().Unix(),
 	}
@@ -126,13 +129,14 @@ func (a *AuthService) GenerateToken(userID, username, role string) (string, time
 }
 
 // ValidateToken validates a JWT token and returns the claims.
+// Validates issuer and audience to prevent cross-service token replay.
 func (a *AuthService) ValidateToken(tokenString string) (jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return a.jwtSecret, nil
-	})
+	}, jwt.WithIssuer("mcp-proxy"), jwt.WithAudience("mcp-proxy"))
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +391,12 @@ func (a *AuthService) EnsureDefaultAdmin(username, password string) error {
 // generateID creates a short unique ID with a prefix.
 func generateID(prefix string) string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// This should never happen — crypto/rand failure indicates a critical
+		// system issue. Fall back to timestamp-based uniqueness to avoid panicking.
+		log.Printf("WARNING: crypto/rand failed in generateID: %v — using timestamp fallback", err)
+		return fmt.Sprintf("%s_%x", prefix, time.Now().UnixNano())
+	}
 	return prefix + "_" + hex.EncodeToString(b)
 }
 

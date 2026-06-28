@@ -24,9 +24,9 @@ type stdioConn struct {
 
 	nextIDCounter uint64
 
-	mu       sync.Mutex
-	pending  map[uint64]chan JSONRPCResponse
-	closed   bool
+	mu      sync.Mutex
+	pending map[uint64]chan JSONRPCResponse
+	closed  bool
 
 	onStderr func(line string) // callback invoked for each stderr line
 }
@@ -207,11 +207,12 @@ func (c *stdioConn) readLoop() {
 			default:
 			}
 		}
-		}
+	}
 }
 
 func (c *stdioConn) readStderr() {
 	scanner := bufio.NewScanner(c.stderr)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max — matches stdout
 	for scanner.Scan() {
 		line := scanner.Text()
 		if c.onStderr != nil {

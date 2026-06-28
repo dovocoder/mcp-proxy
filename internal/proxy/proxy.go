@@ -151,7 +151,7 @@ type Manager struct {
 	authStates     map[string]*mcp.AuthState    // state -> pending OAuth flow
 	deviceAuths    map[string]*DeviceAuthResult // serverID -> pending device code flow
 	logMu          sync.RWMutex
-	serverLogs     map[string]*serverLog               // serverID -> stderr log ring buffer
+	serverLogs     map[string]*serverLog      // serverID -> stderr log ring buffer
 	oauthMetaCache map[string]*oauthMetaEntry // serverID -> cached discovery result (with TTL)
 	oauthMetaMu    sync.RWMutex
 	// onToolsChanged is a callback fired when the tool list changes (server connect/disconnect, etc.)
@@ -522,7 +522,7 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 					log.Printf("Server %s: no auth configured (auth_method=%q, no tokens, no auth_token)", srv.Name, srv.AuthMethod)
 				}
 			}
-			} else {
+		} else {
 			// Non-HTTP transports: use auth_token directly
 			authToken = srv.AuthToken
 			if authToken != "" && (envVarRefPattern.MatchString(authToken) || projectEnvVarRefPattern.MatchString(authToken)) {
@@ -531,7 +531,7 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 			} else if authToken != "" {
 				log.Printf("Server %s: using auth_token for non-HTTP transport (%d chars)", srv.Name, len(authToken))
 			}
-			}
+		}
 	}
 
 	// Resolve ${KEY} and $[project:env:var] references in the server's env map
@@ -540,7 +540,7 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 	// hardcoding them.
 	serverEnv := srv.Env
 	resolvedHeaders := srv.Headers
-	if (len(serverEnv) > 0 || len(resolvedHeaders) > 0) {
+	if len(serverEnv) > 0 || len(resolvedHeaders) > 0 {
 		hasRefs := false
 		for _, v := range serverEnv {
 			if envVarRefPattern.MatchString(v) || projectEnvVarRefPattern.MatchString(v) {
@@ -668,7 +668,7 @@ func (m *Manager) AddServer(req *models.CreateServerRequest) (*models.Server, er
 		Timeout:        timeout,
 		ConnectTimeout: connTimeout,
 		Enabled:        enabled,
-		LogsEnabled:     logsEnabled,
+		LogsEnabled:    logsEnabled,
 		Labels:         req.Labels,
 		Tags:           req.Tags,
 		Status:         "disconnected",
@@ -1098,8 +1098,8 @@ func (m *Manager) handleInitialize(req mcp.JSONRPCRequest, scope Scope) (json.Ra
 			"logging":     map[string]interface{}{},
 			"completions": map[string]interface{}{},
 			"tasks": map[string]interface{}{
-				"list":    map[string]interface{}{},
-				"cancel":  map[string]interface{}{},
+				"list":   map[string]interface{}{},
+				"cancel": map[string]interface{}{},
 				"requests": map[string]interface{}{
 					"tools": map[string]interface{}{
 						"call": map[string]interface{}{},
@@ -1683,11 +1683,11 @@ func (m *Manager) handleToolsList(req mcp.JSONRPCRequest, scope Scope) (json.Raw
 			// Dictionary mode: return ONLY the dictionary tool.
 			// All member tools (including memory) are discovered lazily via the dictionary.
 			tools := []mcp.Tool{{
-						Name:        "dictionary",
-						Title:       "Dictionary (lazy tool discovery)",
-						Description: dictionaryDescription,
-						InputSchema: dictionarySchema,
-					}}
+				Name:        "dictionary",
+				Title:       "Dictionary (lazy tool discovery)",
+				Description: dictionaryDescription,
+				InputSchema: dictionarySchema,
+			}}
 			result := mcp.ToolListResult{Tools: tools}
 			return json.Marshal(result)
 		}
@@ -2434,8 +2434,8 @@ func (m *Manager) ClearAuth(serverID string) error {
 
 // oauthMetaEntry wraps cached OAuth metadata with a timestamp for TTL expiry.
 type oauthMetaEntry struct {
-	meta      *mcp.OAuthServerMetadata
-	cachedAt  time.Time
+	meta     *mcp.OAuthServerMetadata
+	cachedAt time.Time
 }
 
 // oauthMetaCacheTTL is the maximum lifetime of cached OAuth metadata.
@@ -2482,16 +2482,16 @@ func (m *Manager) InvalidateOAuthMetadataCache(serverID string) {
 
 // DeviceAuthResult holds the result of initiating a device code flow.
 type DeviceAuthResult struct {
-	UserCode        string `json:"user_code"`
-	VerificationURI string `json:"verification_uri"`
-	Message         string `json:"message"`
-	ExpiresIn       int    `json:"expires_in"`
-	Interval        int    `json:"interval"`
-	DeviceCode      string `json:"-"`
-	ServerID        string `json:"-"`
-	ClientID        string `json:"-"`
-	TokenEndpoint   string `json:"-"`
-	Resource        string `json:"-"`
+	UserCode        string    `json:"user_code"`
+	VerificationURI string    `json:"verification_uri"`
+	Message         string    `json:"message"`
+	ExpiresIn       int       `json:"expires_in"`
+	Interval        int       `json:"interval"`
+	DeviceCode      string    `json:"-"`
+	ServerID        string    `json:"-"`
+	ClientID        string    `json:"-"`
+	TokenEndpoint   string    `json:"-"`
+	Resource        string    `json:"-"`
 	CreatedAt       time.Time `json:"-"`
 }
 
@@ -2852,6 +2852,10 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		if params.Tool == "" {
 			return nil, fmt.Errorf("tool parameter is required for describe action")
 		}
+		// Check if the tool is disabled (global or per-compound)
+		if disabled, err := m.store.IsToolDisabled(params.Tool, &scope.CompoundID); err == nil && disabled {
+			return nil, fmt.Errorf("tool '%s' is disabled", params.Tool)
+		}
 		// Check memory tools first (only from sets that are compound members)
 		if slug, baseName, ok := memory.ParseNamespaced(params.Tool); ok {
 			for _, setID := range m.isMemoryCompoundMember(scope.CompoundID) {
@@ -2889,6 +2893,10 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 	case "call":
 		if params.Tool == "" {
 			return nil, fmt.Errorf("tool parameter is required for call action")
+		}
+		// Check if the tool is disabled (global or per-compound)
+		if disabled, err := m.store.IsToolDisabled(params.Tool, &scope.CompoundID); err == nil && disabled {
+			return nil, fmt.Errorf("tool '%s' is disabled", params.Tool)
 		}
 		// Check if it's a memory tool — route to memory handler (only if member)
 		if slug, baseName, ok := memory.ParseNamespaced(params.Tool); ok {

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/agentic/mcp-proxy/internal/ssrf"
 )
 
 // ProtocolVersionLatest is the latest MCP protocol version supported.
@@ -99,8 +101,8 @@ type ToolListResult struct {
 // CallToolResult is the result of tools/call.
 // Per MCP spec, tool results MUST include isError field.
 type CallToolResult struct {
-	Content          []map[string]interface{} `json:"content"`
-	IsError          bool                     `json:"isError"`
+	Content           []map[string]interface{} `json:"content"`
+	IsError           bool                     `json:"isError"`
 	StructuredContent json.RawMessage          `json:"structuredContent,omitempty"`
 }
 
@@ -125,9 +127,9 @@ type Task struct {
 	TaskID        string     `json:"taskId"`
 	Status        TaskStatus `json:"status"`
 	StatusMessage string     `json:"statusMessage,omitempty"`
-	CreatedAt     string     `json:"createdAt"`     // ISO 8601
-	LastUpdatedAt string     `json:"lastUpdatedAt"` // ISO 8601
-	TTL           *int64     `json:"ttl"`           // milliseconds, null = unlimited
+	CreatedAt     string     `json:"createdAt"`              // ISO 8601
+	LastUpdatedAt string     `json:"lastUpdatedAt"`          // ISO 8601
+	TTL           *int64     `json:"ttl"`                    // milliseconds, null = unlimited
 	PollInterval  *int64     `json:"pollInterval,omitempty"` // milliseconds
 }
 
@@ -138,11 +140,11 @@ type CreateTaskResult struct {
 
 // ResourceTemplate is a parameterized resource template.
 type ResourceTemplate struct {
-	URITemplate string          `json:"uriTemplate"`
-	Name        string          `json:"name"`
-	Title       string          `json:"title,omitempty"`
-	Description string          `json:"description,omitempty"`
-	MimeType   string          `json:"mimeType,omitempty"`
+	URITemplate string `json:"uriTemplate"`
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
 }
 
 // InitializeResult is the result of initialize.
@@ -160,16 +162,9 @@ type sseEvent struct {
 }
 
 // sharedHTTPClient is a pooled HTTP client for all backend Streamable HTTP connections.
-// Using a shared client with a shared Transport enables connection reuse (keep-alive)
-// and prevents the resource leak of creating a new Transport per request.
+// Uses SSRF-safe transport to prevent connections to private/internal IP ranges.
 var sharedHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		MaxIdleConns:        20,
-		MaxIdleConnsPerHost: 5,
-		MaxConnsPerHost:     10,
-		IdleConnTimeout:     90 * time.Second,
-		ResponseHeaderTimeout: 0, // set per-request via context
-	},
+	Transport: ssrf.SafeTransportWithSettings(20, 5, 10),
 }
 
 // Client is a connection to a backend MCP server.
@@ -205,8 +200,8 @@ type ClientConfig struct {
 	URL            string
 	Headers        map[string]string
 	AuthToken      string
-	Timeout        int // seconds
-	ConnectTimeout int // seconds
+	Timeout        int          // seconds
+	ConnectTimeout int          // seconds
 	OnStderr       func(string) // optional callback for stderr lines (stdio only)
 }
 

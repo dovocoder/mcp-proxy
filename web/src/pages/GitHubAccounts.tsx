@@ -295,7 +295,7 @@ function AddAccountForm({ onSaved }: { onSaved: () => void }) {
         )}
 
         {error && (
-          <p className="text-sm text-destructive">{error}</p>
+          <p className="text-sm text-destructive" aria-live="polite">{error}</p>
         )}
 
         <DialogFooter>

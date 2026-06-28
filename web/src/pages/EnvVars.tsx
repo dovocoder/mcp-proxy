@@ -73,6 +73,7 @@ export default function EnvVars() {
   const [copiedRef, setCopiedRef] = useState<string | null>(null);
   const [formError, setFormError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<EnvVar | null>(null);
+   const [deleteError, setDeleteError] = useState('');
 
   const { data: projects } = useQuery({
     queryKey: ['env-var-projects'],
@@ -116,7 +117,14 @@ export default function EnvVars() {
 
   const deleteMutation = useMutation({
     mutationFn: envVarsApi.delete,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['env-vars'] }),
+     onSuccess: () => {
+       queryClient.invalidateQueries({ queryKey: ['env-vars'] });
+       setDeleteError('');
+     },
+     onError: (err: Error) => {
+       console.error('[deleteMutation]', err.message);
+       setDeleteError(err.message);
+     },
   });
 
   const copyToClipboard = (text: string) => {
@@ -365,7 +373,7 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
 
               {/* Error */}
               {formError && (
-                <p className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 break-words">
+                 <p aria-live="polite" className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 break-words">
                   {formError}
                 </p>
               )}
@@ -667,6 +675,7 @@ print(env_vars)  # {"DATABASE_URL": "...", "API_SECRET": "..."}`;
         itemName={deleteTarget?.key}
         confirmText="Delete Variable"
         loading={deleteMutation.isPending}
+         error={deleteError}
         onConfirm={() => {
           if (deleteTarget) {
             deleteMutation.mutate(deleteTarget.id, {

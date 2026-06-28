@@ -62,6 +62,7 @@ export default function CompoundServers() {
   const [addServerId, setAddServerId] = useState<string | null>(null);
   const [deleteCompoundOpen, setDeleteCompoundOpen] = useState(false);
   const [removeMemberTarget, setRemoveMemberTarget] = useState<Server | null>(null);
+   const [mutationError, setMutationError] = useState('');
 
   const { data: compounds } = useQuery({
     queryKey: ['compounds'],
@@ -84,6 +85,11 @@ export default function CompoundServers() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['compounds'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+       setMutationError('');
+     },
+     onError: (err: Error) => {
+       console.error('[deleteMutation]', err.message);
+       setMutationError(err.message);
     },
   });
 
@@ -92,16 +98,26 @@ export default function CompoundServers() {
       compoundsApi.addMember(compoundId, serverId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['compound', selectedId] });
+       setMutationError('');
+     },
+     onError: (err: Error) => {
+       console.error('[addMemberMutation]', err.message);
+       setMutationError(err.message);
     },
-  });
+    });
 
   const removeMemberMutation = useMutation({
     mutationFn: ({ compoundId, serverId }: { compoundId: string; serverId: string }) =>
       compoundsApi.removeMember(compoundId, serverId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['compound', selectedId] });
+       setMutationError('');
+     },
+     onError: (err: Error) => {
+       console.error('[removeMemberMutation]', err.message);
+       setMutationError(err.message);
     },
-  });
+    });
 
   const updateMutation = useMutation({
     mutationFn: ({ compoundId, data }: { compoundId: string; data: { dictionary_mode?: boolean } }) =>
@@ -109,8 +125,13 @@ export default function CompoundServers() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['compound', selectedId] });
       queryClient.invalidateQueries({ queryKey: ['compounds'] });
+       setMutationError('');
+     },
+     onError: (err: Error) => {
+       console.error('[updateMutation]', err.message);
+       setMutationError(err.message);
     },
-  });
+    });
 
   const [newDisabledTool, setNewDisabledTool] = useState('');
 
@@ -128,13 +149,23 @@ export default function CompoundServers() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['disabled-tools', selectedId] });
       setNewDisabledTool('');
+       setMutationError('');
+     },
+     onError: (err: Error) => {
+       console.error('[disableToolMutation]', err.message);
+       setMutationError(err.message);
     },
-  });
+    });
 
   const enableToolMutation = useMutation({
     mutationFn: (id: string) => disabledToolsApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['disabled-tools', selectedId] });
+       setMutationError('');
+     },
+     onError: (err: Error) => {
+       console.error('[enableToolMutation]', err.message);
+       setMutationError(err.message);
     },
   });
 
@@ -154,6 +185,14 @@ export default function CompoundServers() {
 
     return (
       <div className="space-y-5">
+         {mutationError && (
+           <div
+             aria-live="polite"
+             className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2 break-words"
+           >
+             {mutationError}
+           </div>
+         )}
         {/* Header */}
         <div className="flex items-start gap-3 sm:gap-4">
           <Link to="/compounds" className="shrink-0">
