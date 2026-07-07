@@ -147,9 +147,11 @@ type Manager struct {
 	skillMu        sync.RWMutex              // protects skillSets
 	mu             sync.RWMutex
 	clients        map[string]*mcp.Client       // serverID -> client
+	connecting     map[string]bool              // serverID -> connection in progress
 	errors         map[string]string            // serverID -> last error message
 	authStates     map[string]*mcp.AuthState    // state -> pending OAuth flow
 	deviceAuths    map[string]*DeviceAuthResult // serverID -> pending device code flow
+	authMu         sync.Mutex
 	logMu          sync.RWMutex
 	serverLogs     map[string]*serverLog      // serverID -> stderr log ring buffer
 	oauthMetaCache map[string]*oauthMetaEntry // serverID -> cached discovery result (with TTL)
@@ -170,6 +172,7 @@ func New(s *store.Store) *Manager {
 		memorySets:     make(map[string]*memory.Server),
 		skillSets:      make(map[string]*skills.Server),
 		clients:        make(map[string]*mcp.Client),
+		connecting:     make(map[string]bool),
 		errors:         make(map[string]string),
 		authStates:     make(map[string]*mcp.AuthState),
 		deviceAuths:    make(map[string]*DeviceAuthResult),
@@ -213,7 +216,7 @@ func (m *Manager) cleanupStaleAuthStates() {
 	defer ticker.Stop()
 	for range ticker.C {
 		now := time.Now()
-		m.mu.Lock()
+		m.authMu.Lock()
 		for state, as := range m.authStates {
 			if now.Sub(as.CreatedAt) > authStateTTL {
 				delete(m.authStates, state)
@@ -224,7 +227,7 @@ func (m *Manager) cleanupStaleAuthStates() {
 				delete(m.deviceAuths, serverID)
 			}
 		}
-		m.mu.Unlock()
+		m.authMu.Unlock()
 	}
 }
 
@@ -406,19 +409,39 @@ func (m *Manager) connectServer(srv *models.Server) {
 	m.connectServerWithRetry(srv, 0)
 }
 
+func (m *Manager) markServerAuthRequired(serverID, message string) {
+	m.mu.Lock()
+	m.errors[serverID] = message
+	m.mu.Unlock()
+	if err := m.store.UpdateServerStatus(serverID, "error"); err != nil {
+		log.Printf("[Proxy] Warning: failed to update server status to 'error' for %s: %v", serverID, err)
+	}
+}
+
 // connectServerWithRetry connects to a backend server and, on failure,
 // schedules a reconnection attempt with exponential backoff.
 // retryCount is the number of failed attempts so far (0 for first try).
 func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 	// Check if a connection already exists for this server (e.g., from a
 	// concurrent reconnect call). Skip if already connected.
-	m.mu.RLock()
-	_, exists := m.clients[srv.ID]
-	m.mu.RUnlock()
-	if exists {
+	m.mu.Lock()
+	if _, exists := m.clients[srv.ID]; exists {
+		m.mu.Unlock()
 		log.Printf("Server %s: skipping connect — already connected", srv.Name)
 		return
 	}
+	if m.connecting[srv.ID] {
+		m.mu.Unlock()
+		log.Printf("Server %s: skipping connect — connection already in progress", srv.Name)
+		return
+	}
+	m.connecting[srv.ID] = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.connecting, srv.ID)
+		m.mu.Unlock()
+	}()
 
 	// Determine auth token based on auth method
 	authToken := ""
@@ -464,7 +487,7 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 					log.Printf("Server %s: OAuth token expired, attempting refresh", srv.Name)
 					meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
 					if meta != nil && meta.TokenEndpoint != "" {
-						refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
+						refreshed, err := mcp.RefreshTokenWithResource(meta.TokenEndpoint, cid, csec, tokens.RefreshToken, srv.URL)
 						if err == nil {
 							tokens = refreshed
 							if err := m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec); err != nil {
@@ -473,10 +496,17 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 							log.Printf("Server %s: OAuth token refreshed successfully (%d chars)", srv.Name, len(tokens.AccessToken))
 						} else {
 							log.Printf("Server %s: failed to refresh OAuth token: %v", srv.Name, err)
+							m.markServerAuthRequired(srv.ID, fmt.Sprintf("OAuth token expired and refresh failed: %v", err))
+							return
 						}
 					} else {
 						log.Printf("Server %s: cannot refresh — no OAuth metadata or token endpoint found", srv.Name)
+						m.markServerAuthRequired(srv.ID, "OAuth token expired and refresh metadata was unavailable")
+						return
 					}
+				} else if tokens.IsExpired() {
+					m.markServerAuthRequired(srv.ID, "OAuth token expired and no refresh token is available")
+					return
 				} else {
 					log.Printf("Server %s: using stored OAuth access token (%d chars, expires=%v)", srv.Name, len(tokens.AccessToken), tokens.ExpiresAt)
 				}
@@ -499,15 +529,23 @@ func (m *Manager) connectServerWithRetry(srv *models.Server, retryCount int) {
 					log.Printf("Server %s: OAuth token expired, attempting refresh", srv.Name)
 					meta, _ := mcp.DiscoverOAuthMetadata(srv.URL)
 					if meta != nil && meta.TokenEndpoint != "" {
-						refreshed, err := mcp.RefreshToken(meta.TokenEndpoint, cid, csec, tokens.RefreshToken)
+						refreshed, err := mcp.RefreshTokenWithResource(meta.TokenEndpoint, cid, csec, tokens.RefreshToken, srv.URL)
 						if err == nil {
 							tokens = refreshed
 							_ = m.store.SaveOAuthTokens(srv.ID, tokens, cid, csec)
 							log.Printf("Server %s: OAuth token refreshed successfully (%d chars)", srv.Name, len(tokens.AccessToken))
 						} else {
 							log.Printf("Server %s: failed to refresh OAuth token: %v", srv.Name, err)
+							m.markServerAuthRequired(srv.ID, fmt.Sprintf("OAuth token expired and refresh failed: %v", err))
+							return
 						}
+					} else {
+						m.markServerAuthRequired(srv.ID, "OAuth token expired and refresh metadata was unavailable")
+						return
 					}
+				} else if tokens.IsExpired() {
+					m.markServerAuthRequired(srv.ID, "OAuth token expired and no refresh token is available")
+					return
 				}
 				authToken = tokens.AccessToken
 			} else {
@@ -770,6 +808,7 @@ func (m *Manager) DisconnectServer(id string) {
 	if ok {
 		delete(m.clients, id)
 	}
+	delete(m.connecting, id)
 	delete(m.errors, id)
 	m.mu.Unlock()
 
@@ -781,6 +820,28 @@ func (m *Manager) DisconnectServer(id string) {
 	}
 	// Notify SSE clients that the tool list has changed
 	m.fireToolsChanged()
+}
+
+func (m *Manager) handleBackendError(serverID string, err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, mcp.ErrSessionExpired) {
+		log.Printf("Server %s: session expired, reconnecting", serverID)
+		srv, getErr := m.store.GetServer(serverID)
+		if getErr != nil {
+			m.markServerAuthRequired(serverID, fmt.Sprintf("session expired and server lookup failed: %v", getErr))
+			return
+		}
+		m.DisconnectServer(serverID)
+		if srv.Enabled {
+			go m.connectServer(srv)
+		}
+		return
+	}
+	if errors.Is(err, mcp.ErrUnauthorized) {
+		m.markServerAuthRequired(serverID, "backend returned HTTP 401; OAuth re-authentication or a new token is required")
+	}
 }
 
 // ReconnectServer disconnects and reconnects a server.
@@ -1357,6 +1418,7 @@ func (m *Manager) handleResourcesTemplatesList(req mcp.JSONRPCRequest, scope Sco
 		}
 		result, err := client.Call("resources/templates/list", nil)
 		if err != nil {
+			m.handleBackendError(id, err)
 			continue // Server may not support resources/templates/list
 		}
 		var tmplResult struct {
@@ -1419,6 +1481,7 @@ func (m *Manager) handleCompletionComplete(req mcp.JSONRPCRequest, scope Scope) 
 		if err == nil {
 			return result, nil
 		}
+		m.handleBackendError(id, err)
 	}
 
 	// No server could handle the completion request — return empty
@@ -1955,7 +2018,11 @@ func (m *Manager) handleToolsCall(ctx context.Context, req mcp.JSONRPCRequest, s
 		return nil, fmt.Errorf("server not connected: %s", serverName)
 	}
 
-	return client.CallTool(toolName, params.Arguments)
+	result, err := client.CallTool(toolName, params.Arguments)
+	if err != nil {
+		m.handleBackendError(srv.ID, err)
+	}
+	return result, err
 }
 
 // --- Task handlers (experimental, 2025-11-25 spec) ---
@@ -2262,9 +2329,9 @@ func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string,
 		CreatedAt:             time.Now(),
 	}
 
-	m.mu.Lock()
+	m.authMu.Lock()
 	m.authStates[state] = authState
-	m.mu.Unlock()
+	m.authMu.Unlock()
 
 	return authURL, nil
 }
@@ -2272,12 +2339,12 @@ func (m *Manager) InitiateAuth(serverID string, callbackBaseURL string) (string,
 // HandleAuthCallback processes the OAuth callback, exchanges the code for tokens,
 // stores them, and reconnects the server.
 func (m *Manager) HandleAuthCallback(state, code string) error {
-	m.mu.Lock()
+	m.authMu.Lock()
 	authState, ok := m.authStates[state]
 	if ok {
 		delete(m.authStates, state)
 	}
-	m.mu.Unlock()
+	m.authMu.Unlock()
 
 	if !ok {
 		return fmt.Errorf("invalid or expired OAuth state")
@@ -2598,9 +2665,9 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 	}
 
 	// Store for polling
-	m.mu.Lock()
+	m.authMu.Lock()
 	m.deviceAuths[serverID] = result
-	m.mu.Unlock()
+	m.authMu.Unlock()
 
 	return result, nil
 }
@@ -2608,9 +2675,9 @@ func (m *Manager) InitiateDeviceAuth(serverID string) (*DeviceAuthResult, error)
 // PollDeviceAuth polls the token endpoint for a pending device code flow.
 // Returns nil if authentication is still pending, or tokens if completed.
 func (m *Manager) PollDeviceAuth(serverID string) error {
-	m.mu.Lock()
+	m.authMu.Lock()
 	auth, ok := m.deviceAuths[serverID]
-	m.mu.Unlock()
+	m.authMu.Unlock()
 	if !ok {
 		return fmt.Errorf("no pending device auth for server %s", serverID)
 	}
@@ -2628,9 +2695,9 @@ func (m *Manager) PollDeviceAuth(serverID string) error {
 		return fmt.Errorf("failed to save tokens: %w", err)
 	}
 
-	m.mu.Lock()
+	m.authMu.Lock()
 	delete(m.deviceAuths, serverID)
-	m.mu.Unlock()
+	m.authMu.Unlock()
 
 	log.Printf("OAuth tokens stored via device code flow for server %s", serverID)
 
@@ -2646,9 +2713,9 @@ func (m *Manager) PollDeviceAuth(serverID string) error {
 
 // CancelDeviceAuth removes a pending device auth flow.
 func (m *Manager) CancelDeviceAuth(serverID string) {
-	m.mu.Lock()
+	m.authMu.Lock()
 	delete(m.deviceAuths, serverID)
-	m.mu.Unlock()
+	m.authMu.Unlock()
 }
 
 // StopAll disconnects all servers.
@@ -2937,7 +3004,11 @@ func (m *Manager) handleDictionaryCall(ctx context.Context, args json.RawMessage
 		if !ok {
 			return nil, fmt.Errorf("server not connected: %s", serverName)
 		}
-		return client.CallTool(toolName, params.Arguments)
+		result, err := client.CallTool(toolName, params.Arguments)
+		if err != nil {
+			m.handleBackendError(srv.ID, err)
+		}
+		return result, err
 
 	case "search":
 		if params.Query == "" {

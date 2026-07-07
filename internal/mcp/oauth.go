@@ -346,7 +346,7 @@ func discoverViaProtectedResource(serverURL string) (*OAuthServerMetadata, error
 	// Check WWW-Authenticate header
 	authHeader := resp.Header.Get("WWW-Authenticate")
 	if authHeader == "" {
-		return nil, fmt.Errorf("no WWW-Authenticate header")
+		return nil, fmt.Errorf("no WWW-Authenticate header from HTTP %d", resp.StatusCode)
 	}
 
 	// Parse resource_metadata URL from the header
@@ -377,24 +377,168 @@ func discoverViaProtectedResource(serverURL string) (*OAuthServerMetadata, error
 // extractResourceMetadataURL parses the WWW-Authenticate header to find
 // the resource_metadata URL.
 func extractResourceMetadataURL(header string) string {
-	// Look for resource_metadata="..."
-	idx := strings.Index(header, "resource_metadata=")
-	if idx == -1 {
-		return ""
+	challenges := parseWWWAuthenticate(header)
+	for _, params := range challenges {
+		if v := params["resource_metadata"]; v != "" {
+			return v
+		}
 	}
-	start := idx + len("resource_metadata=")
-	if start >= len(header) {
-		return ""
+	return ""
+}
+
+func parseWWWAuthenticate(header string) []map[string]string {
+	var challenges []map[string]string
+	i := 0
+	for i < len(header) {
+		for i < len(header) && (header[i] == ' ' || header[i] == '\t' || header[i] == ',') {
+			i++
+		}
+		if i >= len(header) {
+			break
+		}
+
+		for i < len(header) && header[i] != ' ' && header[i] != '\t' {
+			i++
+		}
+
+		params := make(map[string]string)
+		for i < len(header) {
+			for i < len(header) && (header[i] == ' ' || header[i] == '\t' || header[i] == ',') {
+				i++
+			}
+			if i >= len(header) {
+				break
+			}
+
+			keyStart := i
+			for i < len(header) && isAuthParamChar(header[i]) {
+				i++
+			}
+			key := strings.ToLower(strings.TrimSpace(header[keyStart:i]))
+			for i < len(header) && (header[i] == ' ' || header[i] == '\t') {
+				i++
+			}
+			if key == "" || i >= len(header) || header[i] != '=' {
+				break
+			}
+			i++
+			for i < len(header) && (header[i] == ' ' || header[i] == '\t') {
+				i++
+			}
+
+			value := ""
+			if i < len(header) && header[i] == '"' {
+				i++
+				var b strings.Builder
+				for i < len(header) {
+					if header[i] == '\\' && i+1 < len(header) {
+						i++
+						b.WriteByte(header[i])
+						i++
+						continue
+					}
+					if header[i] == '"' {
+						i++
+						break
+					}
+					b.WriteByte(header[i])
+					i++
+				}
+				value = b.String()
+			} else {
+				valueStart := i
+				for i < len(header) && header[i] != ',' && header[i] != ' ' && header[i] != '\t' {
+					i++
+				}
+				value = strings.TrimSpace(header[valueStart:i])
+			}
+			params[key] = value
+		}
+		if len(params) > 0 {
+			challenges = append(challenges, params)
+		}
 	}
-	// Skip opening quote
-	if header[start] == '"' || header[start] == '\'' {
-		start++
+	return challenges
+}
+
+func isAuthParamChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') ||
+		c == '_' || c == '-' || c == '.'
+}
+
+func RefreshToken(tokenEndpoint, clientID, clientSecret, refreshToken string) (*OAuthTokens, error) {
+	return RefreshTokenWithResource(tokenEndpoint, clientID, clientSecret, refreshToken, "")
+}
+
+// RefreshTokenWithResource exchanges a refresh token for a new access token.
+func RefreshTokenWithResource(tokenEndpoint, clientID, clientSecret, refreshToken, resource string) (*OAuthTokens, error) {
+	params := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {clientID},
+		"refresh_token": {refreshToken},
 	}
-	end := start
-	for end < len(header) && header[end] != '"' && header[end] != '\'' && header[end] != ' ' {
-		end++
+	if resource != "" {
+		params.Set("resource", resource)
 	}
-	return header[start:end]
+	if clientSecret != "" {
+		params.Set("client_secret", clientSecret)
+	}
+
+	req, err := http.NewRequest("POST", tokenEndpoint, strings.NewReader(params.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	client := oauthHTTPClient
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token refresh failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read refresh response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token refresh failed (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token,omitempty"`
+		ExpiresIn    int    `json:"expires_in,omitempty"`
+		Scope        string `json:"scope,omitempty"`
+	}
+	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse refresh response: %w", err)
+	}
+
+	tokens := &OAuthTokens{
+		AccessToken:  tokenResp.AccessToken,
+		TokenType:    tokenResp.TokenType,
+		RefreshToken: tokenResp.RefreshToken,
+		Scope:        tokenResp.Scope,
+	}
+	if tokenResp.ExpiresIn > 0 {
+		tokens.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	}
+	// If no new refresh token, keep the old one
+	if tokens.RefreshToken == "" {
+		tokens.RefreshToken = refreshToken
+	}
+
+	if tokens.AccessToken == "" {
+		return nil, fmt.Errorf("refresh response missing access_token")
+	}
+
+	return tokens, nil
 }
 
 // RegisterClient performs dynamic client registration (RFC 7591).
@@ -524,72 +668,6 @@ func ExchangeCodeForToken(tokenEndpoint, clientID, clientSecret, code, redirectU
 
 	if tokens.AccessToken == "" {
 		return nil, fmt.Errorf("token response missing access_token")
-	}
-
-	return tokens, nil
-}
-
-// RefreshToken exchanges a refresh token for a new access token.
-func RefreshToken(tokenEndpoint, clientID, clientSecret, refreshToken string) (*OAuthTokens, error) {
-	params := url.Values{
-		"grant_type":    {"refresh_token"},
-		"client_id":     {clientID},
-		"refresh_token": {refreshToken},
-	}
-	if clientSecret != "" {
-		params.Set("client_secret", clientSecret)
-	}
-
-	req, err := http.NewRequest("POST", tokenEndpoint, strings.NewReader(params.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	client := oauthHTTPClient
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("token refresh failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthBodySize))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read refresh response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed (HTTP %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		TokenType    string `json:"token_type"`
-		RefreshToken string `json:"refresh_token,omitempty"`
-		ExpiresIn    int    `json:"expires_in,omitempty"`
-		Scope        string `json:"scope,omitempty"`
-	}
-	if err := json.Unmarshal(respBody, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse refresh response: %w", err)
-	}
-
-	tokens := &OAuthTokens{
-		AccessToken:  tokenResp.AccessToken,
-		TokenType:    tokenResp.TokenType,
-		RefreshToken: tokenResp.RefreshToken,
-		Scope:        tokenResp.Scope,
-	}
-	if tokenResp.ExpiresIn > 0 {
-		tokens.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-	}
-	// If no new refresh token, keep the old one
-	if tokens.RefreshToken == "" {
-		tokens.RefreshToken = refreshToken
-	}
-
-	if tokens.AccessToken == "" {
-		return nil, fmt.Errorf("refresh response missing access_token")
 	}
 
 	return tokens, nil

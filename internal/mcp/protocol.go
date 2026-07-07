@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +29,11 @@ var supportedProtocolVersions = map[string]bool{
 	ProtocolVersionLatest: true,
 	ProtocolVersionLegacy: true,
 }
+
+var (
+	ErrUnauthorized   = errors.New("backend unauthorized")
+	ErrSessionExpired = errors.New("backend session expired")
+)
 
 // NegotiateProtocolVersion selects the highest protocol version both sides support.
 // If the client requests a version we support, we echo it back.
@@ -191,15 +197,16 @@ type Client struct {
 	connectTimeout time.Duration
 	onStderr       func(string) // callback for stderr lines (stdio transport only)
 
-	mu        sync.Mutex
-	sessionMu sync.Mutex // separate mutex for sessionID — avoids deadlock when httpCall is called from Connect (which holds mu)
-	tools     []Tool
-	status    string
-	lastErr   string
-	conn      *stdioConn
-	httpURL   string
-	sessionID string // Mcp-Session-Id for Streamable HTTP
-	idCounter uint64
+	mu              sync.Mutex
+	sessionMu       sync.Mutex // separate mutex for sessionID — avoids deadlock when httpCall is called from Connect (which holds mu)
+	tools           []Tool
+	status          string
+	lastErr         string
+	conn            *stdioConn
+	httpURL         string
+	sessionID       string // Mcp-Session-Id for Streamable HTTP
+	protocolVersion string
+	idCounter       uint64
 }
 
 // ClientConfig holds the configuration for an MCP client connection.
@@ -227,17 +234,18 @@ func NewClient(cfg ClientConfig) *Client {
 		connTimeout = 60 * time.Second
 	}
 	return &Client{
-		transport:      cfg.Transport,
-		command:        cfg.Command,
-		args:           cfg.Args,
-		env:            cfg.Env,
-		url:            cfg.URL,
-		headers:        cfg.Headers,
-		authToken:      cfg.AuthToken,
-		timeout:        timeout,
-		connectTimeout: connTimeout,
-		onStderr:       cfg.OnStderr,
-		status:         "disconnected",
+		transport:       cfg.Transport,
+		command:         cfg.Command,
+		args:            cfg.Args,
+		env:             cfg.Env,
+		url:             cfg.URL,
+		headers:         cfg.Headers,
+		authToken:       cfg.AuthToken,
+		timeout:         timeout,
+		connectTimeout:  connTimeout,
+		onStderr:        cfg.OnStderr,
+		status:          "disconnected",
+		protocolVersion: ProtocolVersionLatest,
 	}
 }
 
@@ -277,9 +285,7 @@ func (c *Client) Connect() error {
 
 	// Discover tools
 	if err := c.discoverTools(); err != nil {
-		c.status = "error"
 		c.lastErr = err.Error()
-		return err
 	}
 
 	c.status = "connected"
@@ -360,12 +366,12 @@ func (c *Client) initialize() error {
 	}
 	if err := json.Unmarshal(result, &initResp); err == nil && initResp.ProtocolVersion != "" {
 		if !supportedProtocolVersions[initResp.ProtocolVersion] {
-			return fmt.Errorf("server returned unsupported protocol version: %s", initResp.ProtocolVersion)
+			log.Printf("[MCP] Server returned unrecognized protocol version %s; using it for subsequent requests", initResp.ProtocolVersion)
 		}
-		// Re-negotiate: use the server's version if it's older than what we sent
 		if initResp.ProtocolVersion != ProtocolVersionLatest {
 			log.Printf("[MCP] Server negotiated protocol version %s (we requested %s)", initResp.ProtocolVersion, ProtocolVersionLatest)
 		}
+		c.protocolVersion = initResp.ProtocolVersion
 	}
 	return nil
 }
@@ -452,7 +458,11 @@ func (c *Client) stdioCall(method string, params json.RawMessage) (json.RawMessa
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("MCP-Protocol-Version", ProtocolVersionLatest)
+	protocolVersion := c.protocolVersion
+	if protocolVersion == "" {
+		protocolVersion = ProtocolVersionLatest
+	}
+	req.Header.Set("MCP-Protocol-Version", protocolVersion)
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
@@ -489,7 +499,12 @@ func (c *Client) closeSession() {
 	c.setHeaders(req)
 	req.Header.Set("Mcp-Session-Id", sessionID)
 	resp, err := sharedHTTPClient.Do(req)
-	if err == nil {
+	if err != nil {
+		log.Printf("[MCP] closeSession DELETE failed for session %q: %v", sessionID, err)
+	} else {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			log.Printf("[MCP] closeSession DELETE returned HTTP %d for session %q", resp.StatusCode, sessionID)
+		}
 		resp.Body.Close()
 	}
 	c.sessionMu.Lock()
@@ -539,12 +554,12 @@ func (c *Client) httpCall(method string, params json.RawMessage) (json.RawMessag
 		c.sessionMu.Lock()
 		c.sessionID = ""
 		c.sessionMu.Unlock()
-		return nil, fmt.Errorf("session expired (HTTP 404) — reconnection needed")
+		return nil, fmt.Errorf("%w (HTTP 404)", ErrSessionExpired)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		log.Printf("[MCP] ✗ %s (id=%d) 401 Unauthorized: %s", method, reqID, string(respBody))
-		return nil, fmt.Errorf("unauthorized (HTTP 401) — check your auth token")
+		return nil, fmt.Errorf("%w (HTTP 401)", ErrUnauthorized)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -657,24 +672,25 @@ func (c *Client) readSSEWithTimeout(body io.Reader, reqID uint64, timeout time.D
 		err  error
 	}
 	lineCh := make(chan lineResult, 1)
-	readerDone := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
-		defer close(readerDone)
 		for {
 			line, err := reader.ReadString('\n')
 			select {
 			case lineCh <- lineResult{line, err}:
-			case <-readerDone:
+			case <-done:
 				return // reader is no longer needed
+			}
+			if err != nil {
+				return
 			}
 		}
 	}()
 
 	defer func() {
-		// Signal the reader goroutine to stop on return.
-		select {
-		case <-readerDone:
-		default:
+		close(done)
+		if closer, ok := body.(io.Closer); ok {
+			_ = closer.Close()
 		}
 	}()
 

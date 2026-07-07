@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -53,6 +55,33 @@ func IsPrivateIP(ip net.IP) bool {
 	return false
 }
 
+// IsAllowedPrivateIP returns true when ip is covered by
+// MCP_PROXY_ALLOWED_PRIVATE_IPS. The environment variable accepts a
+// comma-separated list of CIDRs or literal IP addresses.
+func IsAllowedPrivateIP(ip net.IP) bool {
+	allowed := strings.TrimSpace(os.Getenv("MCP_PROXY_ALLOWED_PRIVATE_IPS"))
+	if allowed == "" {
+		return false
+	}
+	for _, entry := range strings.Split(allowed, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			_, network, err := net.ParseCIDR(entry)
+			if err == nil && network.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if allowedIP := net.ParseIP(entry); allowedIP != nil && allowedIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // SafeTransport returns an http.Transport that blocks connections to
 // private IP ranges to prevent SSRF attacks.
 // The transport resolves DNS first, checks the IP, then dials.
@@ -84,7 +113,7 @@ func SafeTransport() *http.Transport {
 
 			// Check ALL resolved IPs — if any is private, block the request
 			for _, ip := range ips {
-				if IsPrivateIP(ip) {
+				if IsPrivateIP(ip) && !IsAllowedPrivateIP(ip) {
 					return nil, fmt.Errorf("SSRF protection: blocking connection to private/reserved IP %s for host %q", ip, host)
 				}
 			}
