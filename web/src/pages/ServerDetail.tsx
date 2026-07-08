@@ -79,6 +79,8 @@ export default function ServerDetail() {
   const [deviceAuth, setDeviceAuth] = useState<DeviceAuthResult | null>(null);
   const [devicePolling, setDevicePolling] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [pkceAuthLoading, setPkceAuthLoading] = useState(false);
+  const [pkceAuthError, setPkceAuthError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [bearerToken, setBearerToken] = useState('');
   const [bearerTokenEnv, setBearerTokenEnv] = useState('');
@@ -195,6 +197,38 @@ export default function ServerDetail() {
       void pollDeviceAuth(id, res.interval || 5);
     } catch (err) {
       setDeviceError(err instanceof Error ? err.message : 'Failed to start device auth');
+    }
+  };
+
+  const initiatePKCEAuth = async () => {
+    if (!id) return;
+    setPkceAuthError(null);
+    setPkceAuthLoading(true);
+    try {
+      const res = await serversApi.initiateAuth(id);
+      // Open the authorization URL in a new browser tab
+      // The user will authenticate at the upstream provider, which redirects
+      // back to the proxy's /api/oauth/callback, which completes the flow.
+      if (res.auth_url) {
+        window.open(res.auth_url, '_blank', 'noopener,noreferrer');
+      }
+      // Invalidate auth status to refresh after the user returns
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['auth-status', id] });
+        queryClient.invalidateQueries({ queryKey: ['server', id] });
+      }, 3000);
+    } catch (err) {
+      setPkceAuthError(err instanceof Error ? err.message : 'Failed to start OAuth');
+    } finally {
+      setPkceAuthLoading(false);
+    }
+  };
+
+  const handleAuthenticate = () => {
+    if (authStatus?.device_auth_supported === false) {
+      void initiatePKCEAuth();
+    } else {
+      void initiateDeviceAuth();
     }
   };
 
@@ -410,12 +444,12 @@ export default function ServerDetail() {
                     )}
                   </div>
                   <Button
-                    onClick={initiateDeviceAuth}
-                    disabled={devicePolling}
+                    onClick={handleAuthenticate}
+                    disabled={devicePolling || pkceAuthLoading}
                     size="sm"
                     className="shrink-0"
                   >
-                    {devicePolling ? (
+                    {devicePolling || pkceAuthLoading ? (
                       <Loader2 className="size-4 animate-spin" />
                     ) : (
                       <LogIn className="size-4" />
@@ -428,6 +462,15 @@ export default function ServerDetail() {
                     ? 'Authorization code flow with PKCE. A client_id may be required — configure it as OAuth Client ID in the edit form.'
                     : `Device code flow — sign in with your ${oauthProviderName} account.`}
                 </p>
+                {pkceAuthError && (
+                  <div className="text-xs text-destructive break-words">{pkceAuthError}</div>
+                )}
+                {pkceAuthLoading && (
+                  <div className="rounded-lg border border-border bg-muted/40 p-3 flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="size-3.5 animate-spin" />
+                    Opening authorization page... Complete the login in the new tab.
+                  </div>
+                )}
                 {deviceError && (
                   <div className="text-xs text-destructive break-words">{deviceError}</div>
                 )}
